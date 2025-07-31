@@ -17,7 +17,7 @@ from pathlib import Path
 from groq import Groq
 
 class BoilerplatePersistentGroq:
-    def __init__(self, api_key: str, project_name: str = None, api_base_url: str = "https://projects-api-production-e403.up.railway.app/api"):
+    def __init__(self, api_key: str, project_name: str = None, api_base_url: str = "http://165.22.42.162:8000/api"):
         self.client = Groq(api_key=api_key)
         self.model = "moonshotai/kimi-k2-instruct"
         self.conversation_history = []  # Store conversation messages
@@ -50,23 +50,24 @@ class BoilerplatePersistentGroq:
             if projects_response.status_code == 200:
                 existing_projects = projects_response.json().get('projects', [])
                 for project in existing_projects:
-                    if project['name'] == project_name:
+                    # VPS API uses 'id' field directly
+                    if project.get('id') == project_name or project.get('name') == project_name:
                         print(f"📂 Using existing project: {project_name} (ID: {project['id']})")
                         return project['id']
             
-            # Create new project
-            print(f"🔄 Creating new project via API: {project_name}")
+            # Create new project using VPS API format
+            print(f"🔄 Creating new project via VPS API: {project_name}")
             create_payload = {
-                "name": project_name,
-                "request": f"AI-generated boilerplate project: {project_name}",
-                "template": "shadcn-boilerplate"
+                "project_id": project_name,
+                "files": {}  # Empty files initially, will be populated by AI
             }
             
             response = requests.post(f"{self.api_base_url}/projects", json=create_payload)
             if response.status_code == 200:
                 project_data = response.json()
-                print(f"✅ Project created successfully via API")
-                return project_data['id']
+                print(f"✅ Project created successfully via VPS API")
+                # VPS API returns the project info with 'id' field
+                return project_data['project']['id']
             else:
                 raise Exception(f"API Error: {response.status_code} - {response.text}")
                 
@@ -77,8 +78,8 @@ class BoilerplatePersistentGroq:
     def _read_file_via_api(self, file_path: str) -> str:
         """Read file content via API"""
         try:
-            payload = {"file_path": file_path}
-            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/files/read", json=payload)
+            # VPS API uses GET with file path in URL
+            response = requests.get(f"{self.api_base_url}/projects/{self.project_id}/files/{file_path}")
             
             if response.status_code == 200:
                 return response.json().get('content', '')
@@ -92,8 +93,9 @@ class BoilerplatePersistentGroq:
     def _write_file_via_api(self, file_path: str, content: str) -> bool:
         """Write file content via API"""
         try:
-            payload = {"file_path": file_path, "content": content}
-            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/files/write", json=payload)
+            # VPS API uses PUT with file path in URL
+            payload = {"content": content}
+            response = requests.put(f"{self.api_base_url}/projects/{self.project_id}/files/{file_path}", json=payload)
             
             if response.status_code == 200:
                 return True
@@ -105,22 +107,11 @@ class BoilerplatePersistentGroq:
             return False
 
     def _execute_command_via_api(self, command: str, cwd: str = None) -> dict:
-        """Execute command via API"""
-        try:
-            payload = {"command": command}
-            if cwd:
-                payload["cwd"] = cwd
-                
-            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/command", json=payload)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"⚠️ Error executing command {command}: {response.status_code} - {response.text}")
-                return {"success": False, "error": f"API Error: {response.status_code}"}
-        except Exception as e:
-            print(f"⚠️ Error executing command {command} via API: {e}")
-            return {"success": False, "error": str(e)}
+        """Execute command via API - NOT SUPPORTED ON VPS"""
+        # VPS API doesn't support command execution for security
+        # Build/run commands are handled automatically by Docker containers
+        print(f"⚠️ Command execution not supported on VPS. Commands run automatically in containers.")
+        return {"success": False, "error": "Command execution not supported on VPS"}
     
     def _ensure_folder_structure(self):
         """Create proper folder structure for organized development"""
@@ -306,21 +297,22 @@ export function AppSidebar() {
         self.project_files = {}
         
         try:
-            # Get full file tree from API (path="" returns full tree)
-            payload = {"path": ""}
-            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/files/list", json=payload)
+            # VPS API uses GET to list files
+            response = requests.get(f"{self.api_base_url}/projects/{self.project_id}/files")
             
             if response.status_code == 200:
                 file_data = response.json()
                 files = file_data.get('files', [])
                 
-                for file_info in files:
-                    if file_info['type'] == 'file':
-                        self.project_files[file_info['path']] = {
-                            'path': file_info['path'],
-                            'name': file_info['name'],
-                            'size': file_info.get('size', 0),
-                            'type': file_info['type']
+                # VPS API returns list of file paths
+                for file_path in files:
+                    if isinstance(file_path, str):
+                        file_name = Path(file_path).name
+                        self.project_files[file_path] = {
+                            'path': file_path,
+                            'name': file_name,
+                            'size': 0,  # VPS API doesn't return size
+                            'type': 'file'
                         }
             else:
                 print(f"⚠️ Error scanning files via API: {response.status_code} - {response.text}")
@@ -490,134 +482,179 @@ export function AppSidebar() {
     def send_message(self, message: str, is_error_fix: bool = False) -> str:
         """Send message to model with full project context and conversation history"""
         
-        # Enhanced system prompt with bolt.diy style
-        system_prompt = f"""You are Bolt, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices.
+        # Structured system prompt for monorepo development
+        system_prompt = f"""You are Bolt, an expert full-stack developer specializing in creating production-ready applications.
 
-<system_constraints>
-  You are operating in a pre-configured React environment that emulates a complete development setup:
-  - Vite + React + TypeScript + Tailwind CSS fully configured
-  - shadcn/ui components library integrated with ALL components available (accordion, alert-dialog, alert, aspect-ratio, avatar, badge, breadcrumb, button, calendar, card, carousel, chart, checkbox, collapsible, command, context-menu, dialog, drawer, dropdown-menu, form, hover-card, input-otp, input, label, menubar, navigation-menu, pagination, popover, progress, radio-group, resizable, scroll-area, select, separator, sheet, sidebar, skeleton, slider, sonner, switch, table, tabs, textarea, toggle-group, toggle, tooltip)  
-  - React Router DOM for navigation with sidebar
-  - All npm packages work correctly
-  - Project runs locally with 'npm run dev'
-  
-  The environment supports all modern web development features.
-</system_constraints>
+## 1. PROJECT STRUCTURE
 
-<code_formatting_info>
-  Use 2 spaces for code indentation
-</code_formatting_info>
+You work in a MONOREPO with two directories:
+- **frontend/** - React + TypeScript + Vite + Tailwind CSS
+- **backend/** - FastAPI + Python
 
-<chain_of_thought_instructions>
-  Before providing a solution, create a DETAILED implementation plan in your artifact that includes:
-  1. Overall app architecture and navigation structure
-  2. Specific UI/UX design approach with Tailwind styling strategy
-  3. Component breakdown with detailed styling plans
-  4. Data flow and routing implementation
-  5. Interactive features and animations planned
-  
-  Focus heavily on creating exceptional UI design - this is critical for success.
-</chain_of_thought_instructions>
+## 2. FRONTEND GUIDELINES
 
-<artifact_info>
-  You create a comprehensive solution for each request. This includes:
-  - Files to create with their contents
-  - Components organized in proper folders
-  - Professional UI with production-ready design
-  
-  <artifact_instructions>
-    1. CRITICAL: Think HOLISTICALLY and create a complete, polished solution
-    2. Use proper folder structure:
-       - Page components → src/pages/ComponentName.tsx
-       - Reusable components → src/components/common/ComponentName.tsx
-       - Custom hooks → src/hooks/useHookName.ts
-       - Types → src/types/TypeName.ts
-       - Utils → src/lib/utilName.ts
-    3. Import patterns:
-       - shadcn/ui: import {{ Button }} from '@/components/ui/button'
-       - All shadcn/ui components follow the same pattern: @/components/ui/[component-name]
-       - Available imports: Accordion, AlertDialog, Alert, AspectRatio, Avatar, Badge, Breadcrumb, Button, Calendar, Card, Carousel, Chart, Checkbox, Collapsible, Command, ContextMenu, Dialog, Drawer, DropdownMenu, Form, HoverCard, InputOTP, Input, Label, Menubar, NavigationMenu, Pagination, Popover, Progress, RadioGroup, Resizable, ScrollArea, Select, Separator, Sheet, Sidebar, Skeleton, Slider, Sonner, Switch, Table, Tabs, Textarea, ToggleGroup, Toggle, Tooltip
-       - Icons: import {{ Home, BarChart3 }} from 'lucide-react'
-       - Routing: import {{ Link, useNavigate }} from 'react-router-dom'
-       - Utils: import {{ cn }} from '@/lib/utils'
-  </artifact_instructions>
+### Available Technology:
+- React 18, TypeScript, Vite, React Router DOM
+- Tailwind CSS (with advanced features: backdrop-blur, bg-gradient-to-br, ring effects)
+- shadcn/ui ALL components: accordion, alert-dialog, alert, aspect-ratio, avatar, badge, breadcrumb, button, calendar, card, carousel, chart, checkbox, collapsible, command, context-menu, dialog, drawer, dropdown-menu, form, hover-card, input-otp, input, label, menubar, navigation-menu, pagination, popover, progress, radio-group, resizable, scroll-area, select, separator, sheet, sidebar, skeleton, slider, sonner, switch, table, tabs, textarea, toggle-group, toggle, tooltip
+- Lucide React icons
+- React Router for navigation
 
-  <design_instructions>
-    CRITICAL: UI DESIGN IS THE TOP PRIORITY. PUT YOUR FULL EFFORT INTO CREATING THE BEST POSSIBLE DESIGN.
+### File Structure:
+```
+frontend/
+├── src/
+│   ├── pages/         → Page components
+│   ├── components/
+│   │   └── common/    → Reusable components
+│   ├── hooks/         → Custom hooks
+│   ├── types/         → TypeScript types
+│   └── lib/           → Utilities
+```
+
+### Import Patterns:
+- `import {{ Button }} from '@/components/ui/button'`
+- `import {{ Home, BarChart3, Settings }} from 'lucide-react'`
+- `import {{ Link, useNavigate }} from 'react-router-dom'`
+- `import {{ cn }} from '@/lib/utils'`
+
+### UI Design Requirements:
+1. **Create $100k+ quality interfaces** with premium aesthetics
+2. **Visual Excellence:**
+   - Sophisticated gradients and glassmorphism (backdrop-blur-sm bg-white/10)
+   - Multi-layered shadows (shadow-2xl, shadow-blue-500/25)
+   - Smooth micro-animations (transition-all duration-300 ease-in-out)
+   - Premium typography with careful hierarchy
+3. **Component Quality:**
+   - Cards: Gradients, hover:scale-105, glassmorphism effects
+   - Tables: Zebra striping, hover:bg-gray-50, sortable headers
+   - Buttons: Gradient backgrounds, loading states, hover effects
+   - Badges: Color-coded with animations
+4. **Rich Data:** ALWAYS realistic data, timestamps, avatars - NO placeholders
+5. **Responsive:** Use sm:, md:, lg:, xl: breakpoints
+6. **Interactions:** Hover states, loading spinners, modal dialogs, tooltips
+
+## 3. BACKEND GUIDELINES
+
+### Pre-configured Structure:
+```
+backend/
+├── app.py           → DO NOT MODIFY (pre-configured)
+├── requirements.txt → Add stable versions only
+├── services/        → Create API endpoints here
+│   └── __init__.py  → Auto-imports routers
+└── models/          → Create Pydantic models here
+```
+
+### Backend Rules:
+1. **NEVER modify backend/app.py** - it includes all routers automatically
+2. **CREATE services in backend/services/** - All endpoints go here
+3. **CREATE models in backend/models/** - Pydantic schemas only
+4. **ALL APIs automatically under /api prefix** - Don't add /api in routes
+
+### Service Creation Pattern:
+```python
+# backend/services/entity_service.py
+from fastapi import APIRouter, HTTPException
+from typing import List
+from models.entity_models import EntityCreate, EntityResponse
+
+router = APIRouter()
+
+@router.post("/entities", response_model=EntityResponse)
+async def create_entity(entity: EntityCreate):
+    # Business logic here
+    return EntityResponse(id="123", **entity.dict())
+
+@router.get("/entities", response_model=List[EntityResponse])
+async def list_entities():
+    return []
+
+@router.get("/entities/{{entity_id}}")
+async def get_entity(entity_id: str):
+    # Check if entity exists
+    # if not found:
+    #     raise HTTPException(status_code=404, detail="Entity not found")
+    return {{"id": entity_id}}
+```
+
+### Model Creation Pattern:
+```python
+# backend/models/entity_models.py
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+class EntityBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: str = Field(..., regex="^[\\w\\.]+@[\\w\\.]+$")
+
+class EntityCreate(EntityBase):
+    password: str = Field(..., min_length=8)
+
+class EntityResponse(EntityBase):
+    id: str
+    created_at: datetime
     
-    Overall Goal: Create visually stunning, unique, highly interactive, content-rich, and production-ready applications that look like they cost $100,000+ to develop.
+    class Config:
+        from_attributes = True
+```
 
-    Visual Identity & Branding:
-      - Establish distinctive premium visual design with modern aesthetics
-      - Use sophisticated color gradients and glass morphism effects
-      - Rich multi-layered shadows and lighting effects (shadow-2xl, shadow-blue-500/25)
-      - Premium typography with careful spacing and hierarchy
-      - Smooth micro-animations and transitions on every interactive element
-      - Modern spacing with generous padding and margins
+### Package Versions (STABLE ONLY):
+```
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+sqlalchemy==2.0.23
+httpx==0.25.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+```
 
-    Tailwind CSS Mastery:
-      - Use advanced Tailwind features: backdrop-blur, bg-gradient-to-br, ring effects
-      - Implement hover states, focus states, and active states on all interactive elements
-      - Use advanced layout techniques: grid-cols-auto-fit, aspect-ratio, sticky positioning
-      - Apply proper responsive design with sm:, md:, lg:, xl: breakpoints
-      - Utilize Tailwind's color palette strategically with opacity modifiers
-      - Implement smooth transitions with duration-300, ease-in-out
+### services/__init__.py Pattern:
+```python
+from fastapi import APIRouter
+api_router = APIRouter()
 
-    Professional Components:
-      - Cards: Multi-layered with gradients, glassmorphism, hover effects, and subtle animations
-      - Tables: Beautiful zebra striping, hover rows, sortable headers, action buttons with tooltips
-      - Headers: Bold gradient titles, animated subtitles, breadcrumbs with hover effects
-      - Stats: Animated counter numbers, gradient progress bars, trend indicators with colors
-      - Badges: Beautiful color-coded statuses with proper contrast and animations
-      - Buttons: Gradient backgrounds, hover effects, loading states, disabled states
+# Auto-import all service routers
+try:
+    from .user_service import router as user_router
+    api_router.include_router(user_router, tags=["users"])
+except ImportError:
+    pass
+```
 
-    Content & Data:
-      - ALWAYS include rich, realistic data - absolutely NO placeholders
-      - Use diverse, professional data that tells a story
-      - Include timestamps, user activity, growth metrics, performance indicators
-      - Add user avatars, profile pictures, and rich media content
-      - Implement loading states and empty states with beautiful illustrations
+## 4. RESPONSE FORMAT
 
-    Interactive Features:
-      - Clickable table rows with navigation
-      - Hover effects on all interactive elements
-      - Loading spinners and skeleton screens
-      - Modal dialogs and slide-out panels
-      - Search and filter functionality with smooth animations
-      - Drag and drop where appropriate
+Use these XML tags in your response:
+```xml
+<artifact type="text" title="Implementation Plan">
+  Plan details...
+</artifact>
 
-    Technical Excellence:
-      - Semantic HTML with proper ARIA labels and accessibility
-      - Responsive design that works perfectly on all screen sizes
-      - Performance optimized React patterns with proper key props
-      - Type-safe TypeScript throughout with proper interfaces
-      - Smooth animations using Tailwind transitions and transforms
-  </design_instructions>
-</artifact_info>
+<action type="file" filePath="frontend/src/pages/Dashboard.tsx">
+  File content...
+</action>
 
-IMPORTANT: For all designs, make them beautiful and production-ready. Create applications that look like they cost $100,000+ to develop.
+<action type="route" path="/dashboard" component="Dashboard" icon="BarChart3" label="Dashboard" group="Overview"/>
+```
 
-ULTRA IMPORTANT: Do NOT be verbose. Think first and reply with complete implementations.
+## 5. PROTECTED FILES (NEVER MODIFY)
 
-⚠️ ABSOLUTELY FORBIDDEN - DO NOT UNDER ANY CIRCUMSTANCES:
-- Replace or modify src/App.tsx (it has working router setup) 
-- Replace or modify src/components/app-sidebar.tsx (it has working navigation)
-- Modify package.json, vite.config.ts, tsconfig.json, or ANY configuration files
-- Create or modify package.json file - IT IS PERFECTLY CONFIGURED
-- Add any <action type="file" filePath="package.json">
-- Add any <action type="file" filePath="vite.config.ts">
-- Add any <action type="file" filePath="tsconfig.json">
-- Add any <action type="file" filePath="src/App.tsx">
-- Add any <action type="file" filePath="src/components/app-sidebar.tsx">
-- Change the navigation structure
-- Remove existing styling or animations
-- Put pages in wrong folders
+- frontend/src/App.tsx
+- frontend/src/components/app-sidebar.tsx  
+- backend/app.py
+- Any config files (package.json, vite.config.ts, etc.)
 
-🚨 CRITICAL WARNING: 
-- The project has pre-installed dependencies. DO NOT modify package.json or any config files!
-- The App.tsx and app-sidebar.tsx are perfectly configured. DO NOT modify them!
-- ONLY create the feature pages and components the user requested!
-- Use ONLY the <action type="route"> to add navigation - DO NOT modify sidebar directly!
+## 6. KEY RULES
+
+1. Create complete solutions (frontend + backend)
+2. Follow exact file paths (frontend/... or backend/...)
+3. Design exceptional UIs with premium quality
+4. Use stable package versions (not latest)
+5. Think before implementing
+6. Be concise in explanations
 
 CURRENT PROJECT:
 {self.get_project_context()}
@@ -966,6 +1003,26 @@ Focus on intelligently extending the existing boilerplate with proper organizati
         
         return content.strip()
 
+    def start_preview_and_get_url(self) -> str:
+        """Start the project preview and return the URL"""
+        try:
+            # Start the preview
+            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/start-preview")
+            if response.status_code == 200:
+                preview_data = response.json()
+                port = preview_data.get('port', 3001)
+                # Return the actual VPS IP with the port
+                preview_url = f"http://165.22.42.162:{port}"
+                print(f"🚀 Preview started on port {port}")
+                print(f"🌐 Access your project at: {preview_url}")
+                return preview_url
+            else:
+                print(f"❌ Error starting preview: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Error starting preview: {e}")
+            return None
+
     def _check_and_install_dependencies(self):
         """Scan project files and add missing dependencies to package.json"""
         try:
@@ -1053,70 +1110,12 @@ Focus on intelligently extending the existing boilerplate with proper organizati
             print(f"⚠️ Error checking dependencies: {e}")
 
     def check_build_errors(self) -> str:
-        """Build the project and return only actual errors (not warnings)"""
-        try:
-            print("🔨 Building project to check for errors...")
-            
-            # Execute build command via API
-            result = self._execute_command_via_api('npm run build')
-            
-            if result.get('success', False):
-                print("✅ Build successful - no errors found")
-                return None
-            else:
-                full_output = result.get('error', '') or result.get('output', '')
-                
-                # Filter only CRITICAL errors - exclude warnings and minor TypeScript issues
-                error_lines = []
-                for line in full_output.split('\n'):
-                    if ': error ' in line and not line.strip().startswith('×'):
-                        # Only include critical errors, exclude common TypeScript warnings
-                        exclude_patterns = [
-                            'TS6133:', # unused variable
-                            'TS2339:', # property does not exist (often false positives)
-                            'TS2305:', # module has no exported member (import issues)
-                            'TS2307:', # cannot find module (missing dependencies)
-                            'TS1484:', # type import issues
-                            'TS7006:', # implicit any type
-                            'TS7031:', # binding element implicitly has any type
-                            'TS2552:', # cannot find name (component issues)
-                            'TS2604:', # JSX element type issues
-                            'TS2786:', # JSX component issues
-                            'is declared but its value is never read',
-                            'implicitly has an',
-                            'does not provide an export named',
-                        ]
-                        
-                        # Only add line if it doesn't match any exclude pattern
-                        should_exclude = any(pattern in line for pattern in exclude_patterns)
-                        if not should_exclude:
-                            # Only include truly critical errors like undefined variables, syntax errors
-                            critical_patterns = [
-                                'TS2304:', # Cannot find name (undefined variables)
-                                'TS1005:', # Syntax errors
-                                'TS1109:', # Expression expected
-                                'TS2322:', # Type assignment errors (critical ones)
-                                'SyntaxError',
-                                'ReferenceError',
-                                'Cannot redeclare',
-                                'Duplicate identifier',
-                            ]
-                            if any(pattern in line for pattern in critical_patterns):
-                                error_lines.append(line.strip())
-                
-                if not error_lines:
-                    print("✅ Build completed - only warnings found, no actual errors")
-                    return None
-                
-                filtered_errors = '\n'.join(error_lines)
-                print(f"❌ Build failed with {len(error_lines)} actual errors:")
-                print(filtered_errors)
-                return filtered_errors
-                
-        except Exception as e:
-            error_msg = f"Build error: {str(e)}"
-            print(f"❌ {error_msg}")
-            return error_msg
+        """Build checking not needed for VPS - containers handle build automatically"""
+        # VPS runs npm install and npm run dev automatically in Docker containers
+        # Build errors will be visible in container logs if any
+        print("ℹ️  Build checking skipped - VPS containers handle builds automatically")
+        print("💡 Any build errors will appear in the preview logs")
+        return None
 
 def main():
     """Demo the enhanced boilerplate persistent system"""
@@ -1141,7 +1140,7 @@ def main():
     
     # Demo requests
     requests = [
-        "Create a comprehensive client management system for my consulting business. I need to track leads, manage ongoing projects, send invoices, and maintain client communication history. Core features: Lead pipeline with stages (prospect → qualified → proposal → won/lost), project tracking with time logging and milestone management, invoice generation with payment status tracking, client contact database with communication logs, automated follow-up reminders, and financial dashboard showing revenue, outstanding payments, and project profitability. Include search and filtering capabilities, bulk actions for emails, and export functionality for reports. Make it professional with a clean dashboard that gives me quick insights into my business health."
+        "Create a task management app where I can add, edit, and delete tasks. Each task should have a title, description, due date, and priority level. Show all tasks in a nice list with the ability to mark them as completed."
     ]
     
     for i, request in enumerate(requests, 1):
@@ -1258,6 +1257,19 @@ Please analyze the errors and provide the necessary fixes. Update the existing f
                 print("\n📁 Updated Structure:")
                 for line in structure_lines[1:]:  # Skip the header
                     print(line)
+    
+    # After all requests are processed, start the preview
+    print(f"\n{'='*60}")
+    print("🚀 STARTING PROJECT PREVIEW")
+    print("="*60)
+    
+    preview_url = system.start_preview_and_get_url()
+    if preview_url:
+        print(f"\n✅ PROJECT READY!")
+        print(f"🌐 View your project at: {preview_url}")
+        print(f"💡 The preview server is running. You can make changes and see them live!")
+    else:
+        print(f"\n❌ Failed to start preview. Please check the logs.")
 
 if __name__ == "__main__":
     main()
