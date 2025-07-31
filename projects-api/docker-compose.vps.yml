@@ -4,16 +4,15 @@ services:
   projects-api:
     build: .
     ports:
-      - "8000:8000"    # API port
-      - "3001-3999:3001-3999"  # Project preview ports
+      - '8000:8000' # API port
     volumes:
       - /opt/codebase-platform/projects:/opt/codebase-platform/projects
       - /opt/codebase-platform/archives:/opt/codebase-platform/archives
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker
+      - /var/run/docker.sock:/var/run/docker.sock # Docker-in-Docker
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
     restart: unless-stopped
-    privileged: true  # Required for Docker-in-Docker
+    privileged: true # Required for Docker-in-Docker
 
 volumes:
   projects_data:
