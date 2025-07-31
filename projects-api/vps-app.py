@@ -38,7 +38,7 @@ class VPSProjectManager:
     def __init__(self):
         global docker_client
         if docker_client is None:
-            docker_client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
+            docker_client = docker.from_env()  # This works now with socket permissions fixed
         self.containers: Dict[str, Dict] = {}
         self.port_pool = list(range(3001, 3999))  # Reserve 3000 for API
         self.used_ports = set()
