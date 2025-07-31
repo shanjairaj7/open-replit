@@ -1,0 +1,13 @@
+{
+  "id": "251720a7-0bac-453f-9646-d8d079ac707b",
+  "name": "my-dashboard",
+  "path": "/app/projects/my-dashboard",
+  "status": "created",
+  "created_at": "2025-07-30T12:17:37.228707",
+  "updated_at": "2025-07-30T12:17:37.228714",
+  "request": "Create a modern analytics dashboard with charts and metrics",
+  "template": "shadcn-boilerplate",
+  "port": null,
+  "build_output": null,
+  "error": null
+}

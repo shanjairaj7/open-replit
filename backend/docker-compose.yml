@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  boilerplate-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for development hot reloading
+      - ./app:/app/app
+      - ./boilerplate:/app/boilerplate
+      - ./projects:/app/projects
+      - ./workspace:/app/workspace
+      # Mount Python scripts
+      - ./test_groq_boilerplate_persistent.py:/app/test_groq_boilerplate_persistent.py
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - NODE_ENV=development
+      - WORKSPACE_PATH=/app/workspace
+      - BOILERPLATE_PATH=/app/boilerplate
+      - PROJECTS_PATH=/app/projects
+      - DEBUG=true
+    networks:
+      - boilerplate-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  boilerplate-network:
+    driver: bridge
+
+volumes:
+  node_modules:
+  workspace_data:
+  projects_data:

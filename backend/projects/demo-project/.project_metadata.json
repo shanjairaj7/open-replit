@@ -1,0 +1,13 @@
+{
+  "id": "c990c016-308b-4a24-bd97-b117dbb7a7cf",
+  "name": "demo-project",
+  "path": "/app/projects/demo-project",
+  "status": "created",
+  "created_at": "2025-07-30T12:24:26.364556",
+  "updated_at": "2025-07-30T12:30:52.804409",
+  "request": "Create a client management dashboard with customer CRUD operations",
+  "template": "shadcn-boilerplate",
+  "port": null,
+  "build_output": null,
+  "error": null
+}

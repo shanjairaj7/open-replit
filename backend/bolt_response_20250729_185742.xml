@@ -1,0 +1,540 @@
+<artifact id="analytics-dashboard" title="Analytics Dashboard">
+<action type="file" filePath="package.json">
+{
+  "name": "analytics-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "@types/jest": "^27.5.2",
+    "@types/node": "^16.18.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.8.0",
+    "lucide-react": "^0.292.0",
+    "typescript": "^4.9.5",
+    "web-vitals": "^2.1.4"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.3.6",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.32"
+  }
+}
+</action>
+
+<action type="file" filePath="tailwind.config.js">
+module.exports = {
+  content: [
+    "./src/**/*.{js,jsx,ts,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: '#3b82f6',
+        secondary: '#1e293b',
+        accent: '#06b6d4',
+        muted: '#64748b'
+      },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif']
+      }
+    },
+  },
+  plugins: [],
+}
+</action>
+
+<action type="file" filePath="postcss.config.js">
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+</action>
+
+<action type="file" filePath="src/index.css">
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+@layer base {
+  body {
+    @apply bg-gray-50 font-sans;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-6;
+  }
+}
+</action>
+
+<action type="file" filePath="src/types/dashboard.ts">
+export interface RevenueData {
+  month: string;
+  revenue: number;
+  profit: number;
+}
+
+export interface UserData {
+  date: string;
+  active: number;
+  new: number;
+}
+
+export interface SalesData {
+  product: string;
+  sales: number;
+  revenue: number;
+}
+
+export interface MetricCard {
+  title: string;
+  value: string;
+  change: string;
+  isPositive: boolean;
+  icon: string;
+}
+</action>
+
+<action type="file" filePath="src/data/mockData.ts">
+import { RevenueData, UserData, SalesData } from '../types/dashboard';
+
+export const revenueData: RevenueData[] = [
+  { month: 'Jan', revenue: 45000, profit: 12000 },
+  { month: 'Feb', revenue: 52000, profit: 15000 },
+  { month: 'Mar', revenue: 48000, profit: 13500 },
+  { month: 'Apr', revenue: 61000, profit: 18000 },
+  { month: 'May', revenue: 55000, profit: 16000 },
+  { month: 'Jun', revenue: 67000, profit: 21000 },
+  { month: 'Jul', revenue: 71000, profit: 23000 },
+  { month: 'Aug', revenue: 65000, profit: 19000 },
+  { month: 'Sep', revenue: 78000, profit: 25000 },
+  { month: 'Oct', revenue: 82000, profit: 27000 },
+  { month: 'Nov', revenue: 89000, profit: 30000 },
+  { month: 'Dec', revenue: 95000, profit: 32000 },
+];
+
+export const userData: UserData[] = [
+  { date: 'Mon', active: 1200, new: 78 },
+  { date: 'Tue', active: 1350, new: 92 },
+  { date: 'Wed', active: 1400, new: 105 },
+  { date: 'Thu', active: 1500, new: 89 },
+  { date: 'Fri', active: 1650, new: 124 },
+  { date: 'Sat', active: 1800, new: 156 },
+  { date: 'Sun', active: 1750, new: 134 },
+];
+
+export const salesData: SalesData[] = [
+  { product: 'Product A', sales: 245, revenue: 24500 },
+  { product: 'Product B', sales: 198, revenue: 19800 },
+  { product: 'Product C', sales: 320, revenue: 32000 },
+  { product: 'Product D', sales: 156, revenue: 15600 },
+  { product: 'Product E', sales: 189, revenue: 18900 },
+];
+
+export const metrics = [
+  {
+    title: 'Total Revenue',
+    value: '$890,450',
+    change: '+12.5%',
+    isPositive: true,
+    icon: 'dollar-sign',
+  },
+  {
+    title: 'Active Users',
+    value: '15,234',
+    change: '+8.2%',
+    isPositive: true,
+    icon: 'users',
+  },
+  {
+    title: 'Total Sales',
+    value: '1,234',
+    change: '-3.1%',
+    isPositive: false,
+    icon: 'shopping-cart',
+  },
+  {
+    title: 'Conversion Rate',
+    value: '3.24%',
+    change: '+0.8%',
+    isPositive: true,
+    icon: 'trending-up',
+  },
+];
+</action>
+
+<action type="file" filePath="src/components/MetricCard.tsx">
+import React from 'react';
+import { TrendingUp, TrendingDown, DollarSign, Users, ShoppingCart, Activity } from 'lucide-react';
+
+interface MetricCardProps {
+  title: string;
+  value: string;
+  change: string;
+  isPositive: boolean;
+  icon: string;
+}
+
+const MetricCard: React.FC<MetricCardProps> = ({ title, value, change, isPositive, icon }) => {
+  const getIcon = () => {
+    switch (icon) {
+      case 'dollar-sign':
+        return <DollarSign className="w-5 h-5" />;
+      case 'users':
+        return <Users className="w-5 h-5" />;
+      case 'shopping-cart':
+        return <ShoppingCart className="w-5 h-5" />;
+      case 'trending-up':
+        return <Activity className="w-5 h-5" />;
+      default:
+        return <Activity className="w-5 h-5" />;
+    }
+  };
+
+  return (
+    <div className="card hover:shadow-lg transition-shadow duration-300">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-gray-600">{title}</p>
+          <p className="text-2xl font-bold text-gray-900 mt-1">{value}</p>
+          <div className="flex items-center mt-2">
+            {isPositive ? (
+              <TrendingUp className="w-4 h-4 text-green-500" />
+            ) : (
+              <TrendingDown className="w-4 h-4 text-red-500" />
+            )}
+            <span
+              className={`text-sm font-medium ml-1 ${
+                isPositive ? 'text-green-600' : 'text-red-600'
+              }`}
+            >
+              {change}
+            </span>
+            <span className="text-sm text-gray-500 ml-1">vs last month</span>
+          </div>
+        </div>
+        <div className="p-3 bg-blue-50 rounded-lg">
+          <div className="text-blue-600">{getIcon()}</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default MetricCard;
+</action>
+
+<action type="file" filePath="src/components/RevenueChart.tsx">
+import React from 'react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts';
+import { RevenueData } from '../types/dashboard';
+
+interface RevenueChartProps {
+  data: RevenueData[];
+}
+
+const RevenueChart: React.FC<RevenueChartProps> = ({ data }) => {
+  return (
+    <div className="card">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">Revenue & Profit Trends</h3>
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <XAxis 
+            dataKey="month" 
+            stroke="#6b7280"
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis 
+            stroke="#6b7280"
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={(value) => `$${value / 1000}k`}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: 'white',
+              border: '1px solid #e5e7eb',
+              borderRadius: '8px',
+              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+            }}
+          />
+          <Legend />
+          <Line
+            type="monotone"
+            dataKey="revenue"
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dot={{ fill: '#3b82f6', strokeWidth: 2, r: 4 }}
+            activeDot={{ r: 6 }}
+            name="Revenue"
+          />
+          <Line
+            type="monotone"
+            dataKey="profit"
+            stroke="#06b6d4"
+            strokeWidth={2}
+            dot={{ fill: '#06b6d4', strokeWidth: 2, r: 4 }}
+            activeDot={{ r: 6 }}
+            name="Profit"
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+export default RevenueChart;
+</action>
+
+<action type="file" filePath="src/components/UserActivityChart.tsx">
+import React from 'react';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts';
+import { UserData } from '../types/dashboard';
+
+interface UserActivityChartProps {
+  data: UserData[];
+}
+
+const UserActivityChart: React.FC<UserActivityChartProps> = ({ data }) => {
+  return (
+    <div className="card">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">User Activity</h3>
+      <ResponsiveContainer width="100%" height={300}>
+        <BarChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <XAxis 
+            dataKey="date" 
+            stroke="#6b7280"
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis 
+            stroke="#6b7280"
+            fontSize={12}
+            tickLine={false}
+            axisLine={false}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: 'white',
+              border: '1px solid #e5e7eb',
+              borderRadius: '8px',
+              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+            }}
+          />
+          <Legend />
+          <Bar 
+            dataKey="active" 
+            fill="#3b82f6" 
+            name="Active Users"
+            radius={[4, 4, 0, 0]}
+          />
+          <Bar 
+            dataKey="new" 
+            fill="#06b6d4" 
+            name="New Users"
+            radius={[4, 4, 0, 0]}
+          />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+export default UserActivityChart;
+</action>
+
+<action type="file" filePath="src/components/SalesDistributionChart.tsx">
+import React from 'react';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts';
+import { SalesData } from '../types/dashboard';
+
+interface SalesDistributionChartProps {
+  data: SalesData[];
+}
+
+const COLORS = ['#3b82f6', '#06b6d4', '#8b5cf6', '#f59e0b', '#ef4444'];
+
+const SalesDistributionChart: React.FC<SalesDistributionChartProps> = ({ data }) => {
+  return (
+    <div className="card">
+      <h3 className="text-lg font-semibold text-gray-900 mb-4">Sales Distribution</h3>
+      <ResponsiveContainer width="100%" height={300}>
+        <PieChart>
+          <Pie
+            data={data}
+            cx="50%"
+            cy="50%"
+            labelLine={false}
+            label={({ product, percent }) => `${product} ${(percent * 100).toFixed(0)}%`}
+            outerRadius={80}
+            fill="#8884d8"
+            dataKey="revenue"
+          >
+            {data.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip
+            contentStyle={{
+              backgroundColor: 'white',
+              border: '1px solid #e5e7eb',
+              borderRadius: '8px',
+              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+            }}
+            formatter={(value: number) => [`$${value.toLocaleString()}`, 'Revenue']}
+          />
+          <Legend />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+export default SalesDistributionChart;
+</action>
+
+<action type="file" filePath="src/components/DashboardHeader.tsx">
+import React from 'react';
+import { Calendar, Download } from 'lucide-react';
+
+const DashboardHeader: React.FC = () => {
+  return (
+    <div className="mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Analytics Dashboard</h1>
+          <p className="text-gray-600 mt-1">Welcome back! Here's what's happening with your business today.</p>
+        </div>
+        <div className="flex items-center space-x-3 mt-4 sm:mt-0">
+          <button className="flex items-center px-4 py-2 bg-white border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50">
+            <Calendar className="w-4 h-4 mr-2" />
+            Last 30 days
+          </button>
+          <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg shadow-sm text-sm font-medium hover:bg-blue-700">
+            <Download className="w-4 h-4 mr-2" />
+            Export
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default DashboardHeader;
+</action>
+
+<action type="file" filePath="src/App.tsx">
+import React from 'react';
+import DashboardHeader from './components/DashboardHeader';
+import MetricCard from './components/MetricCard';
+import RevenueChart from './components/RevenueChart';
+import UserActivityChart from './components/UserActivityChart';
+import SalesDistributionChart from './components/SalesDistributionChart';
+import { metrics, revenueData, userData, salesData } from './data/mockData';
+
+function App() {
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <DashboardHeader />
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          {metrics.map((metric, index) => (
+            <MetricCard
+              key={index}
+              title={metric.title}
+              value={metric.value}
+              change={metric.change}
+              isPositive={metric.isPositive}
+              icon={metric.icon}
+            />
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <RevenueChart data={revenueData} />
+          <UserActivityChart data={userData} />
+        </div>
+
+        <div className="grid grid-cols-1">
+          <SalesDistributionChart data={salesData} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+</action>
+
+<action type="shell">npm install recharts lucide-react tailwindcss autoprefixer postcss</action>
+
+<action type="shell">npx tailwindcss init -p</action>
+
+<action type="start">npm start</action>
+</artifact>
