@@ -26,7 +26,8 @@ docker_client = None
 # VPS Configuration - PERSISTENT STORAGE
 VPS_BASE_PATH = Path("/opt/codebase-platform")
 VPS_PROJECTS_PATH = VPS_BASE_PATH / "projects"
-VPS_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "shadcn-boilerplate"
+VPS_FRONTEND_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "shadcn-boilerplate"
+VPS_BACKEND_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "backend-boilerplate"
 
 # Ensure directories exist
 VPS_BASE_PATH.mkdir(parents=True, exist_ok=True)
@@ -56,23 +57,43 @@ class VPSProjectManager:
         self.used_ports.discard(port)
     
     async def create_project(self, project_id: str, files: Dict[str, str]) -> Dict:
-        """Create new project from boilerplate with modifications"""
+        """Create new monorepo project with frontend/ and backend/ folders"""
         project_path = VPS_PROJECTS_PATH / project_id
         
         # Remove existing project if exists
         if project_path.exists():
             shutil.rmtree(project_path)
         
-        # Copy boilerplate
-        if not VPS_BOILERPLATE_PATH.exists():
-            raise HTTPException(500, f"Boilerplate not found at {VPS_BOILERPLATE_PATH}")
+        # Create project directory
+        project_path.mkdir(parents=True, exist_ok=True)
         
-        shutil.copytree(VPS_BOILERPLATE_PATH, project_path)
-        logger.info(f"Copied boilerplate to {project_path}")
+        # Check boilerplates exist
+        if not VPS_FRONTEND_BOILERPLATE_PATH.exists():
+            raise HTTPException(500, f"Frontend boilerplate not found at {VPS_FRONTEND_BOILERPLATE_PATH}")
+        if not VPS_BACKEND_BOILERPLATE_PATH.exists():
+            raise HTTPException(500, f"Backend boilerplate not found at {VPS_BACKEND_BOILERPLATE_PATH}")
         
-        # Apply file modifications
+        # Copy frontend boilerplate to frontend/ folder
+        frontend_path = project_path / "frontend"
+        shutil.copytree(VPS_FRONTEND_BOILERPLATE_PATH, frontend_path)
+        logger.info(f"Copied frontend boilerplate to {frontend_path}")
+        
+        # Copy backend boilerplate to backend/ folder
+        backend_path = project_path / "backend"
+        shutil.copytree(VPS_BACKEND_BOILERPLATE_PATH, backend_path)
+        logger.info(f"Copied backend boilerplate to {backend_path}")
+        
+        # Apply file modifications (determine which folder based on path)
         for file_path, content in files.items():
-            full_path = project_path / file_path
+            # Determine if file belongs to frontend or backend
+            if file_path.startswith("backend/"):
+                full_path = project_path / file_path
+            elif file_path.startswith("frontend/"):
+                full_path = project_path / file_path
+            else:
+                # Default to frontend for backwards compatibility
+                full_path = project_path / "frontend" / file_path
+            
             full_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Write file content
@@ -85,7 +106,12 @@ class VPSProjectManager:
             "id": project_id,
             "path": str(project_path),
             "created_at": datetime.now().isoformat(),
-            "status": "created"
+            "status": "created",
+            "type": "monorepo",
+            "structure": {
+                "frontend": str(frontend_path),
+                "backend": str(backend_path)
+            }
         }
         
         with open(project_path / ".project_metadata.json", 'w') as f:
@@ -270,10 +296,14 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("VPS Projects API starting up...")
     
-    # Check if boilerplate exists
-    if not VPS_BOILERPLATE_PATH.exists():
-        logger.warning(f"Boilerplate not found at {VPS_BOILERPLATE_PATH}")
-        logger.info("Please ensure boilerplate is deployed to VPS")
+    # Check if boilerplates exist
+    if not VPS_FRONTEND_BOILERPLATE_PATH.exists():
+        logger.warning(f"Frontend boilerplate not found at {VPS_FRONTEND_BOILERPLATE_PATH}")
+    if not VPS_BACKEND_BOILERPLATE_PATH.exists():
+        logger.warning(f"Backend boilerplate not found at {VPS_BACKEND_BOILERPLATE_PATH}")
+    
+    if not VPS_FRONTEND_BOILERPLATE_PATH.exists() or not VPS_BACKEND_BOILERPLATE_PATH.exists():
+        logger.info("Please ensure boilerplates are deployed to VPS")
     
     yield
     
@@ -307,8 +337,10 @@ def read_root():
         "message": "VPS Projects API", 
         "status": "running",
         "storage": str(VPS_PROJECTS_PATH),
-        "boilerplate": str(VPS_BOILERPLATE_PATH),
-        "boilerplate_exists": VPS_BOILERPLATE_PATH.exists(),
+        "frontend_boilerplate": str(VPS_FRONTEND_BOILERPLATE_PATH),
+        "backend_boilerplate": str(VPS_BACKEND_BOILERPLATE_PATH),
+        "frontend_boilerplate_exists": VPS_FRONTEND_BOILERPLATE_PATH.exists(),
+        "backend_boilerplate_exists": VPS_BACKEND_BOILERPLATE_PATH.exists(),
         "docker_available": True,
         "node_version": "Available in containers"
     }
