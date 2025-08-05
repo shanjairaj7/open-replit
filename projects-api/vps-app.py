@@ -463,7 +463,7 @@ class VPSProjectManager:
                 # First try local TypeScript installation
                 ts_check_status["executed"] = True
                 exec_result = frontend_container.exec_run(
-                    "sh -c 'npx tsc --noEmit'",
+                    "sh -c 'node_modules/.bin/tsc -p tsconfig.app.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo'",
                     workdir="/app"
                 )
                 
