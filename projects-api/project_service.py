@@ -331,7 +331,7 @@ class ProjectService:
                 cwd=str(work_dir),
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout
+                timeout=30  # 30 second timeout
             )
             
             # Update project timestamp

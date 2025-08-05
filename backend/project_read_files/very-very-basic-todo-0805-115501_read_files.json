@@ -1,0 +1,11 @@
+{
+  "project_id": "very-very-basic-todo-0805-115501",
+  "created_at": "2025-08-05T11:56:51.096140",
+  "last_updated": "2025-08-05T11:56:51.096160",
+  "read_files": [
+    "backend/services/todo_service.py",
+    "backend/test_todo_service.py",
+    "backend/models/todo.py"
+  ],
+  "total_files_read": 3
+}

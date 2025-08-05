@@ -256,7 +256,7 @@ def execute_command(project_id: str, command: str, cwd: str = None) -> CommandRe
             cwd=str(work_dir),
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=30
         )
         
         return CommandResponse(

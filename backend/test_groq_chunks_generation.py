@@ -13,6 +13,7 @@ import json
 import shutil
 import requests
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from groq import Groq
@@ -63,7 +64,30 @@ class StreamingXMLParser:
         
         # Look for complete action tags
         while True:
-            # Find opening action tag
+            # First check for self-closing tags (like route actions)
+            self_closing_match = re.search(r'<action\s+([^>]+)/>', self.buffer)
+            if self_closing_match:
+                # Extract attributes from self-closing tag
+                attrs = self._parse_attributes(self_closing_match.group(1))
+                
+                # Yield complete action (no content for self-closing tags)
+                yield {
+                    'type': attrs.get('type'),
+                    'filePath': attrs.get('filePath'),
+                    'path': attrs.get('path'),
+                    'component': attrs.get('component'),
+                    'icon': attrs.get('icon'),
+                    'label': attrs.get('label'),
+                    'group': attrs.get('group'),
+                    'content': '',
+                    'raw_attrs': attrs
+                }
+                
+                # Remove processed part from buffer
+                self.buffer = self.buffer[self_closing_match.end():]
+                continue
+            
+            # Then check for regular opening/closing tags
             start_match = re.search(r'<action\s+([^>]+)>', self.buffer)
             if not start_match:
                 break
@@ -88,6 +112,9 @@ class StreamingXMLParser:
                 'filePath': attrs.get('filePath'),
                 'path': attrs.get('path'),
                 'component': attrs.get('component'),
+                'icon': attrs.get('icon'),
+                'label': attrs.get('label'),
+                'group': attrs.get('group'),
                 'content': content,
                 'raw_attrs': attrs
             }
@@ -118,8 +145,24 @@ class BoilerplatePersistentGroq:
         self.project_files = {}
         self._scan_project_files_via_api()
         
+        # Load system prompt from file (after project setup)
+        self.system_prompt = self._load_system_prompt()
+        
         print(f"✅ Project initialized via API: {self.project_name} (ID: {self.project_id})")
         print(f"📁 Total files: {len(self.project_files)}")
+    
+    def _load_system_prompt(self) -> str:
+        """Load system prompt from file with project context"""
+        prompt_file = Path(__file__).parent / "SYSTEM_PROMPT.md"
+        if prompt_file.exists():
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                base_prompt = f.read()
+        else:
+            # Fallback to basic prompt if file not found
+            base_prompt = "You are Bolt, an expert full-stack developer."
+        
+        # Add current project context
+        return base_prompt + f"\n\nCURRENT PROJECT:\n{self.get_project_context()}"
 
     def _setup_project_via_api(self, project_name: str) -> str:
         """Create project via API"""
@@ -557,6 +600,476 @@ export function AppSidebar() {
             print(f"⚠️ Could not read route groups from sidebar: {e}")
         
         return route_groups
+
+    def send_message_with_chunks(self, message: str) -> str:
+        """Enhanced message handling with planning and step-by-step generation"""
+        
+        # Step 1: Generate implementation plan
+        print("🎯 Phase 1: Generating implementation plan...")
+        plan_xml = self._generate_plan(message)
+        
+        if not plan_xml:
+            print("❌ Failed to generate plan")
+            return "Failed to generate implementation plan"
+        
+        # Save raw plan for debugging
+        self._last_plan_response = plan_xml
+        
+        # Step 2: Parse plan and extract implementation steps
+        print("📋 Phase 2: Parsing implementation plan...")
+        steps = self._parse_plan_xml(plan_xml)
+        
+        if not steps:
+            print("❌ Failed to parse plan into implementation steps")
+            return "Failed to parse implementation plan"
+        
+        print(f"✅ Plan parsed successfully: {len(steps)} implementation steps identified")
+        
+        # Step 3: Generate files for each step
+        print("🔨 Phase 3: Implementing files step by step...")
+        for i, step in enumerate(steps, 1):
+            print(f"🔄 Step {i}/{len(steps)}: {step['name']}")
+            success = self._generate_step(step, steps[:i-1])
+            
+            if not success:
+                print(f"❌ Failed to implement step {i}: {step['name']}")
+                return f"Failed to implement: {step['name']}"
+            
+            print(f"✅ Step {i} completed: {step['name']}")
+        
+        print("🎉 All files generated successfully!")
+        return f"Project generated successfully in {len(steps)} steps"
+
+    def _generate_plan(self, user_request: str) -> str:
+        """Generate detailed implementation plan in XML format"""
+        
+        # Update system prompt with current project context
+        current_system_prompt = self._load_system_prompt()
+        
+        planning_prompt = f"""Based on the following user request, create a detailed implementation plan:
+
+"{user_request}"
+
+**CRITICAL PLANNING INSTRUCTIONS:**
+
+1. First, create a comprehensive implementation plan following the guidelines in your system prompt
+2. Break the implementation into logical steps (each step creates 3-6 related files)
+3. Order steps by dependencies (backend first, then frontend)
+4. Output your plan in XML format exactly as shown below
+
+IMPORTANT: For any paths containing curly braces like /tasks/{{id}}, write them as /tasks/[id] to avoid XML parsing issues. I will convert [id] back to {{id}} when processing.
+
+<plan>
+  <overview>Brief description of what you'll build</overview>
+  
+  <steps>
+    <step id="1" name="Backend API Structure" priority="high" dependencies="">
+      <description>Set up FastAPI backend with models and endpoints</description>
+      <files>
+        <file path="backend/main.py">FastAPI app setup and main router</file>
+        <file path="backend/models/user.py">User data models</file>
+        <file path="backend/routes/auth.py">Authentication endpoints</file>
+      </files>
+    </step>
+    
+    <step id="2" name="Frontend Components" priority="high" dependencies="1">
+      <description>Create React components and pages</description>
+      <files>
+        <file path="frontend/src/components/UserCard.tsx">User display component</file>
+        <file path="frontend/src/pages/Dashboard.tsx">Main dashboard page</file>
+      </files>
+    </step>
+  </steps>
+  
+  <file_tree>
+frontend/
+├── src/
+│   ├── components/
+│   │   └── UserCard.tsx
+│   └── pages/
+│       └── Dashboard.tsx
+backend/
+├── main.py
+├── models/
+│   └── user.py
+└── routes/
+    └── auth.py
+  </file_tree>
+</plan>
+
+Make sure each step is focused and creates 3-6 related files maximum. Order steps by dependencies (backend first, then frontend).
+"""
+
+        try:
+            # Use full system prompt with planning instructions
+            planning_messages = [
+                {"role": "system", "content": current_system_prompt},
+                {"role": "user", "content": planning_prompt}
+            ]
+            
+            print("\n🤖 Model response:")
+            print("-" * 60)
+            
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=planning_messages,
+                temperature=0.1,
+                max_tokens=8192,
+                stream=True  # Enable streaming for real-time output
+            )
+            
+            plan_response = ""
+            for chunk in completion:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    print(content, end='', flush=True)
+                    plan_response += content
+            
+            print("\n" + "-" * 60)
+            
+            # Add plan to conversation history for later chunks
+            self.conversation_history.extend([
+                {"role": "user", "content": f"Create implementation plan for: {user_request}"},
+                {"role": "assistant", "content": plan_response}
+            ])
+            
+            return plan_response
+            
+        except Exception as e:
+            print(f"❌ Error generating plan: {e}")
+            return None
+
+    def _parse_plan_xml(self, plan_xml: str) -> list:
+        """Parse XML plan into structured chunks"""
+        import xml.etree.ElementTree as ET
+        
+        try:
+            # Extract plan XML from response
+            plan_match = re.search(r'<plan>(.*?)</plan>', plan_xml, re.DOTALL)
+            if not plan_match:
+                print("❌ No <plan> tags found in response")
+                print("Full response for debugging:")
+                print(plan_xml[:500] + "..." if len(plan_xml) > 500 else plan_xml)
+                return None
+            
+            plan_content = f"<plan>{plan_match.group(1)}</plan>"
+            
+            # Debug: Show extracted XML
+            print("\n📄 Extracted XML plan:")
+            print("-" * 60)
+            print(plan_content[:1000] + "..." if len(plan_content) > 1000 else plan_content)
+            print("-" * 60)
+            
+            # Escape XML special characters in content while preserving tags
+            import html
+            # First escape all special chars, then restore the tags we need
+            plan_content = html.escape(plan_content, quote=False).replace("&lt;", "<").replace("&gt;", ">")
+            
+            root = ET.fromstring(plan_content)
+            
+            steps = []
+            steps_element = root.find('steps')
+            
+            if steps_element is None:
+                print("❌ No <steps> element found in plan")
+                return None
+            
+            for step_elem in steps_element.findall('step'):
+                step_data = {
+                    'id': step_elem.get('id'),
+                    'name': step_elem.get('name'),
+                    'priority': step_elem.get('priority', 'medium'),
+                    'dependencies': step_elem.get('dependencies', '').split(',') if step_elem.get('dependencies') else [],
+                    'description': step_elem.find('description').text if step_elem.find('description') is not None else '',
+                    'files': []
+                }
+                
+                files_elem = step_elem.find('files')
+                if files_elem is not None:
+                    for file_elem in files_elem.findall('file'):
+                        path = file_elem.get('path')
+                        description = file_elem.text
+                        
+                        # Convert [id] back to {id} for proper path handling
+                        if description and '[' in description and ']' in description:
+                            description = description.replace('[', '{').replace(']', '}')
+                        
+                        step_data['files'].append({
+                            'path': path,
+                            'description': description
+                        })
+                
+                steps.append(step_data)
+            
+            return steps
+            
+        except Exception as e:
+            print(f"❌ Error parsing plan XML: {e}")
+            
+            # Show the problematic line if possible
+            try:
+                lines = plan_content.split('\n')
+                if 'line' in str(e):
+                    # Extract line number from error message
+                    import re as regex
+                    match = regex.search(r'line (\d+)', str(e))
+                    if match:
+                        line_num = int(match.group(1))
+                        if 0 < line_num <= len(lines):
+                            print(f"❌ Problematic line {line_num}: {lines[line_num-1]}")
+                            if line_num > 1:
+                                print(f"   Previous line: {lines[line_num-2]}")
+            except:
+                pass
+                
+            return None
+
+    def _generate_step(self, step: dict, previous_steps: list) -> bool:
+        """Generate all files for a specific implementation step"""
+        
+        step_prompt = f"""You are continuing implementation of the project plan.
+
+## Current Implementation Step: {step['name']}
+{step['description']}
+
+## Files to create in this step:
+{chr(10).join([f"- {f['path']}: {f['description']}" for f in step['files']])}
+
+**CRITICAL INSTRUCTIONS:**
+1. Follow ALL guidelines from your system prompt (UI quality, API patterns, etc.)
+2. Create ALL files listed above with complete implementation
+3. Use the exact file paths specified
+4. Make files work together as a cohesive unit
+5. Include realistic data, proper error handling, and loading states
+6. Follow the exact patterns shown in the system prompt examples
+7. You have access to all previous work through the conversation history
+8. **IMPORTANT**: If you create any page components (src/pages/*.tsx), you MUST also output route actions to add them to the router system
+
+**Output format:** Use <action> tags exactly like this:
+
+For files:
+<action type="file" filePath="frontend/src/pages/TodoPage.tsx">
+// Component code here
+</action>
+
+For routes (REQUIRED when creating pages):
+<action type="route" path="/todos" component="TodoPage" icon="CheckSquare" label="Todo List" group="Overview"/>
+
+Example:
+
+<action type="file" filePath="backend/main.py">
+# FastAPI main application
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {{"message": "Hello World"}}
+</action>
+
+<action type="file" filePath="frontend/src/App.tsx">
+import React from 'react';
+
+function App() {{
+  return <div>Hello World</div>;
+}}
+
+export default App;
+</action>
+
+Generate ALL files for this chunk now:
+"""
+
+        try:
+            # Get updated system prompt with current project context
+            current_system_prompt = self._load_system_prompt()
+            
+            # Build messages with full system prompt
+            step_messages = [
+                {"role": "system", "content": current_system_prompt}
+            ]
+            
+            # Add conversation history (plan + previous steps)
+            step_messages.extend(self.conversation_history)
+            
+            # Add step prompt
+            step_messages.append({"role": "user", "content": step_prompt})
+            
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=step_messages,
+                temperature=0.1,
+                max_tokens=8192,
+                stream=True
+            )
+            
+            # Process streaming response
+            parser = StreamingXMLParser()
+            files_created = 0
+            step_response = ""
+            
+            for chunk_data in completion:
+                if chunk_data.choices[0].delta.content:
+                    content = chunk_data.choices[0].delta.content
+                    print(content, end='', flush=True)
+                    step_response += content
+                    
+                    # Process any complete actions
+                    for action in parser.process_chunk(content):
+                        if action['type'] == 'file' and action['filePath'] and action['content']:
+                            success = self._write_file_via_api(action['filePath'], action['content'])
+                            if success:
+                                files_created += 1
+                                print(f"\n✅ Created: {action['filePath']}")
+                            else:
+                                print(f"\n❌ Failed to create: {action['filePath']}")
+                        elif action['type'] == 'route':
+                            # Use existing route processing function
+                            path = action.get('path')
+                            component = action.get('component') 
+                            icon = action.get('icon')
+                            label = action.get('label')
+                            group = action.get('group')
+                            
+                            if path and component and icon and label:
+                                try:
+                                    self._add_route_to_app(path, component, icon, label, group)
+                                    group_info = f" (group: {group})" if group else ""
+                                    print(f"\n🛣️ Route: {path} -> {component}{group_info}")
+                                except Exception as e:
+                                    print(f"\n❌ Route error: {e}")
+            
+            # Add step exchange to conversation history
+            self.conversation_history.append({"role": "user", "content": step_prompt})
+            self.conversation_history.append({"role": "assistant", "content": step_response})
+            
+            print(f"\n🎯 Step completed: {files_created} files created")
+            return files_created > 0
+            
+        except Exception as e:
+            print(f"❌ Error generating step: {e}")
+            return False
+
+    def _add_route_to_app(self, path: str, component: str, icon: str, label: str, group: str = None):
+        """Automatically add a route to App.tsx and update sidebar"""
+        # Update App.tsx with the route
+        self._update_routes_in_app(path, component)
+        
+        # Update the sidebar with the new route
+        self._update_sidebar_routes(path, component, icon, label, group)
+
+    def _update_routes_in_app(self, path: str, component: str):
+        """Add route to App.tsx Routes section"""
+        content = self._read_file_via_api('frontend/src/App.tsx')
+        if not content:
+            return
+        
+        # Add import for the component if not already present
+        if f'import {component}' not in content:
+            # Add import after existing imports
+            import_section = content.split('\n')
+            last_import_line = -1
+            for i, line in enumerate(import_section):
+                if line.strip().startswith('import'):
+                    last_import_line = i
+            
+            if last_import_line >= 0:
+                import_section.insert(last_import_line + 1, f"import {component} from './pages/{component}'")
+                content = '\n'.join(import_section)
+        
+        # Add route to Routes section (only if it doesn't exist)
+        if f'path="{path}"' not in content:
+            # Find the last Route line and add after it with proper indentation
+            lines = content.split('\n')
+            last_route_index = -1
+            
+            for i, line in enumerate(lines):
+                if '<Route' in line and 'path=' in line:
+                    last_route_index = i
+            
+            if last_route_index != -1:
+                # Get indentation from the last route
+                last_route_line = lines[last_route_index]
+                indent = len(last_route_line) - len(last_route_line.lstrip())
+                new_route = ' ' * indent + f'<Route path="{path}" element={{<{component} />}} />'
+                
+                # Insert the new route after the last route
+                lines.insert(last_route_index + 1, new_route)
+                content = '\n'.join(lines)
+        
+        # Write updated content via API
+        self._write_file_via_api('frontend/src/App.tsx', content)
+
+    def _update_sidebar_routes(self, path: str, component: str, icon: str, label: str, group: str = None):
+        """Add route to AppSidebar component with group support"""
+        # Skip dynamic routes (containing :parameter) from sidebar
+        if ':' in path:
+            print(f"🚫 Skipping dynamic route {path} from sidebar (dynamic routes shouldn't appear in navigation)")
+            return
+        
+        content = self._read_file_via_api('frontend/src/components/app-sidebar.tsx')
+        if not content:
+            return
+        
+        # Check if route already exists
+        if f'url: "{path}"' in content:
+            print(f"🔄 Route {path} already exists in sidebar")
+            return
+        
+        # Add icon import if not present
+        if f'{icon}' not in content:
+            # Find the lucide-react import and add the icon
+            import_pattern = r"import \{\s*([^}]+)\s*\} from ['\"]lucide-react['\"]"
+            match = re.search(import_pattern, content)
+            if match:
+                current_imports = match.group(1).strip()
+                import_list = [imp.strip() for imp in current_imports.split(',')]
+                if icon not in import_list:
+                    import_list.append(icon)
+                    new_imports = ',\n  '.join(import_list)
+                    new_import_line = f"import {{ \n  {new_imports}\n}} from \"lucide-react\""
+                    content = content.replace(match.group(0), new_import_line)
+        
+        # Now try to find the target group and add the route
+        target_group = group or "Overview"
+        
+        # Look for the group and add the route item
+        group_pattern = rf'(\{{[\s\S]*?title:\s*"{re.escape(target_group)}"[\s\S]*?items:\s*\[)([\s\S]*?)(\][\s\S]*?\}})'
+        group_match = re.search(group_pattern, content)
+        
+        if group_match:
+            # Add to existing group
+            items_section = group_match.group(2)
+            new_item = f'      {{ title: "{label}", url: "{path}", icon: {icon} }},'
+            
+            # Add the new item at the end of the items array
+            if items_section.strip():
+                updated_items = f"{items_section}\n{new_item}"
+            else:
+                updated_items = f"\n{new_item}\n      "
+            
+            content = content.replace(group_match.group(2), updated_items)
+            
+        else:
+            # Create new group - find the routeGroups array end and add before it
+            route_groups_match = re.search(r'const routeGroups = \[([\s\S]*?)\]', content)
+            if route_groups_match:
+                existing_groups = route_groups_match.group(1)
+                new_group = f"""  {{
+    title: "{target_group}",
+    items: [
+      {{ title: "{label}", url: "{path}", icon: {icon} }},
+    ]
+  }},
+"""
+                # Add the new group before the closing bracket
+                updated_groups = f"{existing_groups}{new_group}"
+                content = content.replace(route_groups_match.group(1), updated_groups)
+                print(f"📝 Created new group: {target_group}")
+        
+        # Write updated content via API
+        self._write_file_via_api('frontend/src/components/app-sidebar.tsx', content)
 
     def send_message(self, message: str, is_error_fix: bool = False) -> str:
         """Send message to model with full project context and conversation history"""
@@ -1265,6 +1778,10 @@ Focus on intelligently extending the existing boilerplate with proper organizati
                 print(f"🔧 Backend:  {backend_url} (port {backend_port})")
                 print(f"🌐 Access your project at: {frontend_url}")
                 
+                # Store URLs for summary generation
+                self.preview_url = frontend_url
+                self.backend_url = backend_url
+                
                 return frontend_url
             else:
                 print(f"❌ Error starting preview: {response.status_code} - {response.text}")
@@ -1272,6 +1789,151 @@ Focus on intelligently extending the existing boilerplate with proper organizati
         except Exception as e:
             print(f"❌ Error starting preview: {e}")
             return None
+
+    def generate_project_summary(self) -> str:
+        """Generate comprehensive project summary using conversation history"""
+        print(f"\n{'='*60}")
+        print("📝 GENERATING PROJECT SUMMARY")
+        print("="*60)
+        
+        # Create project_summaries directory if it doesn't exist
+        summaries_dir = self.backend_dir / "project_summaries"
+        summaries_dir.mkdir(exist_ok=True)
+        
+        # Build summary prompt from conversation history
+        summary_prompt = self._build_summary_prompt()
+        
+        try:
+            # Call Groq to generate the summary
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are an expert technical writer who creates comprehensive project documentation. Create a detailed summary of the implemented project based on the conversation history."},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                max_tokens=4000,
+                temperature=0.3
+            )
+            
+            summary_content = response.choices[0].message.content
+            
+            # Save summary to MD file
+            summary_file = summaries_dir / f"{self.project_id}_summary.md"
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(summary_content)
+            
+            print(f"✅ Project summary generated: {summary_file}")
+            return str(summary_file)
+            
+        except Exception as e:
+            print(f"❌ Error generating project summary: {e}")
+            return None
+
+    def _build_summary_prompt(self) -> str:
+        """Build comprehensive summary prompt from conversation history"""
+        
+        # Extract user's original request (first user message)
+        original_request = "Not found"
+        plan_content = "Not found"
+        
+        for msg in self.conversation_history:
+            if msg['role'] == 'user':
+                original_request = msg['content']
+                break
+        
+        # Extract the plan from messages
+        for msg in self.conversation_history:
+            if msg['role'] == 'assistant' and 'plan>' in msg.get('content', ''):
+                plan_content = msg['content']
+                break
+        
+        # Get list of created files
+        created_files = list(self.project_files.keys())
+        
+        # Build the summary prompt
+        prompt = f"""
+Please create a comprehensive project summary based on the following information:
+
+## Original User Request:
+{original_request}
+
+## AI Implementation Plan:
+{plan_content}
+
+## Project Details:
+- Project ID: {self.project_id}
+- Project Name: {self.project_name}
+- Preview URL: {getattr(self, 'preview_url', 'Not available')}
+
+## Files Created ({len(created_files)} total):
+{chr(10).join([f'- {file}' for file in created_files[:20]])}
+{f'... and {len(created_files) - 20} more files' if len(created_files) > 20 else ''}
+
+## Full Conversation History:
+{chr(10).join([f"**{msg['role'].upper()}:** {msg['content'][:200]}..." for msg in self.conversation_history[-10:]])}
+
+---
+
+Please create a detailed project summary with the following sections:
+
+# Project Summary: {self.project_name}
+
+## Overview
+- Brief description of what was built
+- Key features implemented
+
+## User Requirements Analysis
+- What the user originally wanted
+- How the requirements were interpreted
+
+## Implementation Plan
+- High-level architecture decisions
+- Technology stack chosen
+- Key implementation phases
+
+## Files and Structure
+- Frontend components and their purposes
+- Backend APIs and endpoints
+- Key configuration files
+- Database/data models (if any)
+
+## Route Implementation
+- Frontend routes created
+- API endpoints implemented
+- Navigation structure
+
+## Data Flow
+- How data moves through the system
+- Key interactions between frontend and backend
+- State management approach
+
+## Key Features Delivered
+- Main functionality implemented
+- User interface components
+- API capabilities
+
+## Architecture Decisions
+- Framework choices and why
+- Design patterns used
+- Integration approaches
+
+## Future Enhancement Guidelines
+- How to add new features
+- Extension points in the code
+- Recommended modification approaches
+
+## Technical Notes
+- Important implementation details
+- Gotchas or special considerations
+- Testing and deployment notes
+
+## Project Context
+- Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+- Project ID: {self.project_id}
+- Status: Live preview available
+"""
+        
+        return prompt
 
     def _check_and_install_dependencies(self):
         """Scan project files and add missing dependencies to package.json"""
@@ -1374,9 +2036,9 @@ def main():
         print("❌ Error: GROQ_API_KEY environment variable not set")
         return
     
-    # Demo requests - Complex request to test enhanced system prompt
+    # Demo requests - Simple request for initial testing of chunk system
     requests = [
-        "Create a comprehensive task management system where teams can create projects, assign tasks to team members with different priority levels (low, medium, high, urgent), track progress with status updates (todo, in-progress, review, completed), set due dates with overdue indicators, add comments and attachments, filter and search tasks, and include a dashboard with progress charts and team performance metrics."
+        "a place where i can just write notes, like a simple nice notion alternative"
     ]
     
     # Generate project name based on the first request
@@ -1399,17 +2061,22 @@ def main():
         print(f"📝 {request}")
         print(f"\n{'='*50}")
         
-        response = system.send_message(request)
+        # Use the new chunk-based generation system
+        response = system.send_message_with_chunks(request)
         
         # Save full raw response to markdown file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        response_file = system.backend_dir / f"groq_response_{timestamp}.md"
+        response_file = system.backend_dir / f"groq_chunks_response_{timestamp}.md"
         
         with open(response_file, 'w', encoding='utf-8') as f:
             f.write(f"# Groq Model Response - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write(f"## Request\n{request}\n\n")
-            f.write(f"## Full Raw Response\n\n")
-            f.write(response)
+            f.write(f"## Response Summary\n{response}\n\n")
+            
+            # Save the actual plan XML if available
+            if hasattr(system, '_last_plan_response'):
+                f.write(f"## Full Plan XML\n\n")
+                f.write(system._last_plan_response)
         
         print(f"💾 Full raw response saved to: {response_file}")
         
@@ -1458,6 +2125,7 @@ BUILD ERRORS:
 
 Please analyze the errors and provide the necessary fixes. Update the existing files to resolve all build issues."""
             
+            # For error fixes, use the regular send_message method
             fix_response = system.send_message(error_fix_request, is_error_fix=True)
             
             # Save error fix response
@@ -1519,6 +2187,11 @@ Please analyze the errors and provide the necessary fixes. Update the existing f
         print(f"\n✅ PROJECT READY!")
         print(f"🌐 View your project at: {preview_url}")
         print(f"💡 The preview server is running. You can make changes and see them live!")
+        
+        # Generate project summary after successful preview start
+        summary_file = system.generate_project_summary()
+        if summary_file:
+            print(f"📋 Project summary saved to: {summary_file}")
     else:
         print(f"\n❌ Failed to start preview. Please check the logs.")
 

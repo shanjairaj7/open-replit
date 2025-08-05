@@ -1,0 +1,25 @@
+{
+  "project_id": "airbnb-style-booking-app-0804-134355",
+  "created_at": "2025-08-04T13:55:18.873484",
+  "last_updated": "2025-08-04T13:55:18.873515",
+  "read_files": [
+    "frontend/src/components/filters/FilterSidebar.tsx",
+    "backend/models/property.py",
+    "frontend/src/components/property/PropertyImageCarousel.tsx",
+    "backend/models/search.py",
+    "frontend/src/types/property.ts",
+    "backend/services/property_service.py",
+    "frontend/src/lib/dateUtils.ts",
+    "frontend/src/components/filters/PriceRangeSlider.tsx",
+    "frontend/src/components/property/PropertyCard.tsx",
+    "frontend/src/components/property/PropertyGrid.tsx",
+    "frontend/src/components/search/LocationInput.tsx",
+    "backend/app.py",
+    "frontend/src/components/search/DateRangePicker.tsx",
+    "frontend/src/components/search/SearchBar.tsx",
+    "frontend/src/services/propertyService.ts",
+    "frontend/src/components/search/GuestSelector.tsx",
+    "backend/services/__init__.py"
+  ],
+  "total_files_read": 17
+}

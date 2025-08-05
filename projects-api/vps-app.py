@@ -454,6 +454,37 @@ class VPSProjectManager:
         ts_errors = ""
         ts_check_status = {"executed": False, "success": False, "error": None}
         
+        # Check if project has running containers
+        if project_id in self.containers and self.containers[project_id].get('status') == 'running':
+            # Run TypeScript checking inside the frontend container
+            try:
+                frontend_container = self.containers[project_id]['frontend_container']
+                
+                # First try local TypeScript installation
+                ts_check_status["executed"] = True
+                exec_result = frontend_container.exec_run(
+                    "sh -c 'npx tsc --noEmit'",
+                    workdir="/app"
+                )
+                
+                if exec_result.exit_code == 0:
+                    ts_check_status["success"] = True
+                    # No errors
+                else:
+                    ts_check_status["success"] = False
+                    error_output = exec_result.output.decode('utf-8') if exec_result.output else ""
+                    if error_output.strip():
+                        ts_errors = error_output.strip()
+                
+                return {"errors": ts_errors, "status": ts_check_status}
+                
+            except Exception as e:
+                ts_check_status["error"] = f"Container-based TypeScript check failed: {str(e)}"
+                logger.warning(f"Container-based TypeScript check failed: {e}")
+                # Fall through to host-based checking
+        
+        # Fallback: Host-based checking (limited functionality)
+        
         try:
             ts_check_status["executed"] = True
             
@@ -475,7 +506,7 @@ class VPSProjectManager:
             # Option 1: Try local node_modules tsc (most reliable)
             try:
                 result = subprocess.run(
-                    ["./node_modules/.bin/tsc", "--noEmit", "--skipLibCheck"],
+                    ["./node_modules/.bin/tsc", "--noEmit"],
                     cwd=str(frontend_path),
                     capture_output=True,
                     text=True,
@@ -486,7 +517,7 @@ class VPSProjectManager:
                 # Option 2: Try npx tsc (requires npm)
                 try:
                     result = subprocess.run(
-                        ["npx", "tsc", "--noEmit", "--skipLibCheck"],
+                        ["npx", "tsc", "--noEmit"],
                         cwd=str(frontend_path),
                         capture_output=True,
                         text=True,
@@ -497,7 +528,7 @@ class VPSProjectManager:
                     # Option 3: Try tsc directly
                     try:
                         result = subprocess.run(
-                            ["tsc", "--noEmit", "--skipLibCheck"],
+                            ["tsc", "--noEmit"],
                             cwd=str(frontend_path),
                             capture_output=True,
                             text=True,

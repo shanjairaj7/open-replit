@@ -1,0 +1,16 @@
+{
+  "project_id": "airbnb-style-booking-app-0804-160006",
+  "created_at": "2025-08-04T16:02:17.396620",
+  "last_updated": "2025-08-04T16:02:17.396641",
+  "read_files": [
+    "frontend/src/lib/constants.ts",
+    "backend/models/property.py",
+    "frontend/src/types/property.ts",
+    "backend/seed_data.py",
+    "frontend/src/services/propertyService.ts",
+    "backend/services/property_service.py",
+    "backend/services/__init__.py",
+    "backend/app.py"
+  ],
+  "total_files_read": 8
+}
