@@ -1443,41 +1443,6 @@ export function AppSidebar() {
             traceback.print_exc()
             return None
 
-    def _build_messages_for_coder(self, new_messages: list) -> list:
-        """Build complete message list for the coder agent"""
-        # Start with system prompt
-        system_prompt = self._load_system_prompt()
-        
-        # Add runtime environment information if available
-        if hasattr(self, 'backend_url') and self.backend_url:
-            runtime_info = f"""
-
-## RUNTIME ENVIRONMENT (Current Session)
-
-**IMPORTANT:** Your project containers are currently running with these URLs:
-
-- **Backend URL:** {self.backend_url}
-- **Backend API URL:** {self.backend_url}/api
-- **Frontend URL:** {getattr(self, 'preview_url', 'Not available')}
-
-**For API Testing:** Use these actual URLs for curl commands:
-- Health check: `curl {self.backend_url}/api/health`
-- API testing: `curl -X POST {self.backend_url}/api/endpoint`
-
-The backend is accessible at {self.backend_url} - use this for all API testing and internal requests.
-"""
-            system_prompt += runtime_info
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add conversation history (always add full history for step generation)
-        messages.extend(self.conversation_history)
-        
-        # Add new messages
-        messages.extend(new_messages)
-        
-        return messages
-
     def _generate_step(self, step: dict, step_number: int) -> bool:
         """Generate all files for a specific implementation step using unified interrupt-based approach"""
         

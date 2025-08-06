@@ -1,0 +1,21 @@
+{
+  "project_id": "crm-platform-web-design-0806-091931",
+  "created_at": "2025-08-06T09:23:07.550121",
+  "last_updated": "2025-08-06T09:23:07.550142",
+  "read_files": [
+    "backend/services/auth_service.py",
+    "backend/services/assignment_service.py",
+    "backend/models/lead_schemas.py",
+    "backend/services/lead_service.py",
+    "backend/models/user.py",
+    "backend/models/auth.py",
+    "backend/middleware/auth.py",
+    "backend/models/lead.py",
+    "backend/test_imports.py",
+    "backend/models/client.py",
+    "backend/models/__init__.py",
+    "backend/models/project.py",
+    "backend/requirements.txt"
+  ],
+  "total_files_read": 13
+}
