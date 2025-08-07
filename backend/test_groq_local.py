@@ -60,11 +60,11 @@ class BoilerplatePersistentGroq:
     State Model: GroqAgentState (Pydantic model defined above)
     """
     
-    def __init__(self, api_key: str, project_name: str = None, api_base_url: str = "http://206.189.229.208:8000/api", project_id: str = None):
+    def __init__(self, api_key: str, project_name: str = None, api_base_url: str = "http://localhost:8000/api", project_id: str = None):
         print("🐛 DEBUG: Starting BoilerplatePersistentGroq __init__")
-        self.client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='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')
+        self.client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='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', default_headers={"x-include-usage": 'true'})
         print("🐛 DEBUG: Groq client created")
-        self.model = "openrouter/horizon-beta"
+        self.model = "qwen/qwen3-coder"
         self.conversation_history = []  # Store conversation messages
         self.api_base_url = api_base_url
         
@@ -215,11 +215,11 @@ class BoilerplatePersistentGroq:
         conversation_file = conversations_dir / f"{self.project_id}_messages.json"
         
         # Check if we need to summarize conversation
-        if self.token_usage['total_tokens'] >= 25000:
+        if self.token_usage['total_tokens'] >= 75000:
             # Mid-task summarization (token limit reached)
             print(f"🔄 Triggering summarization: {self.token_usage['total_tokens']:,} total tokens")
             self._check_and_summarize_conversation(is_mid_task=True)
-        elif self.token_usage['total_tokens'] >= 25000 and len(self.conversation_history) > 50:
+        elif self.token_usage['total_tokens'] >= 75000 and len(self.conversation_history) > 50:
             # Optional summarization for completed tasks (lower threshold)
             print(f"🔄 Optional summarization for completed task: {self.token_usage['total_tokens']:,} total tokens")
             self._check_and_summarize_conversation(is_mid_task=False)
@@ -405,17 +405,17 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                     {"role": "user", "content": summary_prompt}
                 ],
                 max_tokens=10000,  # Allow for very detailed summary
-                temperature=0.1   # Keep it factual and consistent
+                temperature=0.1,   # Keep it factual and consistent
             )
             
             summary_content = response.choices[0].message.content
             
             # Track token usage for summary generation
-            if hasattr(response, 'usage'):
+            if hasattr(response, 'usage') and response.usage:
                 usage = response.usage
-                self.token_usage['prompt_tokens'] += usage.prompt_tokens
-                self.token_usage['completion_tokens'] += usage.completion_tokens
-                self.token_usage['total_tokens'] += usage.total_tokens
+                self.token_usage['prompt_tokens'] = usage.prompt_tokens
+                self.token_usage['completion_tokens'] = usage.completion_tokens
+                self.token_usage['total_tokens'] = usage.total_tokens
                 
                 print(f"📊 Summary generation used: {usage.total_tokens} tokens")
             
@@ -577,23 +577,63 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             if not self.project_files:
                 return "No files found in project"
             
+            # Define files/folders to exclude
+            exclude_patterns = [
+                'node_modules', '__pycache__', '.git', '.vscode', '.idea',
+                'dist', 'build', '.next', '.vite', 'coverage', '.mypy_cache',
+                '.pytest_cache', '.tox', 'venv', '.venv', 'env', '.env',
+                '.DS_Store', 'Thumbs.db', '*.pyc', '*.pyo', '*.log',
+                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+                '.env.local', '.env.development', '.env.production'
+            ]
+            
             # Sort files by path for consistent tree structure
             sorted_files = sorted(self.project_files.keys())
             
-            # Build tree structure
-            tree_lines = []
+            # Build tree structure with better formatting
+            tree_structure = {}
+            
+            # Build hierarchical structure
             for file_path in sorted_files:
-                # Skip hidden files and common ignores
-                if any(part.startswith('.') for part in file_path.split('/')):
+                # Skip hidden files
+                parts = file_path.split('/')
+                if any(part.startswith('.') for part in parts):
                     continue
-                if any(ignore in file_path for ignore in ['node_modules', '__pycache__', '.git']):
+                    
+                # Skip excluded patterns
+                should_skip = False
+                for pattern in exclude_patterns:
+                    if pattern in file_path or file_path.endswith(pattern):
+                        should_skip = True
+                        break
+                if should_skip:
                     continue
                 
-                # Create tree representation
-                depth = file_path.count('/')
-                indent = '  ' * depth
-                filename = file_path.split('/')[-1]
-                tree_lines.append(f"{indent}{filename}")
+                # Build tree structure
+                current = tree_structure
+                for part in parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                # Add file
+                current[parts[-1]] = None
+            
+            # Convert tree structure to string
+            def build_tree_lines(tree, prefix="", is_last=True):
+                lines = []
+                items = list(tree.items())
+                for i, (name, subtree) in enumerate(items):
+                    is_last_item = i == len(items) - 1
+                    if subtree is None:  # It's a file
+                        lines.append(f"{prefix}{'└── ' if is_last_item else '├── '}{name}")
+                    else:  # It's a directory
+                        lines.append(f"{prefix}{'└── ' if is_last_item else '├── '}{name}/")
+                        extension = "    " if is_last_item else "│   "
+                        lines.extend(build_tree_lines(subtree, prefix + extension, is_last_item))
+                return lines
+            
+            tree_lines = ["Project Structure:"]
+            tree_lines.extend(build_tree_lines(tree_structure))
             
             return '\n'.join(tree_lines)
             
@@ -642,7 +682,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         """Create project via API"""
         try:
             # Check if project already exists
-            projects_response = requests.get(f"http://206.189.229.208:8000/api/projects")
+            projects_response = requests.get(f"http://localhost:8000/api/projects")
             if projects_response.status_code == 200:
                 existing_projects = projects_response.json().get('projects', [])
                 for project in existing_projects:
@@ -658,7 +698,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 "files": {}  # Empty files initially, will be populated by AI
             }
             
-            response = requests.post(f"http://206.189.229.208:8000/api/projects", json=create_payload)
+            response = requests.post(f"http://localhost:8000/api/projects", json=create_payload)
             if response.status_code == 200:
                 project_data = response.json()
                 print(f"✅ Project created successfully via VPS API")
@@ -1327,6 +1367,7 @@ export function AppSidebar() {
             
             plan_response = ""
             for chunk in completion:
+                # print(chunk.usage if chunk.usage else 'no chunk...')
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     print(content, end='', flush=True)
@@ -1991,8 +2032,8 @@ export function AppSidebar() {
                 backend_port = preview_data.get('backend_port', 8001)
                 
                 # Return the actual VPS IP with the ports
-                frontend_url = f"http://206.189.229.208:{frontend_port}"
-                backend_url = f"http://206.189.229.208:{backend_port}"
+                frontend_url = f"http://localhost:{frontend_port}"
+                backend_url = f"http://localhost:{backend_port}"
                 
                 print(f"🚀 Preview started successfully!")
                 print(f"📱 Frontend: {frontend_url} (port {frontend_port})")
@@ -2055,9 +2096,9 @@ export function AppSidebar() {
             # Track token usage for non-streaming call
             if hasattr(response, 'usage'):
                 usage = response.usage
-                self.token_usage['prompt_tokens'] += usage.prompt_tokens
-                self.token_usage['completion_tokens'] += usage.completion_tokens
-                self.token_usage['total_tokens'] += usage.total_tokens
+                self.token_usage['prompt_tokens'] = usage.prompt_tokens
+                self.token_usage['completion_tokens'] = usage.completion_tokens
+                self.token_usage['total_tokens'] = usage.total_tokens
                 
                 print(f"📊 Token usage for summary: {usage.total_tokens} tokens")
             
@@ -2315,6 +2356,9 @@ The backend is accessible at {self.backend_url} - use this for all API testing a
         file_path = action.get('path') or action.get('filePath')
         file_content = action.get('content', '')
         
+        # Remove backticks if present
+        file_content = self._remove_backticks_from_content(file_content)
+        
         print(f"💾 Updating file: {file_path}")
         print(f"📄 Content length: {len(file_content)} characters")
         
@@ -2391,6 +2435,20 @@ The backend is accessible at {self.backend_url} - use this for all API testing a
             print(f"❌ File delete failed: {error}")
             return None
 
+    def _remove_backticks_from_content(self, content: str) -> str:
+        """Remove backticks from file content if they're present"""
+        import re
+        
+        # Check for code block pattern: ```language\n...code...\n```
+        backtick_pattern = r'^```[a-zA-Z]*\n(.*)\n```$'
+        match = re.search(backtick_pattern, content.strip(), re.DOTALL)
+        
+        if match:
+            print("🔧 Removing backticks from file content")
+            return match.group(1)
+        
+        return content
+
     def _handle_create_file_realtime(self, action: dict):
         """Handle real-time file creation from streaming content"""
         content = action.get('content', '')
@@ -2414,6 +2472,9 @@ The backend is accessible at {self.backend_url} - use this for all API testing a
             print("❌ Missing file path or content in creation action")
             return None
             
+        # Remove backticks if present
+        file_content = self._remove_backticks_from_content(file_content)
+        
         print(f"🚀 Creating file in real-time: {file_path}")
         
         # Use the existing working file creation function

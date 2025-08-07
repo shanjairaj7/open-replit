@@ -1,6 +1,12 @@
 from shared_models import StreamingXMLParser, GroqAgentState
+import json
+import os
+from datetime import datetime
 
-def coder(messages, self: GroqAgentState):        
+def coder(messages, self: GroqAgentState):
+    # Log messages and token count at each coder() call
+    _log_coder_call(messages, self)
+    
     max_iterations = 30  # Prevent infinite loops
     iteration = 0
     full_response = ""
@@ -16,7 +22,7 @@ def coder(messages, self: GroqAgentState):
                 messages=messages,
                 temperature=0.1,
                 max_tokens=16000,
-                stream=True
+                stream=True,
             )
             
             # Process stream with interrupt detection
@@ -35,6 +41,27 @@ def coder(messages, self: GroqAgentState):
             
             for chunk in completion:
                 final_chunk = chunk  # Keep track of last chunk for token usage
+
+                # print(chunk)
+
+                if hasattr(chunk, 'usage') and chunk.usage is not None:
+                    usage = chunk.usage
+                    if hasattr(usage, 'total_tokens'):
+                        print(f"\nUsage Statistics:")
+                        print(f"Total Tokens: {usage.total_tokens}")
+                        print(f"Prompt Tokens: {usage.prompt_tokens}")
+                        print(f"Completion Tokens: {usage.completion_tokens}")
+                        if hasattr(usage, 'cost'):
+                            print(f"Cost: {usage.cost} credits")
+                        
+                        # Update internal tracking
+                        self.token_usage['prompt_tokens'] = usage.prompt_tokens
+                        self.token_usage['completion_tokens'] = usage.completion_tokens
+                        self.token_usage['total_tokens'] = usage.total_tokens
+                        
+                        print(f"💰 Running Total: {self.token_usage['total_tokens']:,} tokens")
+
+
                 if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     print(content, end='', flush=True)
@@ -130,15 +157,6 @@ def coder(messages, self: GroqAgentState):
             print()  # New line after streaming
             full_response += accumulated_content
             
-            # Track token usage from streaming (available in x_groq of final chunk)
-            if final_chunk and hasattr(final_chunk, 'x_groq') and final_chunk.x_groq and hasattr(final_chunk.x_groq, 'usage'):
-                usage = final_chunk.x_groq.usage
-                self.token_usage['prompt_tokens'] += usage.prompt_tokens
-                self.token_usage['completion_tokens'] += usage.completion_tokens
-                self.token_usage['total_tokens'] += usage.total_tokens
-                
-                print(f"\n📊 Token usage for this call: {usage.total_tokens} tokens (Prompt: {usage.prompt_tokens}, Completion: {usage.completion_tokens})")
-                print(f"💰 Total: {self.token_usage['total_tokens']:,} tokens")
 
                 # check if total tokens is more than 20k, summarise the conversation using the available functions, then make this process continue as usual
             
@@ -199,12 +217,30 @@ def coder(messages, self: GroqAgentState):
                             error_messages.append(f"Python validation errors:\n{python_errors}")
                         if typescript_errors:
                             error_messages.append(f"TypeScript validation errors:\n{typescript_errors}")
-                        
+
                         if error_messages:
-                            user_content = f"✅ File '{file_path}' has been created successfully.\n\n{'\n\n'.join(error_messages)}\n\nPlease fix these errors and continue with your response."
+                            user_content = f"""✅ File '{file_path}' created.
+
+                        **Static Analysis Results:**
+                        {'\n\n'.join(error_messages)}
+
+                        **NEXT STEPS:**
+                        1. Fix these static errors first
+                        2. If this is a backend service, create a test file (e.g., `backend/test_api.py`) to verify it works
+                        3. Run the test file with `python backend/test_api.py`
+                        4. Fix any runtime errors
+                        5. Delete the test file when done
+
+                        Continue with your implementation and testing."""
                         else:
-                            user_content = f"✅ File '{file_path}' has been created successfully. Please continue with your response."
-                        
+                            user_content = f"""✅ File '{file_path}' created successfully.
+
+                        If this was a backend service:
+                        1. Create a test file (e.g., `backend/test_api.py`) 
+                        2. Write Python code to test your endpoints
+                        3. Run it with `python backend/test_api.py`
+                        4. Verify it works, then delete the test file."""
+
                         user_msg = {"role": "user", "content": user_content}
                         
                         messages.append(assistant_msg)
@@ -220,7 +256,21 @@ def coder(messages, self: GroqAgentState):
                     if command_output is not None:
                         # Add the command output to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"Command output for `{interrupt_action.get('command')}` in {interrupt_action.get('cwd')}:\n\n```\n{command_output}\n```\n\n**Instructions:**\n- These are the logs from the terminal command execution\n- If there are any errors, warnings, or issues in the output above, please fix them immediately\n- Use `<action type=\"read_file\" path=\"...\"/>` to examine files that have errors\n- Use `<action type=\"update_file\" path=\"...\">` to fix any issues found\n- Continue with your response and next steps after addressing any problems\n\nPlease continue with your response based on this command output."}
+                        user_msg = {
+                            "role": "user", "content": f"""
+                            Command output for `{interrupt_action.get('command')}` in {interrupt_action.get('cwd')}:
+                            {command_output}
+
+                            **Instructions:**
+                            - These are the logs from the terminal command execution
+                            - If there are any errors, warnings, or issues in the output above, please fix them immediately
+                            - Use `<action type=\"read_file\" path=\"...\"/>` to examine files that have errors
+                            - Use `<action type=\"update_file\" path=\"...\">` to fix any issues found
+                            - Continue with your response and next steps after addressing any problems
+
+                            Please continue with your next steps..
+                            """
+                        }
                         
                         messages.append(assistant_msg)
                         messages.append(user_msg)
@@ -488,4 +538,88 @@ def _run_file_diagnostics(self, file_path):
         print(f"📚 DIAGNOSTICS: Full traceback:")
         traceback.print_exc()
         return f"<diagnostics>\n**All Checks:** ❌ ERROR - {str(e)}\n</diagnostics>"
+
+def _log_coder_call(messages, self):
+    """Log exact messages and token count at each coder() call"""
+    try:
+        # Create logs directory
+        logs_dir = os.path.join(os.path.dirname(__file__), '..', 'coder_call_logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        
+        # Generate timestamp and filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # milliseconds
+        project_id = getattr(self, 'project_id', 'unknown')
+        filename = f"coder_call_{project_id}_{timestamp}"
+        
+        # Current token usage
+        current_tokens = getattr(self, 'token_usage', {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0})
+        
+        # Calculate approximate input tokens for this call
+        input_text = ""
+        for msg in messages:
+            input_text += f"{msg.get('role', '')}: {msg.get('content', '')}\n"
+        
+        estimated_input_tokens = len(input_text) // 4  # rough estimate: 4 chars per token
+        
+        # Create log data
+        log_data = {
+            "timestamp": datetime.now().isoformat(),
+            "project_id": project_id,
+            "iteration_info": {
+                "total_tokens_before_call": current_tokens.get('total_tokens', 0),
+                "prompt_tokens_before_call": current_tokens.get('prompt_tokens', 0),
+                "completion_tokens_before_call": current_tokens.get('completion_tokens', 0),
+                "estimated_input_tokens_this_call": estimated_input_tokens
+            },
+            "model": getattr(self, 'model', 'unknown'),
+            "messages_count": len(messages),
+            "messages": messages,
+            "statistics": {
+                "total_characters": len(input_text),
+                "message_breakdown": [
+                    {
+                        "role": msg.get('role', ''),
+                        "content_length": len(msg.get('content', ''))
+                    } for msg in messages
+                ]
+            }
+        }
+        
+        # Save as JSON file
+        json_file = os.path.join(logs_dir, f"{filename}.json")
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        
+        # Save as markdown file for readability
+        md_file = os.path.join(logs_dir, f"{filename}.md")
+        with open(md_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Coder Call Log - {timestamp}\n\n")
+            f.write(f"**Project ID:** {project_id}\n")
+            f.write(f"**Timestamp:** {datetime.now().isoformat()}\n")
+            f.write(f"**Model:** {getattr(self, 'model', 'unknown')}\n\n")
+            
+            f.write("## Token Usage Before This Call\n\n")
+            f.write(f"- **Total Tokens:** {current_tokens.get('total_tokens', 0):,}\n")
+            f.write(f"- **Prompt Tokens:** {current_tokens.get('prompt_tokens', 0):,}\n") 
+            f.write(f"- **Completion Tokens:** {current_tokens.get('completion_tokens', 0):,}\n")
+            f.write(f"- **Estimated Input Tokens (this call):** {estimated_input_tokens:,}\n\n")
+            
+            f.write("## Messages Sent to Model\n\n")
+            f.write(f"**Total Messages:** {len(messages)}\n")
+            f.write(f"**Total Characters:** {len(input_text):,}\n\n")
+            
+            for i, msg in enumerate(messages, 1):
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+                f.write(f"### Message {i} - {role.title()}\n\n")
+                f.write(f"**Length:** {len(content):,} characters\n\n")
+                f.write("```\n")
+                f.write(content)
+                f.write("\n```\n\n")
+        
+        print(f"📊 CODER_LOG: Saved call details to {json_file} and {md_file}")
+        
+    except Exception as e:
+        print(f"❌ CODER_LOG: Error logging coder call: {e}")
+        # Don't let logging errors break the main flow
 
