@@ -4,18 +4,29 @@ import os
 from datetime import datetime
 
 def coder(messages, self: GroqAgentState):
+    print("🚀 CODER: Starting coder() function")
+    print(f"📊 CODER: Input - {len(messages)} messages, max_iterations=30")
+    
     # Log messages and token count at each coder() call
     _log_coder_call(messages, self)
+    print("📝 CODER: Call logging completed")
     
     max_iterations = 30  # Prevent infinite loops
     iteration = 0
     full_response = ""
     
+    print(f"🔄 CODER: Starting iteration loop (max: {max_iterations})")
+    
     while iteration < max_iterations:
         iteration += 1
-        print(f"📝 Generation iteration {iteration}")
+        print(f"\n{'='*60}")
+        print(f"📝 CODER: Generation iteration {iteration}/{max_iterations}")
+        print(f"📊 CODER: Current full_response length: {len(full_response)} chars")
+        print(f"🎯 CODER: Using model: {self.model}")
+        print(f"📤 CODER: Sending {len(messages)} messages to API")
         
         try:
+            print("🔌 CODER: Creating streaming completion...")
             # Create streaming response
             completion = self.client.chat.completions.create(
                 model=self.model,
@@ -23,9 +34,12 @@ def coder(messages, self: GroqAgentState):
                 temperature=0.1,
                 max_tokens=16000,
                 stream=True,
+                stream_options={"include_usage": "true"}
             )
+            print("✅ CODER: Streaming completion created successfully")
             
             # Process stream with interrupt detection
+            print("🔍 CODER: Initializing streaming parser and state variables")
             parser = StreamingXMLParser()
             accumulated_content = ""
             should_interrupt = False
@@ -39,15 +53,25 @@ def coder(messages, self: GroqAgentState):
             # Token tracking
             final_chunk = None
             
+            print("🌊 CODER: Starting to process streaming chunks...")
+            chunk_count = 0
+            
             for chunk in completion:
+                chunk_count += 1
                 final_chunk = chunk  # Keep track of last chunk for token usage
+                
+                # if chunk_count % 10 == 0:  # Every 10th chunk
+                #     # print(f"📊 CODER: Processed {chunk_count} chunks, accumulated: {len(accumulated_content)} chars")
+                #     print('')
 
                 # print(chunk)
 
+                # Check for usage information in chunk
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
+                    print(f"💰 CODER: Found usage info in chunk {chunk_count}")
                     usage = chunk.usage
                     if hasattr(usage, 'total_tokens'):
-                        print(f"\nUsage Statistics:")
+                        print(f"\n📈 Usage Statistics (Chunk {chunk_count}):")
                         print(f"Total Tokens: {usage.total_tokens}")
                         print(f"Prompt Tokens: {usage.prompt_tokens}")
                         print(f"Completion Tokens: {usage.completion_tokens}")
@@ -55,11 +79,13 @@ def coder(messages, self: GroqAgentState):
                             print(f"Cost: {usage.cost} credits")
                         
                         # Update internal tracking
-                        self.token_usage['prompt_tokens'] = usage.prompt_tokens
-                        self.token_usage['completion_tokens'] = usage.completion_tokens
-                        self.token_usage['total_tokens'] = usage.total_tokens
+                        print("💾 CODER: Updating internal token tracking...")
+                        old_total = self.token_usage.get('total_tokens', 0)
+                        self.token_usage['prompt_tokens'] += usage.prompt_tokens
+                        self.token_usage['completion_tokens'] += usage.completion_tokens
+                        self.token_usage['total_tokens'] += usage.total_tokens
                         
-                        print(f"💰 Running Total: {self.token_usage['total_tokens']:,} tokens")
+                        print(f"💰 Running Total: {old_total:,} → {self.token_usage['total_tokens']:,} tokens")
 
 
                 if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
@@ -67,41 +93,53 @@ def coder(messages, self: GroqAgentState):
                     print(content, end='', flush=True)
                     accumulated_content += content
                     
+                    # if len(content) > 50:  # Only log for larger content chunks
+                    #     print(f"\n📝 CODER: Added {len(content)} chars, total: {len(accumulated_content)}")
+                    
                     # Early detection: Check for update_file action start
                     if not update_file_detected and '<action type="update_file"' in accumulated_content:
                         update_file_detected = True
                         update_file_buffer = accumulated_content
-                        print(f"\n🚨 EARLY DETECTION: Found update_file action, waiting for path...")
+                        print(f"\n🚨 CODER: EARLY DETECTION - Found update_file action, waiting for path...")
+                        print(f"🔍 CODER: Update buffer length: {len(update_file_buffer)} chars")
                     
-                    # Early detection: Check for complete file creation action
-                    if not update_file_detected and '<action type="file"' in accumulated_content:
+                    # Early detection: Check for complete file creation action  
+                    if '<action type="file"' in accumulated_content:
+                        # print(f"\n🔍 CODER: Detected file action start, checking for completion...")
                         # Check if we have the complete action (with closing tag)
                         if '</action>' in accumulated_content:
-                            print(f"\n🚨 COMPLETE FILE ACTION DETECTED: Creating file immediately...")
+                            print(f"\n🚨 CODER: COMPLETE FILE ACTION DETECTED - Creating file immediately...")
+                            print(f"📊 CODER: File action content length: {len(accumulated_content)} chars")
                             # Process file creation in real-time
                             should_interrupt = True
                             interrupt_action = {
                                 'type': 'create_file_realtime',
                                 'content': accumulated_content
                             }
+                            print("⚡ CODER: Breaking from chunk loop for file creation interrupt")
                             break
                         else:
-                            # Keep streaming until we get the complete action - no print to maintain code flow
+                            # print(f"⏳ CODER: File action incomplete, continuing to stream...")
                             pass
                     
                     # If we detected update_file, keep buffering until we get the path
                     if update_file_detected and not update_file_validated:
+                        print(f"🔍 CODER: Checking for file path in update_file action...")
                         # Look for path attribute in the current buffer
                         import re
                         path_match = re.search(r'(?:path|filePath)="([^"]*)"', accumulated_content)
                         if path_match:
                             file_path = path_match.group(1)
-                            print(f"\n🔍 Found file path: {file_path}")
+                            print(f"\n🎯 CODER: Found file path in update_file: {file_path}")
                             
                             # Check if this file has been read (only validate once)
+                            print(f"📚 CODER: Checking if file was previously read...")
+                            print(f"   Read files tracker: {len(self.read_files_tracker)} files")
+                            print(f"   Persistent read files: {len(self.read_files_persistent)} files")
+                            
                             if file_path not in self.read_files_tracker and file_path not in self.read_files_persistent:
-                                print(f"\n🚨 INTERRUPT: File '{file_path}' needs to be read before updating!")
-                                print(f"📖 Automatically reading file first...")
+                                print(f"\n🚨 CODER: INTERRUPT REQUIRED - File '{file_path}' needs to be read first!")
+                                print(f"📖 CODER: Creating read_file interrupt action...")
                                 
                                 # Create a read_file interrupt action
                                 should_interrupt = True
@@ -110,72 +148,135 @@ def coder(messages, self: GroqAgentState):
                                     'path': file_path
                                 }
                                 update_file_validated = True  # Mark as validated, stop checking
+                                print("⚡ CODER: Breaking from chunk loop for read_file interrupt")
                                 break  # Break out of chunk processing to handle interrupt
                             else:
-                                print(f"\n✅ File '{file_path}' was previously read, update allowed")
+                                print(f"\n✅ CODER: File '{file_path}' was previously read, update allowed")
                                 update_file_validated = True  # Mark as validated, stop checking
+                        else:
+                            print("⏳ CODER: File path not yet available in update_file action, continuing...")
                     
                     # Check for read_file, run_command, and update_file actions
-                    for action in parser.process_chunk(content):
-                        if action.get('type') == 'read_file':
-                            print(f"\n🚨 INTERRUPT: Detected read_file action for {action.get('path')}")
+                    actions = list(parser.process_chunk(content))  # Convert generator to list
+                    if actions:
+                        print(f"\n🎬 CODER: Parser detected {len(actions)} actions in this chunk")
+                    
+                    for action in actions:
+                        action_type = action.get('type')
+                        print(f"🎯 CODER: Processing action type: {action_type}")
+                        
+                        if action_type == 'read_file':
+                            file_path = action.get('path')
+                            print(f"\n🚨 CODER: INTERRUPT - Detected read_file action for {file_path}")
                             should_interrupt = True
                             interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for read_file")
                             break
-                        elif action.get('type') == 'run_command':
-                            print(f"\n🚨 INTERRUPT: Detected run_command action: {action.get('command')} in {action.get('cwd')}")
+                        elif action_type == 'run_command':
+                            command = action.get('command')
+                            cwd = action.get('cwd')
+                            print(f"\n🚨 CODER: INTERRUPT - Detected run_command action: {command} in {cwd}")
                             should_interrupt = True
                             interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for run_command")
                             break
-                        elif action.get('type') == 'update_file':
+                        elif action_type == 'update_file':
                             file_path = action.get('path') or action.get('filePath')
+                            print(f"📝 CODER: Found update_file action for: {file_path}")
                             if file_path:
                                 # Check if file was read (using our early validation tracking)
                                 if file_path not in self.read_files_tracker and file_path not in self.read_files_persistent:
                                     # This should have been caught by early detection, but double-check
-                                    print(f"\n🚨 ERROR: File '{file_path}' not read before update!")
+                                    print(f"\n🚨 CODER: ERROR - File '{file_path}' not read before update!")
+                                    print("⚠️ CODER: This should have been caught by early detection!")
                                     continue
                                 else:
-                                    print(f"\n🚨 INTERRUPT: Detected update_file action for {action.get('path')}")
+                                    print(f"\n🚨 CODER: INTERRUPT - Detected update_file action for {file_path}")
                                     should_interrupt = True
                                     interrupt_action = action
+                                    print("⚡ CODER: Breaking from action loop for update_file")
                                     break
-                        elif action.get('type') == 'rename_file':
-                            print(f"\n🚨 INTERRUPT: Detected rename_file action: {action.get('path')} -> {action.get('new_name')}")
+                        elif action_type == 'rename_file':
+                            old_path = action.get('path')
+                            new_name = action.get('new_name')
+                            print(f"\n🚨 CODER: INTERRUPT - Detected rename_file action: {old_path} -> {new_name}")
                             should_interrupt = True
                             interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for rename_file")
                             break
-                        elif action.get('type') == 'delete_file':
-                            print(f"\n🚨 INTERRUPT: Detected delete_file action for {action.get('path')}")
+                        elif action_type == 'delete_file':
+                            file_path = action.get('path')
+                            print(f"\n🚨 CODER: INTERRUPT - Detected delete_file action for {file_path}")
                             should_interrupt = True
                             interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for delete_file")
+                            break
+                        elif action_type == 'start_backend':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected start_backend action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for start_backend")
+                            break
+                        elif action_type == 'start_frontend':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected start_frontend action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for start_frontend")
+                            break
+                        elif action_type == 'restart_backend':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected restart_backend action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for restart_backend")
+                            break
+                        elif action_type == 'restart_frontend':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected restart_frontend action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for restart_frontend")
                             break
                     
                     if should_interrupt:
+                        print("🛑 CODER: Interrupt flag set, breaking from chunk processing loop")
                         break
             
-            print()  # New line after streaming
-            full_response += accumulated_content
+            print(f"\n🏁 CODER: Finished processing chunks. Total chunks: {chunk_count}")
+            print(f"📊 CODER: Accumulated content length: {len(accumulated_content)} chars")
+            print(f"📝 CODER: Adding to full_response (current length: {len(full_response)})")
             
-
-                # check if total tokens is more than 20k, summarise the conversation using the available functions, then make this process continue as usual
+            full_response += accumulated_content
+            print(f"📈 CODER: New full_response length: {len(full_response)} chars")
+            
+            # Check interrupt status
+            print(f"🔍 CODER: Checking interrupt status...")
+            print(f"   should_interrupt: {should_interrupt}")
+            print(f"   interrupt_action: {interrupt_action}")
             
             # If we detected a read_file or run_command action, process it and continue
             if should_interrupt and interrupt_action:
+                action_type = interrupt_action.get('type')
+                print(f"\n🚨 CODER: PROCESSING INTERRUPT - Action type: {action_type}")
                 if interrupt_action.get('type') == 'read_file':
+                    file_path = interrupt_action.get('path')
+                    print(f"📖 CODER: Handling read_file interrupt for: {file_path}")
                     file_content = self._handle_read_file_interrupt(interrupt_action)
                     if file_content is not None:
+                        print(f"✅ CODER: Successfully read file, content length: {len(file_content)} chars")
                         # Add the read file content to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         user_msg = {"role": "user", "content": f"File content for {interrupt_action.get('path')}:\n\n```\n{file_content}\n```\n\nPlease continue with your response based on this file content."}
                         
+                        print(f"📤 CODER: Adding assistant message ({len(assistant_msg['content'])} chars) to messages")
+                        print(f"📤 CODER: Adding user message ({len(user_msg['content'])} chars) to messages")
                         messages.append(assistant_msg)
                         messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
+                        print("💾 CODER: Adding messages to conversation history")
                         self.conversation_history.append(assistant_msg)
                         self.conversation_history.append(user_msg)
                         
+                        print(f"🔄 CODER: Continuing iteration with {len(messages)} total messages")
                         continue
                     else:
                         # Pass the read error back to the model so it can continue with different approach
@@ -340,22 +441,110 @@ def coder(messages, self: GroqAgentState):
                     else:
                         print(f"❌ Failed to delete file {interrupt_action.get('path')}, stopping generation")
                         break
+                elif interrupt_action.get('type') == 'start_backend':
+                    service_result = self._handle_start_backend_interrupt(interrupt_action)
+                    if service_result is not None:
+                        # Add the service result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"Backend service started successfully on port {service_result.get('backend_port')}. API available at {service_result.get('api_url')}. Please continue with your response."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to start backend service, stopping generation")
+                        break
+                elif interrupt_action.get('type') == 'start_frontend':
+                    service_result = self._handle_start_frontend_interrupt(interrupt_action)
+                    if service_result is not None:
+                        # Add the service result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"Frontend service started successfully on port {service_result.get('frontend_port')}. Available at {service_result.get('frontend_url')}. Please continue with your response."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to start frontend service, stopping generation")
+                        break
+                elif interrupt_action.get('type') == 'restart_backend':
+                    service_result = self._handle_restart_backend_interrupt(interrupt_action)
+                    if service_result is not None:
+                        # Add the service result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"Backend service restarted successfully on port {service_result.get('backend_port')}. API available at {service_result.get('api_url')}. Please continue with your response."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to restart backend service, stopping generation")
+                        break
+                elif interrupt_action.get('type') == 'restart_frontend':
+                    service_result = self._handle_restart_frontend_interrupt(interrupt_action)
+                    if service_result is not None:
+                        # Add the service result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"Frontend service restarted successfully on port {service_result.get('frontend_port')}. Available at {service_result.get('frontend_url')}. Please continue with your response."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to restart frontend service, stopping generation")
+                        break
             else:
                 # No interruption, process any remaining actions and finish
+                print("🎬 CODER: No interrupt detected, processing remaining actions...")
+                print(f"📝 CODER: Processing remaining actions with {len(accumulated_content)} chars of content")
                 self._process_remaining_actions(accumulated_content)
+                print("✅ CODER: Finished processing remaining actions, breaking from iteration loop")
                 break
     
         except Exception as e:
-            print(f"❌ Error during generation: {e}")
+            print(f"❌ CODER: Exception during generation in iteration {iteration}: {e}")
+            print(f"🔍 CODER: Exception type: {type(e).__name__}")
+            import traceback
+            print("📚 CODER: Full traceback:")
+            traceback.print_exc()
             break
     
+    print(f"\n🏁 CODER: Completed iteration loop after {iteration} iterations")
+    print(f"📊 CODER: Final full_response length: {len(full_response)} chars")
+    
     # Add current project errors as context at the end of generation
+    print("🔍 CODER: Checking for project errors...")
     project_errors = _get_project_errors(self)
     if project_errors:
+        print(f"⚠️ CODER: Found project errors ({len(project_errors)} chars), adding to context")
         error_msg = {"role": "user", "content": f"Current codebase errors:\n\n{project_errors}\n\nNote: Fix critical errors if needed, otherwise continue with main task."}
         messages.append(error_msg)
         self.conversation_history.append(error_msg)
+        print("📤 CODER: Added error context to messages and conversation history")
+    else:
+        print("✅ CODER: No project errors found")
     
+    print(f"🎉 CODER: Returning full_response with {len(full_response)} chars")
     return full_response
 
 def _get_project_errors(self):

@@ -60,9 +60,9 @@ class BoilerplatePersistentGroq:
     State Model: GroqAgentState (Pydantic model defined above)
     """
     
-    def __init__(self, api_key: str, project_name: str = None, api_base_url: str = "http://localhost:8000/api", project_id: str = None):
+    def __init__(self, api_key: str = None, project_name: str = None, api_base_url: str = "http://localhost:8000/api", project_id: str = None):
         print("🐛 DEBUG: Starting BoilerplatePersistentGroq __init__")
-        self.client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='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', default_headers={"x-include-usage": 'true'})
+        self.client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=api_key or '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', default_headers={"x-include-usage": 'true'})
         print("🐛 DEBUG: Groq client created")
         self.model = "qwen/qwen3-coder"
         self.conversation_history = []  # Store conversation messages
@@ -577,18 +577,49 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             if not self.project_files:
                 return "No files found in project"
             
-            # Define files/folders to exclude
+            # Define files/folders to exclude - comprehensive list
             exclude_patterns = [
+                # Dependencies and build artifacts
                 'node_modules', '__pycache__', '.git', '.vscode', '.idea',
                 'dist', 'build', '.next', '.vite', 'coverage', '.mypy_cache',
                 '.pytest_cache', '.tox', 'venv', '.venv', 'env', '.env',
-                '.DS_Store', 'Thumbs.db', '*.pyc', '*.pyo', '*.log',
-                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-                '.env.local', '.env.development', '.env.production'
+                
+                # Python virtual environments (all common names)
+                'test_env', 'backend_env', 'frontend_env', 'myenv', 'virtualenv',
+                'bin', 'lib', 'site-packages', 'Scripts', 'Include', 'Lib',
+                'pyvenv.cfg', 'activate', 'activate.csh', 'activate.fish', 'Activate.ps1',
+                
+                # Lock files and package managers
+                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock',
+                'Pipfile.lock', 'requirements-dev.txt', 'requirements.lock',
+                
+                # Environment and config files
+                '.DS_Store', 'Thumbs.db', '.env.local', '.env.development', 
+                '.env.production', '.env.test', '.env.staging',
+                
+                # Temporary and debug files
+                '*.pyc', '*.pyo', '*.log', '*.tmp', '*.temp', '*.bak', '*.swp',
+                'debug_output.txt', 'stderr.txt', 'stdout.txt', 'output.txt',
+                'error.log', 'access.log', 'debug.log', 'test.log',
+                
+                # Old/backup files
+                '*-old.py', '*-backup.py', '*-copy.py', '*.old', '*.backup',
+                'python-error-checker-old.py', 'error-checker-backup.py',
+                
+                # IDE and editor files
+                '.vscode', '.idea', '*.suo', '*.user', '.vs', '.eclipse',
+                '*.code-workspace', '.sublime-project', '.sublime-workspace',
+                
+                # OS files
+                '.DS_Store', 'Thumbs.db', 'desktop.ini', '.directory'
             ]
             
             # Sort files by path for consistent tree structure
             sorted_files = sorted(self.project_files.keys())
+            
+            # Track filtering for debugging
+            total_files = len(sorted_files)
+            filtered_count = 0
             
             # Build tree structure with better formatting
             tree_structure = {}
@@ -598,15 +629,28 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 # Skip hidden files
                 parts = file_path.split('/')
                 if any(part.startswith('.') for part in parts):
+                    filtered_count += 1
                     continue
                     
-                # Skip excluded patterns
+                # Skip excluded patterns - improved filtering
                 should_skip = False
                 for pattern in exclude_patterns:
-                    if pattern in file_path or file_path.endswith(pattern):
+                    # Handle directory exclusions (e.g., 'test_env/')
+                    if f'/{pattern}/' in f'/{file_path}/':
                         should_skip = True
                         break
+                    # Handle file extensions and specific files
+                    if pattern.startswith('*'):
+                        if file_path.endswith(pattern[1:]):
+                            should_skip = True
+                            break
+                    # Handle exact matches and contains
+                    elif pattern in file_path or file_path.endswith(pattern):
+                        should_skip = True
+                        break
+                        
                 if should_skip:
+                    filtered_count += 1
                     continue
                 
                 # Build tree structure
@@ -634,6 +678,10 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             
             tree_lines = ["Project Structure:"]
             tree_lines.extend(build_tree_lines(tree_structure))
+            
+            # Add filtering summary for debugging
+            included_files = total_files - filtered_count
+            print(f"📊 File tree filtering: {included_files}/{total_files} files included ({filtered_count} filtered out)")
             
             return '\n'.join(tree_lines)
             
@@ -913,8 +961,17 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             if response.status_code == 200:
                 data = response.json()
                 return {
-                    "status": "deleted",
+                    "status": "deleted", 
                     "file": data.get('file', file_path)
+                }
+            elif response.status_code == 405:
+                # Method Not Allowed - file deletion not supported by API
+                print(f"⚠️ File deletion not supported by API for: {file_path}")
+                print(f"💡 Skipping file deletion - continuing with generation...")
+                return {
+                    "status": "skipped",
+                    "message": "File deletion not supported by API",
+                    "file": file_path
                 }
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
@@ -1106,32 +1163,78 @@ export function AppSidebar() {
             print(f"⚠️ Error cleaning default routes: {e}")
 
     def _scan_project_files_via_api(self):
-        """Scan project directory via API and build file tree"""
+        """Scan LOCAL project directory and build file tree"""
         self.project_files = {}
         
-        try:
-            # VPS API uses GET to list files
-            response = requests.get(f"{self.api_base_url}/projects/{self.project_id}/files")
+        # Local project path (matches local-api.py structure)
+        local_projects_path = Path.home() / "local-projects" / "projects" / self.project_id
+        
+        print(f"🔍 Scanning LOCAL project directory: {local_projects_path}")
+        
+        if not local_projects_path.exists():
+            print(f"⚠️ Local project directory not found: {local_projects_path}")
+            return
             
-            if response.status_code == 200:
-                file_data = response.json()
-                files = file_data.get('files', [])
+        try:
+            # AGGRESSIVE filtering - only include relevant files
+            exclude_dirs = {
+                'test_env', 'venv', '.venv', 'env', '.env', 'myenv', 'backend_env',
+                'bin', 'lib', 'site-packages', 'Scripts', 'Include', 'Lib',
+                'node_modules', '__pycache__', '.git', '.vscode', '.idea',
+                'dist', 'build', '.next', '.vite', 'coverage', '.mypy_cache',
+                '.pytest_cache', '.tox'
+            }
+            
+            exclude_files = {
+                'debug_output.txt', 'stderr.txt', 'stdout.txt', 'output.txt',
+                'python-error-checker-old.py', 'error-checker-backup.py',
+                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+                '.DS_Store', 'Thumbs.db', 'pyvenv.cfg'
+            }
+            
+            total_found = 0
+            filtered_out = 0
+            
+            # Recursively scan the local project directory
+            for root, dirs, files in os.walk(local_projects_path):
+                # Filter out excluded directories AT THE DIRECTORY LEVEL
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
                 
-                # VPS API returns list of file paths
-                for file_path in files:
-                    if isinstance(file_path, str):
-                        file_name = Path(file_path).name
-                        self.project_files[file_path] = {
-                            'path': file_path,
-                            'name': file_name,
-                            'size': 0,  # VPS API doesn't return size
+                for file in files:
+                    total_found += 1
+                    file_path = Path(root) / file
+                    
+                    # Skip excluded files
+                    if file in exclude_files:
+                        filtered_out += 1
+                        continue
+                        
+                    # Skip files with excluded extensions
+                    if file.endswith(('.pyc', '.pyo', '.log', '.tmp', '.bak', '.swp')):
+                        filtered_out += 1
+                        continue
+                    
+                    # Convert to relative path from project root
+                    try:
+                        rel_path = file_path.relative_to(local_projects_path)
+                        rel_path_str = str(rel_path).replace('\\\\', '/')  # Normalize path separators
+                        
+                        self.project_files[rel_path_str] = {
+                            'path': rel_path_str,
+                            'name': file,
+                            'size': file_path.stat().st_size if file_path.exists() else 0,
                             'type': 'file'
                         }
-            else:
-                print(f"⚠️ Error scanning files via API: {response.status_code} - {response.text}")
-                
+                    except Exception as e:
+                        print(f"⚠️ Error processing file {file_path}: {e}")
+                        filtered_out += 1
+                        continue
+            
+            included_count = total_found - filtered_out
+            print(f"📁 LOCAL scan complete: {included_count}/{total_found} files included ({filtered_out} filtered out)")
+            
         except Exception as e:
-            print(f"⚠️ Error scanning project files via API: {e}")
+            print(f"⚠️ Error scanning LOCAL project files: {e}")
 
     def get_project_context(self) -> str:
         """Generate comprehensive project context with file tree"""
@@ -1316,13 +1419,14 @@ export function AppSidebar() {
         
         print(f"✅ Plan parsed successfully: {len(steps)} implementation steps identified")
         
-        # Step 2.5: Start preview containers before step generation
-        print("🚀 Phase 2.5: Starting preview containers...")
-        preview_url = self.start_preview_and_get_url()
-        if preview_url:
-            print(f"✅ Preview started at: {preview_url}")
+        # Step 2.5: Setup project environment (venv, packages) but DON'T start services
+        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
+        setup_success = self.setup_project_environment()
+        if setup_success:
+            print("✅ Project environment setup completed")
+            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
         else:
-            print("⚠️ Warning: Preview failed to start, but continuing with generation")
+            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
         
         # Step 3: Generate files for each step
         print("🔨 Phase 3: Implementing files step by step...")
@@ -1498,43 +1602,51 @@ export function AppSidebar() {
 
         # Create natural user message for the coder
         step_user_message = f"""
-        {f"✅ Step {step_number-1} is complete. Now starting:" if step_number > 1 else "Starting:"}
+{f"✅ Step {step_number-1} is complete. Now starting:" if step_number > 1 else "Starting:"}
 
-        🎯 STEP {step_number}: {step_name}
+🎯 STEP {step_number}: {step_name}
 
-        **YOUR TASK:**
-        {step_description}
+**YOUR TASK:**
+{step_description}
 
-        **FILES TO CREATE:**
-        {files_to_create}
+**FILES TO CREATE:**
+{files_to_create}
 
-        **ENGINEERING WORKFLOW:**
-        1. Create the files listed above with complete, production-ready code
-        2. If creating backend endpoints, create a test script to verify they work
-        3. Run your test script and check the output
-        4. Fix any errors discovered through testing
-        5. Delete the test file once verification is complete
+**TESTING APPROACH (EFFICIENT):**
+- Frontend files: The system will show TypeScript/build errors automatically - just fix them
+- Backend APIs: Create simple urllib test scripts to verify functionality
+- Don't test what the system already validates (syntax, types, imports)
+- Focus on: Does the API return correct data? Do endpoints work?
 
-        **TESTING APPROACH:**
-        - DO NOT use curl commands directly in terminal
-        - Instead, create Python test files (e.g., `test_endpoints.py`) to test your APIs
-        - Use Python's requests library or urllib to make HTTP calls
-        - Run the test file with `python test_endpoints.py`
-        - Delete test files after successful verification
+**BACKEND API TESTING ONLY:**
+When you create backend endpoints, verify they work:
+```python
+# quick_test.py - Keep it simple
+import json
+from urllib.request import urlopen
 
-        **EXAMPLE TEST PATTERN:**
-        ```python
-        # test_endpoints.py
-        import requests
-        import json
+# Test the endpoint works
+response = urlopen(url_here)
+print(json.loads(response.read()))
+# If it works, delete this file and move on
 
-        API_URL = "{self.backend_url}"
+## WORKFLOW:
 
-        # Test endpoint
-        response = requests.post(f"{{API_URL}}/tasks", json={{"title": "Test", "description": "Test task"}})
-        print(f"Status: {{response.status_code}}")
-        print(f"Response: {{response.json()}}")```
-        """
+- Create files
+- Fix any errors the system shows you (automatic feedback)
+- For backend only: Create simple test script, run it, verify API works
+- Delete test file and continue
+
+## IMPORTANT:
+
+- The system automatically shows you syntax/type/import errors
+- You don't need to test for these - just fix what's shown
+- Only test backend API functionality (does it actually work?)
+- Keep tests minimal - just verify the endpoint responds correctly
+
+
+Focus on functionality, not syntax. Be efficient.
+"""
 
         try:
             print(f"🚀 Starting step {step_number}: {step_name}")
@@ -2019,10 +2131,44 @@ export function AppSidebar() {
         
         return content.strip()
 
-    def start_preview_and_get_url(self) -> str:
-        """Start the project preview and return the URL"""
+    def setup_project_environment(self) -> bool:
+        """Setup project environment (venv, packages) without starting services"""
         try:
-            # Start the preview
+            # Setup the environment using new endpoint
+            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/setup-environment")
+            if response.status_code == 200:
+                setup_data = response.json()
+                
+                print(f"🔧 Environment setup completed successfully!")
+                print(f"🐍 Backend Ready: {'Yes' if setup_data.get('backend_ready') else 'No'}")
+                print(f"⚛️  Frontend Ready: {'Yes' if setup_data.get('frontend_ready') else 'No'}")
+                
+                # Show any Python errors found during setup
+                python_errors = setup_data.get('python_errors')
+                if python_errors and python_errors.strip():
+                    print(f"\n⚠️  Python errors found during setup:")
+                    print(f"   {python_errors}")
+                    print(f"   These will need to be fixed before backend can start")
+                else:
+                    print(f"✅ No Python errors detected")
+                
+                print(f"\n📝 Environment is ready for development.")
+                print(f"🚀 Use <action type='start_backend'/> to start backend when needed")
+                print(f"🌐 Use <action type='start_frontend'/> to start frontend when needed")
+                
+                return True
+            else:
+                print(f"❌ Error setting up environment: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Error setting up environment: {e}")
+            return False
+    
+    def start_preview_and_get_url(self) -> str:
+        """DEPRECATED: Start the project preview and return the URL"""
+        print("⚠️  WARNING: start_preview_and_get_url is deprecated. Use setup_project_environment() + action tags instead.")
+        try:
+            # Start the preview (still kept for backward compatibility)
             response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/start-preview")
             if response.status_code == 200:
                 preview_data = response.json()
@@ -2040,23 +2186,12 @@ export function AppSidebar() {
                 print(f"🔧 Backend:  {backend_url} (port {backend_port})")
                 print(f"🌐 Access your project at: {frontend_url}")
                 
-                # Check watcher status if available
-                watchers = preview_data.get('watchers', {})
-                if watchers:
-                    print(f"\n📊 Watcher Status:")
-                    print(f"  ✅ Python Error Checker: {'Running' if watchers.get('python_error_checker') else 'Not Running'}")
-                    print(f"  ✅ TypeScript Checker:   {'Running' if watchers.get('typescript_checker') else 'Not Running'}")
-                    print(f"  ✅ ESLint:               {'Running' if watchers.get('eslint') else 'Not Running'}")
-                    print(f"  ✅ Uvicorn (Backend):    {'Running' if watchers.get('uvicorn') else 'Not Running'}")
-                    
-                    # Log warning if any watcher is not running
-                    if not all([watchers.get('python_error_checker'), watchers.get('typescript_checker'), 
-                               watchers.get('eslint'), watchers.get('uvicorn')]):
-                        print(f"\n⚠️  Warning: Some watchers are not running!")
-                
                 # Store URLs for summary generation
                 self.preview_url = frontend_url
                 self.backend_url = backend_url
+
+                self._write_file_via_api('backend/.env', f'BACKEND_URL={self.backend_url}')
+                print('* Backend URL added to .env in backend *')
                 
                 return frontend_url
             else:
@@ -2215,25 +2350,39 @@ export function AppSidebar() {
         # Start with system prompt with runtime environment info
         system_prompt = self._load_system_prompt()
         
-        # Add runtime environment information if available
-        if hasattr(self, 'backend_url') and self.backend_url:
-            runtime_info = f"""
+#         # Add runtime environment information if available
+#         if hasattr(self, 'backend_url') and self.backend_url:
+#             runtime_info = f"""
 
-## RUNTIME ENVIRONMENT (Current Session)
+# ## RUNTIME ENVIRONMENT (Current Session)
 
-**IMPORTANT:** Your project containers are currently running with these URLs:
+# **IMPORTANT:** Your project is ALREADY running with these URLs:
 
-- **Backend URL:** {self.backend_url}
-- **Backend API URL:** {self.backend_url}
-- **Frontend URL:** {getattr(self, 'preview_url', 'Not available')}
+# - **Backend URL:** {self.backend_url}
+# - **Backend API URL:** {self.backend_url}
+# - **Frontend URL:** {getattr(self, 'preview_url', 'Not available')}
 
-**For API Testing:** Use these actual URLs for curl commands:
-- Health check: `curl {self.backend_url}/health`
-- API testing: `curl -X POST {self.backend_url}/endpoint`
+# **For API Testing:** Use urllib with these actual URLs:
+# ```python
+# from urllib.request import urlopen
+# import json
 
-The backend is accessible at {self.backend_url} - use this for all API testing and internal requests.
-"""
-            system_prompt += runtime_info
+# # Health check
+# response = urlopen("{self.backend_url}/health")
+# print(json.loads(response.read()))
+
+# # POST request example
+# from urllib.request import Request
+# data = json.dumps({{"key": "value"}}).encode()
+# req = Request("{self.backend_url}/api/endpoint", data=data, headers={{"Content-Type": "application/json"}})
+# response = urlopen(req)
+# print(json.loads(response.read()))
+# ```
+
+# The backend is accessible at {self.backend_url} - use this for all API testing and internal requests.
+# DO NOT try to start the backend or frontend again - they are already running on these accessible URLs.
+# """
+#             system_prompt += runtime_info
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -2430,6 +2579,9 @@ The backend is accessible at {self.backend_url} - use this for all API testing a
         if delete_result and delete_result.get('status') == 'deleted':
             print(f"✅ File deleted successfully: {file_path}")
             return f"File '{file_path}' deleted successfully"
+        elif delete_result and delete_result.get('status') == 'skipped':
+            print(f"⏭️ File deletion skipped: {file_path}")
+            return f"File deletion skipped for '{file_path}' (not supported by API)"
         else:
             error = delete_result.get('error', 'Unknown error') if delete_result else 'Failed to delete file'
             print(f"❌ File delete failed: {error}")
@@ -2563,6 +2715,114 @@ The backend is accessible at {self.backend_url} - use this for all API testing a
                 print(f"🛣️ Added route: {path} -> {component}{group_info}")
         except Exception as e:
             print(f"❌ Error adding route: {e}")
+    
+    def _handle_start_backend_interrupt(self, action: dict) -> dict:
+        """Handle start_backend action during interrupt"""
+        print(f"🚀 Starting backend service...")
+        
+        try:
+            # Call the local API to start backend
+            import requests
+            url = f"{self.api_base_url}/projects/{self.project_id}/start-backend"
+            response = requests.post(url, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ Backend started successfully on port {result.get('backend_port')}")
+                print(f"🔗 Backend URL: {result.get('backend_url')}")
+                
+                # Update backend URL in state
+                self.backend_url = result.get('backend_url')
+                
+                return result
+            else:
+                print(f"❌ Failed to start backend: {response.status_code} {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error starting backend: {e}")
+            return None
+    
+    def _handle_start_frontend_interrupt(self, action: dict) -> dict:
+        """Handle start_frontend action during interrupt"""
+        print(f"🚀 Starting frontend service...")
+        
+        try:
+            # Call the local API to start frontend
+            import requests
+            url = f"{self.api_base_url}/projects/{self.project_id}/start-frontend"
+            response = requests.post(url, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ Frontend started successfully on port {result.get('frontend_port')}")
+                print(f"🔗 Frontend URL: {result.get('frontend_url')}")
+                
+                # Update preview URL in state
+                self.preview_url = result.get('frontend_url')
+                
+                return result
+            else:
+                print(f"❌ Failed to start frontend: {response.status_code} {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error starting frontend: {e}")
+            return None
+    
+    def _handle_restart_backend_interrupt(self, action: dict) -> dict:
+        """Handle restart_backend action during interrupt"""
+        print(f"🔄 Restarting backend service...")
+        
+        try:
+            # Call the local API to restart backend
+            import requests
+            url = f"{self.api_base_url}/projects/{self.project_id}/restart-backend"
+            response = requests.post(url, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ Backend restarted successfully on port {result.get('backend_port')}")
+                print(f"🔗 Backend URL: {result.get('backend_url')}")
+                
+                # Update backend URL in state
+                self.backend_url = result.get('backend_url')
+                
+                return result
+            else:
+                print(f"❌ Failed to restart backend: {response.status_code} {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error restarting backend: {e}")
+            return None
+    
+    def _handle_restart_frontend_interrupt(self, action: dict) -> dict:
+        """Handle restart_frontend action during interrupt"""
+        print(f"🔄 Restarting frontend service...")
+        
+        try:
+            # Call the local API to restart frontend
+            import requests
+            url = f"{self.api_base_url}/projects/{self.project_id}/restart-frontend"
+            response = requests.post(url, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ Frontend restarted successfully on port {result.get('frontend_port')}")
+                print(f"🔗 Frontend URL: {result.get('frontend_url')}")
+                
+                # Update preview URL in state
+                self.preview_url = result.get('frontend_url')
+                
+                return result
+            else:
+                print(f"❌ Failed to restart frontend: {response.status_code} {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error restarting frontend: {e}")
+            return None
 
 def main():
     """Main function supporting both creation and update modes"""
@@ -2581,7 +2841,7 @@ def main():
     
     # Check for API key
     print("🐛 DEBUG: Getting API key")
-    api_key = os.getenv("GROQ_API_KEY", "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")
+    api_key = os.getenv("GROQ_API_KEY", "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")
     if not api_key:
         print("❌ Error: GROQ_API_KEY environment variable is required")
         return
@@ -2598,7 +2858,7 @@ def main():
         
         # Initialize system
         system = BoilerplatePersistentGroq(
-            api_key=api_key,
+            api_key='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',
             project_id=args.project_id
         )
         

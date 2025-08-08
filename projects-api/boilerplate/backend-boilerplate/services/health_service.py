@@ -14,5 +14,5 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         timestamp=datetime.now().isoformat(),
-        service="backend-api"
+        service="backend"
     )

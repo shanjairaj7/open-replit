@@ -1,275 +1,247 @@
 #!/usr/bin/env python3
 """
-Real-time Python error checker for bolt.diy VPS backend
-Similar to ts-error-checker.js but for Python files
+Advanced Python Error Checker for VPS Backend
+Combines MyPy + Pyflakes for comprehensive VSCode-level error detection
+Optimized for <3 seconds performance on backend codebases
 """
 
-import ast
-import py_compile
-import tempfile
-import subprocess
-import time
 import sys
-import re
+import time
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
-import importlib.util
-import os
+from typing import List, Dict, Set
 
-class PythonErrorChecker:
-    """Real-time Python error detection for backend files"""
+class AdvancedPythonChecker:
+    """Advanced Python error checker using MyPy + Pyflakes"""
     
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
-        # If we're already in the backend directory (like in Docker), use current directory
-        if (Path(project_path) / "app.py").exists():
-            self.backend_path = Path(project_path)
-        else:
-            self.backend_path = self.project_path / "backend"
-        self.error_file = self.backend_path / ".python-errors.txt"
+        self.error_file = self.project_path / ".python-errors.txt"
         
-        # Track last modification times
-        self.last_checked = {}
-        
-    def check_syntax_errors(self, content: str, file_path: str) -> List[str]:
-        """Check for Python syntax errors using ast.parse"""
-        errors = []
-        
+    def run_mypy_check(self) -> List[str]:
+        """Run MyPy for import/attribute/type errors"""
         try:
-            ast.parse(content, filename=file_path)
-        except SyntaxError as e:
-            errors.append(f"{file_path}:{e.lineno}:{e.offset or 0} - Syntax Error: {e.msg}")
+            # Import mypy API directly instead of subprocess
+            from mypy import api
+            
+            # Run MyPy programmatically
+            result = api.run([
+                str(self.project_path),
+                "--ignore-missing-imports",
+                "--show-error-codes", 
+                "--no-error-summary",
+                "--cache-dir", str(self.project_path / ".mypy_cache"),
+                "--disable-error-code=var-annotated",
+                "--disable-error-code=misc",
+            ])
+            
+            # MyPy API returns (stdout, stderr, exit_code)
+            stdout, stderr, exit_code = result
+            
+            errors = []
+            if stdout.strip():
+                errors.extend(stdout.strip().split('\n'))
+            if stderr.strip():
+                errors.extend(stderr.strip().split('\n'))
+            return errors
+            
+        except ImportError:
+            return ["MyPy not available - install with: pip install mypy"]
         except Exception as e:
-            errors.append(f"{file_path}:1:0 - Parse Error: {str(e)}")
-        
-        return errors
+            return [f"MyPy error: {str(e)}"]
     
-    def check_compilation_errors(self, content: str, file_path: str) -> List[str]:
-        """Check for Python compilation errors using py_compile"""
-        errors = []
-        
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        
+    def run_pyflakes_check(self) -> List[str]:
+        """Run Pyflakes ONLY for critical runtime errors (undefined names)"""
         try:
-            py_compile.compile(tmp_path, doraise=True)
-        except py_compile.PyCompileError as e:
-            error_msg = str(e)
-            # Extract line number if available
-            match = re.search(r'line (\d+)', error_msg)
-            line_num = match.group(1) if match else "1"
-            errors.append(f"{file_path}:{line_num}:0 - Compile Error: {error_msg}")
+            # Import pyflakes API directly
+            from pyflakes.api import check
+            from pyflakes.messages import UndefinedName
+            
+            critical_errors = []
+            
+            # Find all Python files in the project directory
+            python_files = list(self.project_path.glob("*.py"))
+            python_files.extend(self.project_path.glob("**/*.py"))
+            
+            for py_file in python_files:
+                # Skip virtual env and cache directories
+                if any(skip in str(py_file) for skip in ["venv", ".venv", "env", ".env", "__pycache__", "site-packages"]):
+                    continue
+                    
+                try:
+                    with open(py_file, 'r', encoding='utf-8') as f:
+                        source = f.read()
+                    
+                    # Capture pyflakes warnings
+                    
+                    class WarningCollector:
+                        def __init__(self):
+                            self.messages = []
+                        
+                        def flake(self, message):
+                            self.messages.append(message)
+                    
+                    collector = WarningCollector()
+                    check(source, str(py_file), collector.flake)
+                    
+                    # Filter for undefined names only
+                    for msg in collector.messages:
+                        if isinstance(msg, UndefinedName):
+                            critical_errors.append(f"{py_file}:{msg.lineno}: undefined name '{msg.names[0]}'")
+                            
+                except Exception:
+                    # Skip files that can't be read or parsed
+                    continue
+                        
+            return critical_errors
+            
+        except ImportError:
+            return ["Pyflakes not available - install with: pip install pyflakes"]
         except Exception as e:
-            errors.append(f"{file_path}:1:0 - Compilation Error: {str(e)}")
-        finally:
-            # Clean up temporary file
-            Path(tmp_path).unlink(missing_ok=True)
+            return []  # Skip pyflakes errors, focus on MyPy
+    
+    def parse_and_filter_errors(self, mypy_errors: List[str], pyflakes_errors: List[str]) -> Dict[str, List[str]]:
+        """Parse and categorize all errors by criticality"""
         
-        return errors
-    
-    
-    def check_import_errors(self, content: str, file_path: str) -> List[str]:
-        """Check for basic import issues"""
-        errors = []
+        critical_errors = []
         warnings = []
         
-        try:
-            tree = ast.parse(content)
-            
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        module_name = alias.name
-                        if module_name.startswith('.') and not self._is_valid_relative_import(module_name, file_path):
-                            warnings.append(f"{file_path}:{node.lineno}:0 - Warning: Relative import '{module_name}' may not resolve correctly")
-                
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module and node.module.startswith('.'):
-                        if not self._is_valid_relative_import(node.module, file_path):
-                            warnings.append(f"{file_path}:{node.lineno}:0 - Warning: Relative import from '{node.module}' may not resolve correctly")
-        
-        except Exception:
-            pass  # Syntax errors will be caught by check_syntax_errors
-        
-        return errors + warnings
-    
-    def _is_valid_relative_import(self, module_name: str, file_path: str) -> bool:
-        """Basic check if relative import might be valid"""
-        # Very basic check - in a real implementation you'd check the actual file structure
-        return True  # Skip complex validation for now
-    
-    def check_file(self, file_path: Path) -> List[str]:
-        """Check a single Python file for all types of errors"""
-        if not file_path.exists() or not file_path.suffix == '.py':
-            return []
-        
-        try:
-            content = file_path.read_text(encoding='utf-8')
-        except Exception as e:
-            return [f"{file_path}:1:0 - File Error: Cannot read file - {str(e)}"]
-        
-        all_errors = []
-        
-        # Check for different types of errors
-        all_errors.extend(self.check_syntax_errors(content, str(file_path)))
-        all_errors.extend(self.check_compilation_errors(content, str(file_path)))
-        all_errors.extend(self.check_import_errors(content, str(file_path)))
-        
-        return all_errors
-    
-    def scan_backend_files(self) -> Dict[str, List[str]]:
-        """Scan all Python files in the backend directory"""
-        all_errors = {}
-        
-        if not self.backend_path.exists():
-            return all_errors
-        
-        # Find all Python files
-        python_files = list(self.backend_path.rglob("*.py"))
-        
-        for file_path in python_files:
-            # Skip __pycache__ and other temporary files
-            if '__pycache__' in str(file_path) or file_path.name.startswith('.'):
+        # Process MyPy errors (ONLY the most critical ones that will break backend)
+        for error in mypy_errors:
+            if not error.strip():
                 continue
-            
-            # Check if file was modified since last check
-            try:
-                mtime = file_path.stat().st_mtime
-                if str(file_path) in self.last_checked and self.last_checked[str(file_path)] >= mtime:
-                    continue  # Skip unchanged files
                 
-                self.last_checked[str(file_path)] = mtime
-            except Exception:
-                pass
-            
-            errors = self.check_file(file_path)
-            if errors:
-                all_errors[str(file_path)] = errors
+            # ONLY critical errors that WILL break the backend startup/runtime
+            if any(code in error for code in [
+                '[attr-defined]',      # Missing attributes (UserRole case) - CRITICAL
+                '[import-not-found]',  # Missing imports - CRITICAL  
+                '[name-defined]',      # Undefined names - CRITICAL
+                '[syntax]',            # Syntax errors - CRITICAL
+                '[call-arg]'           # Function call errors - CRITICAL
+            ]):
+                critical_errors.append(f"❌ {error}")
+            # Skip ALL other MyPy errors (type annotations, assignments, etc.)
         
-        return all_errors
+        # Process Pyflakes errors (ONLY critical runtime errors)
+        for error in pyflakes_errors:
+            if not error.strip():
+                continue
+                
+            # ONLY undefined names (will crash at runtime)
+            if "undefined name" in error:
+                critical_errors.append(f"❌ {error}")
+            # Skip everything else (unused imports, style issues, etc.)
+        
+        return {
+            "critical": critical_errors,
+            "warnings": warnings
+        }
     
-    def format_error_report(self, errors: Dict[str, List[str]], target_file: str = None) -> str:
-        """Format error report as a clean string for model feedback"""
-        if not errors:
-            return "No Python errors found"
-        
-        # If checking a specific file, only show errors for that file
-        if target_file:
-            file_errors = errors.get(target_file, [])
-            if not file_errors:
-                return ""
-            
-            report_lines = ["Python validation errors:"]
-            for error in file_errors:
-                # Extract just the error message part (after the file:line:col prefix)
-                if " - " in error:
-                    error_msg = error.split(" - ", 1)[1]
-                    report_lines.append(f"- {error_msg}")
-                else:
-                    report_lines.append(f"- {error}")
-        else:
-            # Show all errors
-            report_lines = ["Python validation errors:"]
-            for file_path, file_errors in errors.items():
-                for error in file_errors:
-                    if " - " in error:
-                        error_msg = error.split(" - ", 1)[1]
-                        report_lines.append(f"- {error_msg}")
-                    else:
-                        report_lines.append(f"- {error}")
-        
-        return "\n".join(report_lines)
-    
-    def check_single_file_and_format(self, file_path: str) -> str:
-        """Check a single file and return formatted error report"""
-        path_obj = Path(file_path)
-        if not path_obj.exists() or not path_obj.suffix == '.py':
+    def format_error_report(self, errors: Dict[str, List[str]]) -> str:
+        """Format error report for API consumption - ONLY critical errors"""
+        if not errors["critical"]:
             return ""
         
-        errors = self.check_file(path_obj)
-        if not errors:
-            return ""
+        report_lines = ["Python validation errors:"]
         
-        # Create errors dict for formatting
-        errors_dict = {file_path: errors}
-        return self.format_error_report(errors_dict, file_path)
+        # Show ONLY critical errors (these WILL break the backend)
+        for error in errors["critical"][:15]:  # Limit to 15 most critical
+            # Clean up the error message for better readability
+            clean_error = error.replace("❌ ", "- ").replace("[attr-defined]", "").replace("[import-not-found]", "").replace("[name-defined]", "").replace("[syntax]", "").replace("[call-arg]", "").strip()
+            report_lines.append(clean_error)
+        
+        if len(errors["critical"]) > 15:
+            report_lines.append(f"- ... and {len(errors['critical']) - 15} more critical errors")
+        
+        return "\\n".join(report_lines)
     
-    def write_error_report(self, errors: Dict[str, List[str]]):
-        """Write error report to file"""
-        if not errors:
-            # No errors - write success message
-            self.error_file.write_text("No Python errors found\n")
-            return
+    def run_comprehensive_check(self) -> str:
+        """Run comprehensive Python error check"""
+        start_time = time.time()
         
-        report_lines = []
-        total_errors = sum(len(file_errors) for file_errors in errors.values())
+        print(f"🔍 Running advanced Python error check on: {self.project_path}")
         
-        report_lines.append(f"Python Error Report - {total_errors} issues found")
-        report_lines.append("=" * 50)
+        # Run both checkers in sequence (total target: <3 seconds)
+        mypy_errors = self.run_mypy_check()
+        pyflakes_errors = self.run_pyflakes_check()
         
-        for file_path, file_errors in errors.items():
-            report_lines.append(f"\n📁 {file_path}")
-            for error in file_errors:
-                report_lines.append(f"  ❌ {error}")
+        # Parse and categorize errors
+        categorized_errors = self.parse_and_filter_errors(mypy_errors, pyflakes_errors)
         
-        report_lines.append(f"\nTotal: {total_errors} issues in {len(errors)} files")
+        # Format the report
+        formatted_report = self.format_error_report(categorized_errors)
         
-        # Write to error file
-        self.error_file.write_text("\n".join(report_lines))
+        elapsed = time.time() - start_time
+        print(f"✅ Check completed in {elapsed:.2f}s")
+        
+        # Write to error file for continuous monitoring
+        self.write_error_file(categorized_errors, elapsed)
+        
+        return formatted_report
     
-    def run_continuous_check(self, interval: int = 2):
-        """Run continuous error checking"""
-        print(f"🐍 Python Error Checker started for: {self.backend_path}")
-        print(f"📝 Writing errors to: {self.error_file}")
-        print(f"🔄 Checking every {interval} seconds...")
-        
-        while True:
-            try:
-                errors = self.scan_backend_files()
-                self.write_error_report(errors)
+    def write_error_file(self, errors: Dict[str, List[str]], elapsed_time: float):
+        """Write error report to file for monitoring"""
+        try:
+            total_errors = len(errors["critical"]) + len(errors["warnings"])
+            
+            if total_errors == 0:
+                self.error_file.write_text("✅ No Python errors found\\n")
+            else:
+                report = [
+                    f"Python Error Report ({elapsed_time:.2f}s)",
+                    "=" * 50,
+                    f"Critical Errors: {len(errors['critical'])}",
+                    f"Warnings: {len(errors['warnings'])}",
+                    f"Total: {total_errors}",
+                    "",
+                    "CRITICAL ERRORS:",
+                ]
                 
-                if errors:
-                    total_errors = sum(len(file_errors) for file_errors in errors.values())
-                    print(f"❌ Found {total_errors} Python issues in {len(errors)} files")
-                else:
-                    print("✅ No Python errors found")
+                for error in errors["critical"]:
+                    report.append(f"  {error}")
                 
-                time.sleep(interval)
+                if errors["warnings"]:
+                    report.append("")
+                    report.append("WARNINGS:")
+                    for warning in errors["warnings"][:10]:
+                        report.append(f"  {warning}")
                 
-            except KeyboardInterrupt:
-                print("\n🛑 Python error checker stopped")
-                break
-            except Exception as e:
-                print(f"❌ Error in checker: {e}")
-                time.sleep(interval)
+                self.error_file.write_text("\\n".join(report))
+                
+        except Exception as e:
+            print(f"Warning: Could not write error file: {e}")
 
 def main():
     """Main entry point"""
     if len(sys.argv) > 1:
-        project_path = sys.argv[1]
+        project_path = sys.argv[1] 
     else:
         project_path = "."
     
-    checker = PythonErrorChecker(project_path)
+    checker = AdvancedPythonChecker(project_path)
     
-    # Run one-time check or continuous
     if "--once" in sys.argv:
-        errors = checker.scan_backend_files()
-        checker.write_error_report(errors)
+        # One-time check for API usage
+        result = checker.run_comprehensive_check()
         
-        if errors:
-            # Output clean error list for model consumption
-            formatted_errors = checker.format_error_report(errors)
-            print(formatted_errors)
-            sys.exit(1)
+        if result:
+            print(result)
+            sys.exit(1)  # Errors found
         else:
-            # No output for success (empty string is better for API)
-            sys.exit(0)
+            sys.exit(0)  # No critical errors
     else:
-        checker.run_continuous_check()
+        # Continuous monitoring mode
+        print("Starting continuous Python error monitoring...")
+        while True:
+            try:
+                checker.run_comprehensive_check()
+                time.sleep(5)  # Check every 5 seconds
+            except KeyboardInterrupt:
+                print("\\n🛑 Python error checker stopped")
+                break
+            except Exception as e:
+                print(f"❌ Error in checker: {e}")
+                time.sleep(5)
 
 if __name__ == "__main__":
     main()

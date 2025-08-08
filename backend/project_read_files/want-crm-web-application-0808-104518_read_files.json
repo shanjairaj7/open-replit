@@ -1,0 +1,16 @@
+{
+  "project_id": "want-crm-web-application-0808-104518",
+  "created_at": "2025-08-08T10:46:57.878800",
+  "last_updated": "2025-08-08T10:46:57.878818",
+  "read_files": [
+    "backend/services/auth_routes.py",
+    "backend/app.py",
+    "backend/services/__init__.py",
+    "backend/test_auth_services.py",
+    "backend/dependencies.py",
+    "backend/models/user_models.py",
+    "backend/services/auth_service.py",
+    "backend/services/user_service.py"
+  ],
+  "total_files_read": 8
+}

@@ -209,9 +209,8 @@ class VPSProjectManager:
         }
         
         try:
-            # For backend, check if error file exists and uvicorn is responding
-            backend_check = backend_container.exec_run("ls -la .python-errors.txt", demux=True)
-            watchers["python_error_checker"] = backend_check.exit_code == 0
+            # Disable background python error checker to save resources
+            watchers["python_error_checker"] = False
             
             # Check if uvicorn is running by looking at container logs
             backend_logs = backend_container.logs(tail=50).decode('utf-8')
@@ -265,7 +264,7 @@ class VPSProjectManager:
                     "PYTHONPATH": "/app",
                     "PYTHONUNBUFFERED": "1",
                     "BACKEND_URL": f"http://206.189.229.208:{backend_port}",
-                    "API_URL": f"http://206.189.229.208:{backend_port}/api",
+                    "API_URL": f"http://206.189.229.208:{backend_port}",
                     "BACKEND_PORT": str(backend_port)
                 },
                 detach=True,
@@ -288,7 +287,7 @@ class VPSProjectManager:
                 environment={
                     "NODE_ENV": "development",
                     "NODE_OPTIONS": "--max-old-space-size=512",
-                    "VITE_API_URL": f"http://206.189.229.208:{backend_port}/api",
+                    "VITE_API_URL": f"http://206.189.229.208:{backend_port}",
                     "VITE_BACKEND_URL": f"http://206.189.229.208:{backend_port}"
                 },
                 detach=True,
@@ -458,13 +457,18 @@ class VPSProjectManager:
         if project_id in self.containers and self.containers[project_id].get('status') == 'running':
             # Run TypeScript checking inside the frontend container
             try:
+                # Refresh container reference to avoid stale container issues
                 frontend_container = self.containers[project_id]['frontend_container']
+                frontend_container.reload()  # Refresh container state
                 
                 # First try local TypeScript installation
                 ts_check_status["executed"] = True
+                # Run TypeScript with absolute node path to avoid env issues
+                # Try fast config first, fallback to app config  
                 exec_result = frontend_container.exec_run(
-                    "sh -c 'node_modules/.bin/tsc -p tsconfig.app.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo'",
-                    workdir="/app"
+                    "sh -c 'export PATH=/usr/local/bin:$PATH && if [ -f tsconfig.fast.json ]; then npx tsc -p tsconfig.fast.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo-fast; else npx tsc -p tsconfig.app.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo; fi'",
+                    workdir="/app",
+                    environment={"PATH": "/usr/local/bin:/usr/bin:/bin"}
                 )
                 
                 if exec_result.exit_code == 0:
@@ -536,43 +540,44 @@ class VPSProjectManager:
                         )
                         ts_command_tried.append("tsc")
                     except FileNotFoundError:
-                        # Option 4: Try node with typescript module
+                        # Option 4: Try node with typescript module in container
                         try:
-                            result = subprocess.run(
-                                ["node", "-e", "require('typescript')"],
-                                cwd=str(frontend_path),
-                                capture_output=True,
-                                text=True,
-                                timeout=5
-                            )
-                            ts_command_tried.append("node typescript")
-                            
-                            # If node/typescript is available, do basic syntax checking
-                            if result.returncode == 0:
-                                # Just do basic file syntax validation
-                                ts_files = list(frontend_path.rglob("*.ts")) + list(frontend_path.rglob("*.tsx"))
-                                syntax_errors = []
-                                
-                                for ts_file in ts_files[:5]:  # Limit to first 5 files
-                                    try:
-                                        with open(ts_file, 'r') as f:
-                                            content = f.read()
-                                            # Basic syntax checks
-                                            if ': string = ' in content and ' = 123' in content:
-                                                syntax_errors.append(f"{ts_file.name}: Type 'number' is not assignable to type 'string'")
-                                            if ': number = ' in content and ' = "' in content:
-                                                syntax_errors.append(f"{ts_file.name}: Type 'string' is not assignable to type 'number'")
-                                    except:
-                                        pass
-                                
-                                if syntax_errors:
-                                    # Create mock TypeScript error output
-                                    result = subprocess.CompletedProcess(
-                                        args=["mock-tsc"],
-                                        returncode=1,
-                                        stdout="\n".join(syntax_errors),
-                                        stderr=""
+                            # Check if we have a frontend container to work with
+                            if project_id in self.containers:
+                                frontend_container = self.containers[project_id].get('frontend')
+                                if frontend_container:
+                                    result = frontend_container.exec_run(
+                                        "node -e 'require(\"typescript\")'",
+                                        workdir="/app"
                                     )
+                                    ts_command_tried.append("node typescript in container")
+                                    
+                                    # If node/typescript is available in container
+                                    if result.exit_code == 0:
+                                        # Just do basic file syntax validation
+                                        ts_files = list(frontend_path.rglob("*.ts")) + list(frontend_path.rglob("*.tsx"))
+                                        syntax_errors = []
+                                        
+                                        for ts_file in ts_files[:5]:  # Limit to first 5 files
+                                            try:
+                                                with open(ts_file, 'r') as f:
+                                                    content = f.read()
+                                                    # Basic syntax checks
+                                                    if ': string = ' in content and ' = 123' in content:
+                                                        syntax_errors.append(f"{ts_file.name}: Type 'number' is not assignable to type 'string'")
+                                                    if ': number = ' in content and ' = "' in content:
+                                                        syntax_errors.append(f"{ts_file.name}: Type 'string' is not assignable to type 'number'")
+                                            except:
+                                                pass
+                                        
+                                        if syntax_errors:
+                                            # Create mock TypeScript error output
+                                            result = subprocess.CompletedProcess(
+                                                args=["mock-tsc"],
+                                                returncode=1,
+                                                stdout="\n".join(syntax_errors),
+                                                stderr=""
+                                            )
                                 
                         except FileNotFoundError:
                             # No TypeScript tooling available
@@ -612,30 +617,109 @@ class VPSProjectManager:
             "status": ts_check_status
         }
 
-    def _run_python_error_check(self, project_id: str) -> dict:
-        """Run Python error checking and return results"""
+    def _run_python_error_check(self, project_id: str, file_path: str = None) -> dict:
+        """Run Python error checker directly in container"""
+        logger.info(f"RUNNING Python error checker directly for {project_id}")
         project_path = VPS_PROJECTS_PATH / project_id
         backend_path = project_path / "backend"
         python_errors = ""
-        python_check_status = {"executed": False, "success": False, "error": None}
+        python_check_status = {"executed": True, "success": True, "error": None}
         
         try:
-            python_check_status["executed"] = True
-            result = subprocess.run(
-                ["python", "python-error-checker.py", ".", "--once"],
-                cwd=str(backend_path),
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            python_check_status["success"] = result.returncode == 0
-            if result.stdout.strip():
-                python_errors = result.stdout.strip()
+            # Check if container is running first
+            if project_id in self.containers:
+                backend_container = self.containers[project_id].get('backend_container')
+                if backend_container:
+                    logger.info(f"Running MyPy and Pyflakes directly in container")
+                    
+                    # Run MyPy and Pyflakes on specific files only (fast approach)
+                    if file_path and file_path.startswith('backend/'):
+                        filename = file_path.replace('backend/', '')
+                        logger.info(f"Checking specific file: {filename}")
+                        
+                        # Run MyPy on just this file
+                        mypy_result = backend_container.exec_run(
+                            f"mypy {filename} --ignore-missing-imports --no-error-summary"
+                        )
+                        
+                        # Run Pyflakes on just this file  
+                        pyflakes_result = backend_container.exec_run(
+                            f"pyflakes {filename}"
+                        )
+                    else:
+                        # Fallback: limited scan of user files only
+                        mypy_result = backend_container.exec_run(
+                            "find . -maxdepth 2 -name '*.py' -not -name 'app.py' -not -name 'python-error-checker*' | head -5 | xargs -r mypy --ignore-missing-imports --no-error-summary"
+                        )
+                        
+                        pyflakes_result = backend_container.exec_run(
+                            "find . -maxdepth 2 -name '*.py' -not -name 'app.py' -not -name 'python-error-checker*' | head -5 | xargs -r pyflakes"
+                        )
+                    
+                    errors = []
+                    
+                    # Collect only critical MyPy errors (skip notes/hints) - only if MyPy was run
+                    if mypy_result and mypy_result.output:
+                        mypy_output = mypy_result.output.decode('utf-8').strip()
+                        if mypy_output and mypy_result.exit_code != 0:
+                            critical_mypy = [line for line in mypy_output.split('\n') 
+                                           if line.strip() and 'error:' in line and 'note:' not in line]
+                            errors.extend([f"❌ {line}" for line in critical_mypy])
+                    
+                    # Collect Pyflakes errors but exclude unused imports
+                    if pyflakes_result and pyflakes_result.output:
+                        pyflakes_output = pyflakes_result.output.decode('utf-8').strip()
+                        if pyflakes_output and pyflakes_result.exit_code != 0:
+                            # Exclude unused imports and unused variables
+                            critical_pyflakes = [line for line in pyflakes_output.split('\n') 
+                                               if line.strip() and 
+                                               'imported but unused' not in line and
+                                               'assigned to but never used' not in line]
+                            errors.extend([f"❌ Pyflakes: {line}" for line in critical_pyflakes])
+                    
+                    if errors:
+                        python_errors = f"Python Error Report\n{'='*50}\nTotal Errors: {len(errors)}\n\n" + "\n".join(errors)
+                        python_check_status["success"] = False
+                    else:
+                        # If we had a successful check (even if empty), mark as success
+                        if pyflakes_result is not None:
+                            python_errors = "✅ No Python errors found"
+                            python_check_status["success"] = True
+                        else:
+                            python_errors = "⚠️ Error checker could not run (container issue)"
+                            python_check_status["success"] = False
+                            python_check_status["error"] = "Container execution failed"
+                        
+                    logger.info(f"Python errors found: {len(errors)}")
+                    logger.info(f"Error output: {repr(python_errors[:200])}")
+                        
+                else:
+                    logger.info("No backend container - reading from file")
+                    # Fallback: read from error file
+                    error_file_path = backend_path / ".python-errors.txt"
+                    if error_file_path.exists():
+                        with open(error_file_path, 'r', encoding='utf-8') as f:
+                            python_errors = f.read()
+                    else:
+                        python_errors = "No backend container and no error file found"
+            else:
+                logger.info("No containers - reading from file")
+                # Fallback: read from error file
+                error_file_path = backend_path / ".python-errors.txt"
+                if error_file_path.exists():
+                    with open(error_file_path, 'r', encoding='utf-8') as f:
+                        python_errors = f.read()
+                else:
+                    python_errors = "No containers and no error file found"
+                    
         except Exception as e:
             python_check_status["success"] = False
             python_check_status["error"] = str(e)
-            logger.warning(f"Python error checking failed: {e}")
+            logger.warning(f"Failed to run Python error checker: {e}")
+            python_errors = f"Error running Python error checker: {e}"
         
+        logger.info(f"FINAL RESULT - errors: {repr(python_errors)}")
+        logger.info(f"FINAL RESULT - status: {python_check_status}")
         return {
             "errors": python_errors,
             "status": python_check_status
@@ -666,11 +750,13 @@ class VPSProjectManager:
         
         if file_path.startswith("backend/") and file_path.endswith(".py"):
             # Python file - run Python error check
-            logger.info(f"Running Python error check for {file_path}")
-            python_result = self._run_python_error_check(project_id)
-            if python_result["errors"]:
-                response["python_errors"] = python_result["errors"]
+            logger.info(f"DETECTED PYTHON FILE - Running Python error check for {file_path}")
+            python_result = self._run_python_error_check(project_id, file_path)
+            logger.info(f"Python check result: {python_result}")
+            # Always include full raw response
+            response["python_errors"] = python_result["errors"]
             response["python_check_status"] = python_result["status"]
+            logger.info(f"Final response: {response}")
             
         elif file_path.startswith("frontend/") and (file_path.endswith(".ts") or file_path.endswith(".tsx") or file_path.endswith(".jsx") or file_path.endswith(".js")):
             # TypeScript/JavaScript file - run TypeScript error check

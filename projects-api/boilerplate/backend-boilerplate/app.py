@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from services import api_router
 
-app = FastAPI(title="Project Backend API", version="1.0.0")
+app = FastAPI(title="Project Backend", version="1.0.0")
 
 # CORS configuration for frontend
 app.add_middleware(
@@ -13,12 +13,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include the main API router
-app.include_router(api_router, prefix="/api")
+# Include the main router
+app.include_router(api_router)
 
 @app.get("/")
 def read_root():
-    return {"status": "Backend API running"}
+    return {"status": "Backend running"}
 
 @app.get("/health")
 def health_check():
