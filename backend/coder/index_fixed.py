@@ -31,7 +31,26 @@ def coder(messages, self: GroqAgentState):
         if todo_status:
             print('---- TODOS -----\n')
             print(f"⚠️ CODER: Found todo status ({len(todo_status)} chars), adding to context")
-            todo_msg = {"role": "user", "content": f"Current todo status:\n\n{todo_status}\n\nNote: Continue with the highest priority todo. Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end."}
+            
+            # Check if no todos exist yet
+            if 'no todos created yet' in todo_status:
+                todo_msg = {"role": "user", "content": f"""
+Current todo status:\n\n{todo_status}\n\n
+Note: No todos have been created yet. Please plan and create todos to then follow and systematically work on tasks.
+- First, analyze the user's request and break it down into specific, actionable todos
+- Create todos with appropriate priorities (high, medium, low)
+- Then systematically work on each todo until all are completed, integrated and tested to make sure it works end to end
+- As you work on each todo, update the todo status to in_progress
+- Once you have completed a todo, update the todo status to completed"""}
+            else:
+                todo_msg = {"role": "user", "content": f"""
+Current todo status:\n\n{todo_status}\n\n
+Note: Continue with the highest priority todo. 
+- Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end. 
+- As you work on each todo, update the todo status to in_progress. 
+- Once you have completed a todo, update the todo status to completed.
+- If you are not sure what to do next, check the todo status and pick the highest priority todo."""}
+            
             messages.append(todo_msg)
             self.conversation_history.append(todo_msg)
             print(f"📤 CODER: Added todo status to messages and conversation history: {todo_msg['content']}")
@@ -118,23 +137,32 @@ def coder(messages, self: GroqAgentState):
                         print(f"\n🚨 CODER: EARLY DETECTION - Found update_file action, waiting for path...")
                         print(f"🔍 CODER: Update buffer length: {len(update_file_buffer)} chars")
                     
-                    # Early detection: Check for complete file creation action  
-                    if '<action type="file"' in accumulated_content:
-                        # print(f"\n🔍 CODER: Detected file action start, checking for completion...")
-                        # Check if we have the complete action (with closing tag)
-                        if '</action>' in accumulated_content:
-                            print(f"\n🚨 CODER: COMPLETE FILE ACTION DETECTED - Creating file immediately...")
+                    # Improved early detection: Use parser to check for complete file creation action
+                    if '<action type="file"' in accumulated_content and '</action>' in accumulated_content:
+                        print(f"🔧 DEBUG: USING FIXED VERSION - found file action tags, validating...")
+                        # Use the proper parser to validate we have a complete, valid action
+                        temp_parser = StreamingXMLParser()
+                        temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                        
+                        # Check if we found any complete file actions
+                        file_actions = [action for action in temp_actions if action.get('type') == 'file']
+                        
+                        if file_actions:
+                            print(f"\n🚨 CODER: COMPLETE FILE ACTION VALIDATED - Creating {len(file_actions)} file(s) immediately...")
                             print(f"📊 CODER: File action content length: {len(accumulated_content)} chars")
+                            print(f"📋 CODER: Files to create: {[action.get('path') for action in file_actions]}")
+                            
                             # Process file creation in real-time
                             should_interrupt = True
                             interrupt_action = {
                                 'type': 'create_file_realtime',
-                                'content': accumulated_content
+                                'content': accumulated_content,
+                                'validated_actions': file_actions
                             }
-                            print("⚡ CODER: Breaking from chunk loop for file creation interrupt")
+                            print("⚡ CODER: Breaking from chunk loop for validated file creation interrupt")
                             break
                         else:
-                            # print(f"⏳ CODER: File action incomplete, continuing to stream...")
+                            print(f"⏳ CODER: File action tags found but not yet complete/valid, continuing to stream...")
                             pass
                     
                     # If we detected update_file, keep buffering until we get the path
@@ -249,6 +277,12 @@ def coder(messages, self: GroqAgentState):
                             should_interrupt = True
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for restart_frontend")
+                            break
+                        elif action_type == 'check_errors':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected check_errors action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for check_errors")
                             break
                         elif action_type.startswith('todo_'):
                             print(f"\n📋 CODER: Processing todo action inline: {action_type}")
@@ -480,8 +514,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to start backend service, stopping generation")
-                        break
+                        print(f"❌ Failed to start backend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Backend failed to start. There are errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try starting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'start_frontend':
                     service_result = self._handle_start_frontend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -498,8 +543,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to start frontend service, stopping generation")
-                        break
+                        print(f"❌ Failed to start frontend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Frontend failed to start. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try starting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'restart_backend':
                     service_result = self._handle_restart_backend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -516,8 +572,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to restart backend service, stopping generation")
-                        break
+                        print(f"❌ Failed to restart backend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Backend restart failed. There are likely errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try restarting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'restart_frontend':
                     service_result = self._handle_restart_frontend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -534,7 +601,58 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to restart frontend service, stopping generation")
+                        print(f"❌ Failed to restart frontend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Frontend restart failed. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try restarting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                elif interrupt_action.get('type') == 'check_errors':
+                    error_check_result = self._handle_check_errors_interrupt(interrupt_action)
+                    if error_check_result is not None:
+                        # Add the error check result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        # Format the error results into a readable message
+                        backend_status = "✅ No errors" if error_check_result.get('summary', {}).get('backend_has_errors', True) == False else f"❌ {error_check_result.get('backend', {}).get('error_count', 0)} errors"
+                        frontend_status = "✅ No errors" if error_check_result.get('summary', {}).get('frontend_has_errors', True) == False else f"❌ {error_check_result.get('frontend', {}).get('error_count', 0)} errors"
+                        
+                        error_summary = f"""Error Check Results:
+📊 Overall Status: {error_check_result.get('summary', {}).get('overall_status', 'unknown')}
+🐍 Backend: {backend_status}
+⚛️  Frontend: {frontend_status}
+📈 Total Errors: {error_check_result.get('summary', {}).get('total_errors', 0)}
+
+"""
+                        
+                        # Add detailed errors if any
+                        if error_check_result.get('backend', {}).get('errors'):
+                            error_summary += f"🐍 **Backend Errors:**\n```\n{error_check_result['backend']['errors'][:1000]}\n```\n\n"
+                        
+                        if error_check_result.get('frontend', {}).get('errors'):
+                            error_summary += f"⚛️  **Frontend Errors:**\n```\n{error_check_result['frontend']['errors'][:1000]}\n```\n\n"
+                        
+                        error_summary += "Please fix any critical errors and continue with your response."
+                        
+                        user_msg = {"role": "user", "content": error_summary}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to run error check, stopping generation")
                         break
             else:
                 # No interruption, process any remaining actions and finish
@@ -554,7 +672,7 @@ def coder(messages, self: GroqAgentState):
     
     print(f"\n🏁 CODER: Completed iteration loop after {iteration} iterations")
     print(f"📊 CODER: Final full_response length: {len(full_response)} chars")
-   
+    
     
     # Add current project errors as context at the end of generation
     print("🔍 -- CHECKING FOR ERRORS -----\n")
@@ -572,6 +690,7 @@ def coder(messages, self: GroqAgentState):
     
     print(f"🎉 CODER: Returning full_response with {len(full_response)} chars")
     return full_response
+
 
 def _get_project_errors(self):
     """Get current TypeScript errors for this project (quick read)"""

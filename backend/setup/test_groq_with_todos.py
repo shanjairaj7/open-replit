@@ -19,11 +19,14 @@ from datetime import datetime
 from pathlib import Path
 from groq import Groq
 from typing import Generator, Dict, Optional
+import sys
+sys.path.insert(0, '/Users/shanjairaj/Documents/forks/bolt.diy/backend')
 from shared_models import GroqAgentState, StreamingXMLParser
 from openai import OpenAI
 
 
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, senior_engineer_prompt
+sys.path.insert(0, '/Users/shanjairaj/Documents/forks/bolt.diy/backend')
+from coder.prompts import _build_summary_prompt, senior_engineer_prompt
 from coder.index import coder
 
 
@@ -78,6 +81,9 @@ class BoilerplatePersistentGroq:
             "prompt_tokens": 0,
             "completion_tokens": 0
         }
+        
+        # Todo management
+        self.todos = []
         
         # Paths (for local boilerplate reference)
         print("🐛 DEBUG: Setting up paths")
@@ -160,11 +166,41 @@ class BoilerplatePersistentGroq:
         #     base_prompt = "You are Bolt, an expert full-stack developer."
         
         base_prompt = senior_engineer_prompt
+        
+        # Add todo workflow instructions to the existing prompt
+        todo_workflow_addition = """
+
+## 📋 TODO-DRIVEN WORKFLOW
+As a senior engineer, you naturally work through todos. This is how your mind organizes complex tasks:
+
+**Creating Todos:**
+- Break down requirements into actionable todos: `<action type="todo_create" id="unique_id" priority="high/medium/low" integration="true/false">Description</action>`
+- Use descriptive IDs like: setup_auth, create_dashboard, implement_api
+- Set priority: high (critical), medium (important), low (nice-to-have)  
+- Set integration="true" if the todo requires testing with other components
+
+**Managing Todos:**
+- Start working on a todo: `<action type="todo_update" id="todo_id" status="in_progress"/>`
+- Complete a todo: `<action type="todo_complete" id="todo_id" integration_tested="true/false"/>`
+- List current todos: `<action type="todo_list"/>`
+
+**Integration Focus:**
+- Always test integrations when integration="true" or integration_tested="true"
+- Verify components work together, not just in isolation
+- Update todo status based on actual completion, not just file creation
+
+**Natural Flow:**
+1. Understand requirements → Create todos
+2. Pick highest priority todo → Update to in_progress  
+3. Implement, test, verify → Complete todo
+4. Repeat until all todos done
+
+Work systematically through each todo to build a complete, working solution."""
 
         # Add current project context and extra enforcement for update mode
         context_addition = f"\n\nCURRENT PROJECT:\n{self.get_project_context()}"
         
-        return base_prompt + context_addition
+        return base_prompt + todo_workflow_addition + context_addition
 
     def _load_project_context(self):
         """Load existing project summary and conversation history for update mode"""
@@ -1326,6 +1362,11 @@ export function AppSidebar() {
                 except Exception as e:
                     context += f"\n{file_path}: (Error reading: {e})\n"
         
+        # Add todo status if todos exist
+        todo_status = self._get_todo_status_summary()
+        if todo_status:
+            context += todo_status
+        
         context += f"\n📊 SUMMARY:\n"
         context += f"- Total files: {len(self.project_files)}\n"
         context += f"- Complete boilerplate with navigation, styling, and routing\n"
@@ -1395,319 +1436,11 @@ export function AppSidebar() {
         
         return route_groups
 
-    def send_message_with_chunks(self, message: str) -> str:
-        """Enhanced message handling with planning and step-by-step generation"""
-        
-        # Step 1: Generate implementation plan
-        print("🎯 Phase 1: Generating implementation plan...")
-        plan_xml = self._generate_plan(message)
-        
-        if not plan_xml:
-            print("❌ Failed to generate plan")
-            return "Failed to generate implementation plan"
-        
-        # Save raw plan for debugging
-        self._last_plan_response = plan_xml
-        
-        # Step 2: Parse plan and extract implementation steps
-        print("📋 Phase 2: Parsing implementation plan...")
-        steps = self._parse_plan_xml(plan_xml)
-        
-        if not steps:
-            print("❌ Failed to parse plan into implementation steps")
-            return "Failed to parse implementation plan"
-        
-        print(f"✅ Plan parsed successfully: {len(steps)} implementation steps identified")
-        
-        # Step 2.5: Setup project environment (venv, packages) but DON'T start services
-        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
-        setup_success = self.setup_project_environment()
-        if setup_success:
-            print("✅ Project environment setup completed")
-            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
-        else:
-            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
-        
-        # Step 3: Generate files for each step
-        print("🔨 Phase 3: Implementing files step by step...")
-        for i, step in enumerate(steps, 1):
-            print(f"🔄 Step {i}/{len(steps)}: {step['name']}")
-            success = self._generate_step(step, i)
-            
-            if not success:
-                print(f"❌ Failed to implement step {i}: {step['name']}")
-                return f"Failed to implement: {step['name']}"
-            
-            print(f"✅ Step {i} completed: {step['name']}")
-        
-        print("🎉 All files generated successfully!")
-        return f"Project generated successfully in {len(steps)} steps"
-
-    def _generate_plan(self, user_request: str) -> str:
-        """Generate detailed implementation plan in XML format"""
-        
-        # Update system prompt with current project context
-        current_system_prompt = self._load_system_prompt()
-        
-        planning_prompt = plan_prompts.format(user_request=user_request)
-
-        try:
-            # Use full system prompt with planning instructions
-            planning_messages = [
-                {"role": "system", "content": current_system_prompt},
-                {"role": "user", "content": planning_prompt}
-            ]
-            
-            print("\n🤖 Model response:")
-            print("-" * 60)
-            
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=planning_messages,
-                temperature=0.1,
-                max_tokens=8192,
-                stream=True  # Enable streaming for real-time output
-            )
-            
-            plan_response = ""
-            for chunk in completion:
-                # print(chunk.usage if chunk.usage else 'no chunk...')
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    print(content, end='', flush=True)
-                    plan_response += content
-            
-            print("\n" + "-" * 60)
-            
-            # Add plan to conversation history for later chunks
-            self.conversation_history.extend([
-                {"role": "user", "content": f"Create implementation plan for: {user_request}"},
-                {"role": "assistant", "content": plan_response}
-            ])
-            
-            return plan_response
-            
-        except Exception as e:
-            print(f"❌ Error generating plan: {e}")
-            return None
-
-    def _parse_plan_xml(self, plan_xml: str) -> list:
-        """Parse XML plan into structured chunks using regex to handle malformed XML"""
-        try:
-            # Extract plan XML from response
-            plan_match = re.search(r'<plan>(.*?)</plan>', plan_xml, re.DOTALL)
-            if not plan_match:
-                print("❌ No <plan> tags found in response")
-                print("Full response for debugging:")
-                print(plan_xml[:500] + "..." if len(plan_xml) > 500 else plan_xml)
-                return None
-            
-            plan_content = plan_match.group(1)
-            
-            # Debug: Show extracted plan content
-            print("\n📄 Extracted plan content:")
-            print("-" * 60)
-            print(plan_content[:1000] + "..." if len(plan_content) > 1000 else plan_content)
-            print("-" * 60)
-            
-            steps = []
-            
-            # Extract steps section first
-            steps_match = re.search(r'<steps>(.*?)</steps>', plan_content, re.DOTALL)
-            if not steps_match:
-                print("❌ No <steps> element found in plan")
-                return None
-            
-            steps_content = steps_match.group(1)
-            
-            # Find all step elements with flexible attribute ordering
-            # This pattern handles steps with optional priority and dependencies in any order
-            step_pattern = r'<step\s+([^>]+)>(.*?)</step>'
-            
-            for match in re.finditer(step_pattern, steps_content, re.DOTALL):
-                attributes_str = match.group(1)
-                step_content = match.group(2)
-                
-                # Parse attributes from the step tag
-                id_match = re.search(r'id="([^"]+)"', attributes_str)
-                name_match = re.search(r'name="([^"]+)"', attributes_str)
-                priority_match = re.search(r'priority="([^"]+)"', attributes_str)
-                deps_match = re.search(r'dependencies="([^"]*)"', attributes_str)
-                
-                if not id_match or not name_match:
-                    print(f"⚠️  Skipping step with missing id or name: {attributes_str}")
-                    continue
-                
-                step_id = id_match.group(1)
-                step_name = name_match.group(1)
-                step_priority = priority_match.group(1) if priority_match else 'medium'
-                step_dependencies = deps_match.group(1) if deps_match else ''
-                
-                # Extract description
-                desc_match = re.search(r'<description>(.*?)</description>', step_content, re.DOTALL)
-                description = desc_match.group(1).strip() if desc_match else ''
-                
-                # Extract files section as raw string (everything between <files> tags)
-                files_match = re.search(r'<files>(.*?)</files>', step_content, re.DOTALL)
-                files_raw = files_match.group(1).strip() if files_match else ''
-                
-                # Check for malformed file tags and warn
-                if files_raw and '</' not in files_raw.split('>')[0]:
-                    # Likely has malformed tags like <frontend/src/file.ts>
-                    malformed_pattern = r'<([^/>\s]+/[^>]+)>'
-                    malformed_matches = re.findall(malformed_pattern, files_raw)
-                    if malformed_matches:
-                        print(f"⚠️  Found {len(malformed_matches)} malformed file tag(s) in step {step_id}")
-                        for malformed in malformed_matches[:3]:  # Show first 3
-                            print(f"    - <{malformed}>")
-                
-                step_data = {
-                    'id': step_id,
-                    'name': step_name,
-                    'priority': step_priority,
-                    'dependencies': [d.strip() for d in step_dependencies.split(',') if d.strip()],
-                    'description': description,
-                    'files_raw': files_raw
-                }
-                
-                steps.append(step_data)
-                
-                print(f"📌 Parsed step {step_id}: {step_name}")
-                print(f"   Files content: {len(files_raw)} chars")
-                if step_dependencies:
-                    print(f"   Dependencies: {step_dependencies}")
-            
-            if not steps:
-                print("❌ No steps found in plan")
-                return None
-                
-            print(f"\n✅ Successfully parsed {len(steps)} steps")
-            return steps
-            
-        except Exception as e:
-            print(f"❌ Error parsing plan with regex: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _generate_step(self, step: dict, step_number: int) -> bool:
-        """Generate all files for a specific implementation step using unified interrupt-based approach"""
-        
-        step_name = step['name']
-        step_description = step['description']
-        files_raw = step.get('files_raw', '')
-        
-        # Use the raw files content directly
-        files_to_create = files_raw if files_raw else "No files specified"
-
-        # Create natural user message for the coder
-        step_user_message = f"""
-{f"✅ Step {step_number-1} is complete. Now starting:" if step_number > 1 else "Starting:"}
-
-🎯 STEP {step_number}: {step_name}
-
-**YOUR TASK:**
-{step_description}
-
-**CRITICAL BACKEND TESTING RULES:**
-1. Start backend: <action type="start_backend"/>
-2. {f'This is the backend url: {self.backend_url}. Use this for your integrations, Do not change this' if self.backend_url else "Run 'start_backend' action command to get the backend URL"}
-3. NEVER use localhost - the backend is on a cloud server
-4. Test with urllib using the ACTUAL URL you received
-
-Remember: If backend URL is provided, you MUST only use that. Dont assume anything else. If not, start the backend.
-"""
-
-        try:
-            print(f"🚀 Starting step {step_number}: {step_name}")
-            
-            # Prepare step info for the unified function
-            step_info = {
-                'step_number': step_number,
-                'name': step_name,
-                'description': step_description,
-                'files_raw': files_raw
-            }
-            
-            # Use the unified interrupt-based approach for step generation
-            # This provides: filtered conversation history, runtime env info, real-time saving, summarization
-            success = self._process_update_request_with_interrupts(
-                user_message=step_user_message,
-                mode="step",
-                step_info=step_info
-            )
-            
-            if success:
-                print(f"\n🎯 Step {step_number} completed: {step_name}")
-                return True
-            else:
-                print(f"\n❌ Step {step_number} failed: {step_name}")
-                return False
-            
-        except Exception as e:
-            print(f"❌ Error generating step {step_number}: {e}")
-            return False
-
     def _add_route_to_app(self, path: str, component: str, icon: str, label: str, group: str = None):
         """Automatically add a route to App.tsx and update sidebar"""
         # Update App.tsx with the route
         self._update_routes_in_app(path, component)
-        
-        # Update the sidebar with the new route
-        self._update_sidebar_routes(path, component, icon, label, group)
 
-    def _update_routes_in_app(self, path: str, component: str):
-        """Add route to App.tsx Routes section"""
-        content = self._read_file_via_api('frontend/src/App.tsx')
-        if not content:
-            return
-        
-        # Add import for the component if not already present
-        if f'import {component}' not in content:
-            # Add import after existing imports
-            import_section = content.split('\n')
-            last_import_line = -1
-            for i, line in enumerate(import_section):
-                if line.strip().startswith('import'):
-                    last_import_line = i
-            
-            if last_import_line >= 0:
-                import_section.insert(last_import_line + 1, f"import {component} from './pages/{component}'")
-                content = '\n'.join(import_section)
-        
-        # Add route to Routes section (only if it doesn't exist)
-        if f'path="{path}"' not in content:
-            # Find the last Route line and add after it with proper indentation
-            lines = content.split('\n')
-            last_route_index = -1
-            
-            for i, line in enumerate(lines):
-                if '<Route' in line and 'path=' in line:
-                    last_route_index = i
-            
-            if last_route_index != -1:
-                # Get indentation from the last route
-                last_route_line = lines[last_route_index]
-                indent = len(last_route_line) - len(last_route_line.lstrip())
-                new_route = ' ' * indent + f'<Route path="{path}" element={{<{component} />}} />'
-                
-                # Insert the new route after the last route
-                lines.insert(last_route_index + 1, new_route)
-                content = '\n'.join(lines)
-        
-        # Write updated content via API
-        self._write_file_via_api('frontend/src/App.tsx', content)
-
-    def _update_sidebar_routes(self, path: str, component: str, icon: str, label: str, group: str = None):
-        """Add route to AppSidebar component with group support"""
-        # Skip dynamic routes (containing :parameter) from sidebar
-        if ':' in path:
-            print(f"🚫 Skipping dynamic route {path} from sidebar (dynamic routes shouldn't appear in navigation)")
-            return
-        
-        content = self._read_file_via_api('frontend/src/components/app-sidebar.tsx')
-        if not content:
-            return
         
         # Check if route already exists
         if f'url: "{path}"' in content:
@@ -2796,6 +2529,135 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"❌ Error restarting frontend: {e}")
             return None
 
+    def _handle_todo_actions(self, action: dict):
+        """Handle todo-related actions"""
+        action_type = action.get('type')
+        
+        if action_type == 'todo_create':
+            # Get attributes from raw_attrs if available
+            attrs = action.get('raw_attrs', {})
+            todo = {
+                'id': attrs.get('id') or action.get('id'),
+                'description': action.get('content', ''),
+                'priority': attrs.get('priority', 'medium'),
+                'integration': attrs.get('integration', 'false') == 'true',
+                'status': 'pending',
+                'created_at': datetime.now().isoformat()
+            }
+            self.todos.append(todo)
+            print(f"📋 Created todo: {todo['id']} - {todo['description']}")
+            
+        elif action_type == 'todo_update':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            new_status = attrs.get('status') or action.get('status')
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    old_status = todo['status']
+                    todo['status'] = new_status
+                    print(f"🔄 Updated todo {todo_id}: {old_status} → {new_status}")
+                    
+                    # If todo moved to in_progress, provide work guidance
+                    if new_status == 'in_progress':
+                        print(f"🎯 TODO IN PROGRESS: {todo['description']}")
+                        print(f"💡 Instructions: Start working on this todo now. Create the necessary files, implement the functionality, and test it works.")
+                        if todo.get('integration'):
+                            print(f"🔗 Integration Required: This todo requires testing with other components")
+                    break
+                    
+        elif action_type == 'todo_complete':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            integration_tested = attrs.get('integration_tested', 'false') == 'true'
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    todo['status'] = 'completed'
+                    todo['integration_tested'] = integration_tested
+                    todo['completed_at'] = datetime.now().isoformat()
+                    
+                    if integration_tested:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: Yes")
+                    else:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: No")
+                    break
+                    
+        elif action_type == 'todo_list':
+            self._display_todos()
+    
+    def _display_todos(self):
+        """Display current todo status"""
+        if not self.todos:
+            print("📋 No todos created yet")
+            return
+        
+        print("\n📋 CURRENT TODO STATUS:")
+        print("=" * 50)
+        
+        completed = [t for t in self.todos if t['status'] == 'completed']
+        in_progress = [t for t in self.todos if t['status'] == 'in_progress'] 
+        pending = [t for t in self.todos if t['status'] == 'pending']
+        
+        if completed:
+            print(f"✅ COMPLETED ({len(completed)}):")
+            for todo in completed:
+                integration_icon = "🔗✅" if todo.get('integration_tested') else "📝✅"
+                print(f"   {integration_icon} {todo['id']}")
+        
+        if in_progress:
+            print(f"🔄 IN PROGRESS ({len(in_progress)}):")
+            for todo in in_progress:
+                print(f"   🔄 {todo['id']} - {todo['description']}")
+        
+        if pending:
+            print(f"⏳ PENDING ({len(pending)}):")
+            for todo in pending:
+                print(f"   ⏳ {todo['id']} - {todo['description']}")
+        
+        print("=" * 50)
+
+    def _get_todo_status_summary(self) -> str:
+        """Generate structured todo status summary for model awareness"""
+        if not self.todos:
+            return ""
+        
+        summary = "\n📋 **CURRENT TODO STATUS:**\n"
+        summary += "=" * 50 + "\n"
+        
+        # Group todos by status
+        completed = [t for t in self.todos if t['status'] == 'completed']
+        in_progress = [t for t in self.todos if t['status'] == 'in_progress'] 
+        pending = [t for t in self.todos if t['status'] == 'pending']
+        
+        # Show completed todos
+        if completed:
+            summary += f"\n✅ **COMPLETED ({len(completed)}):**\n"
+            for i, todo in enumerate(completed, 1):
+                integration_status = "🔗 Integrated" if todo.get('integration_tested') else "📝 Not integrated"
+                summary += f"   {i}. [{todo['id']}] {todo['description']} ({integration_status})\n"
+        
+        # Show in progress todos  
+        if in_progress:
+            summary += f"\n🔄 **IN PROGRESS ({len(in_progress)}):**\n"
+            for i, todo in enumerate(in_progress, 1):
+                summary += f"   {i}. [{todo['id']}] {todo['description']}\n"
+        
+        # Show pending todos
+        if pending:
+            summary += f"\n⏳ **PENDING ({len(pending)}):**\n"
+            for i, todo in enumerate(pending, 1):
+                priority = todo.get('priority', 'medium')
+                integration = "🔗 Integration required" if todo.get('integration') else "📝 Standalone"
+                summary += f"   {i}. [{todo['id']}] {todo['description']} (Priority: {priority}, {integration})\n"
+        
+        summary += "\n" + "=" * 50 + "\n"
+        summary += "**INSTRUCTIONS:** Use the todo IDs above when updating status. Continue working systematically through pending todos.\n"
+        
+        return summary
+
 def main():
     """Main function supporting both creation and update modes"""
     print("🐛 DEBUG: Entered main function")
@@ -2886,8 +2748,35 @@ def main():
         print(f"📝 {user_request}")
         print(f"\n{'='*50}")
         
-        # Use the new chunk-based generation system
-        response = system.send_message_with_chunks(user_request)
+        # Phase 2.5: Setup project environment (venv, packages) but DON'T start services
+        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
+        setup_success = system.setup_project_environment()
+        if setup_success:
+            print("✅ Project environment setup completed")
+            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
+        else:
+            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
+        
+        # Use natural todo workflow with direct coder call
+        print("🧠 Using natural todo workflow with coder system...")
+        
+        system.conversation_history.append({"role": "system", "content": system._load_system_prompt()})
+        
+        # Add the user request to conversation history
+        system.conversation_history.append({"role": "user", "content": user_request})
+        
+        # Use the coder system directly with current conversation history
+        from coder.index import coder
+        response = coder(messages=system.conversation_history, self=system)
+        
+        # Add model response to conversation history
+        if response:
+            system.conversation_history.append({"role": "assistant", "content": response})
+            
+            # Add current todo status as user message for next iteration awareness
+            todo_status = system._get_todo_status_summary()
+            if todo_status:
+                system.conversation_history.append({"role": "user", "content": todo_status})
         
         # Save full raw response to markdown file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

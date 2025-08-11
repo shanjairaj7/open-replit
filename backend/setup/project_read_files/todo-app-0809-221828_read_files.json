@@ -1,0 +1,10 @@
+{
+  "project_id": "todo-app-0809-221828",
+  "created_at": "2025-08-09T22:19:31.368364",
+  "last_updated": "2025-08-09T22:19:31.368371",
+  "read_files": [
+    "backend/models/todo.py",
+    "backend/services/todo_service.py"
+  ],
+  "total_files_read": 2
+}

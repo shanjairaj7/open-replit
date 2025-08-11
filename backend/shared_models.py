@@ -99,6 +99,11 @@ class StreamingXMLParser:
                     'command': attrs.get('command', ''),
                     'cwd': attrs.get('cwd', ''),
                     'new_name': attrs.get('new_name', ''),
+                    'id': attrs.get('id', ''),
+                    'priority': attrs.get('priority', ''),
+                    'integration': attrs.get('integration', ''),
+                    'status': attrs.get('status', ''),
+                    'integration_tested': attrs.get('integration_tested', ''),
                     'content': '',
                     'raw_attrs': attrs
                 }
@@ -126,6 +131,9 @@ class StreamingXMLParser:
             content_end = start_match.end() + end_match.start()
             content = self.buffer[content_start:content_end]
             
+            # Strip unnecessary wrapper tags that models sometimes add
+            content = self._strip_content_wrapper_tags(content)
+            
             # Parse attributes
             attrs = self._parse_attributes(start_match.group(1))
             
@@ -135,9 +143,43 @@ class StreamingXMLParser:
                 'command': attrs.get('command', ''),
                 'cwd': attrs.get('cwd', ''),
                 'new_name': attrs.get('new_name', ''),
+                'id': attrs.get('id', ''),
+                'priority': attrs.get('priority', ''),
+                'integration': attrs.get('integration', ''),
+                'status': attrs.get('status', ''),
+                'integration_tested': attrs.get('integration_tested', ''),
                 'content': content,
                 'raw_attrs': attrs
             }
             
             # Remove processed part from buffer
             self.buffer = self.buffer[start_match.end() + end_match.end():]
+    
+    def _strip_content_wrapper_tags(self, content: str) -> str:
+        """Strip unnecessary wrapper tags that models sometimes add around file content"""
+        content = content.strip()
+        
+        # Common wrapper tags that models use incorrectly
+        wrapper_tags = [
+            'content',
+            'code', 
+            'file-content',
+            'file_content',
+            'body',
+            'text'
+        ]
+        
+        for tag in wrapper_tags:
+            # Check for opening and closing tags wrapping the entire content
+            pattern = rf'^<{tag}[^>]*>\s*(.*?)\s*</{tag}>$'
+            match = re.search(pattern, content, re.DOTALL)
+            if match:
+                # Only strip if the tags wrap the ENTIRE content
+                inner_content = match.group(1)
+                # Make sure we're not removing content that should be part of the file
+                # If the inner content looks like real file content (not just wrapped), extract it
+                if inner_content.strip():
+                    content = inner_content
+                    break
+        
+        return content

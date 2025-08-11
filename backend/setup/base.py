@@ -17,13 +17,18 @@ import time
 import argparse
 from datetime import datetime
 from pathlib import Path
+import sys
+
+# Add the parent directory to sys.path to enable imports
+backend_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(backend_dir))
+
 from groq import Groq
 from typing import Generator, Dict, Optional
 from shared_models import GroqAgentState, StreamingXMLParser
 from openai import OpenAI
 
-
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, senior_engineer_prompt
+from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt
 from coder.index import coder
 
 
@@ -71,6 +76,8 @@ class BoilerplatePersistentGroq:
         # Track files that have been read - project-specific persistence
         self.read_files_tracker = set()  # Files read in current session
         self.read_files_persistent = set()  # Files read across all sessions for THIS project
+        
+        self.todos = []
         
         # Simplified token tracking - just 3 variables
         self.token_usage = {
@@ -2394,7 +2401,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         print()
         
         # Start initial generation
-        response_content = self._generate_with_interrupts(messages)
+        response_content = coder(messages=messages, self=self)
         
         # Add final response to conversation history and save in real-time
         if response_content:
@@ -2407,14 +2414,6 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         else:
             print(f"✅ Update request processed successfully")
             return response_content
-
-    def _generate_with_interrupts(self, messages: list) -> str:
-        """Generate response with interrupt-and-continue pattern for read_file actions"""
-        print(f"🔄 Starting generation with interrupt support...")
-        
-        full_response = coder(messages=messages, self=self)
-
-        return full_response
 
     def _handle_read_file_interrupt(self, action: dict) -> str:
         """Handle read_file action during interrupt"""
@@ -2795,6 +2794,113 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         except Exception as e:
             print(f"❌ Error restarting frontend: {e}")
             return None
+    
+    def _handle_todo_actions(self, action: dict):
+        """Handle todo-related actions"""
+        action_type = action.get('type')
+        
+        if action_type == 'todo_create':
+            # Get attributes from raw_attrs if available
+            attrs = action.get('raw_attrs', {})
+            todo = {
+                'id': attrs.get('id') or action.get('id'),
+                'description': action.get('content', ''),
+                'priority': attrs.get('priority', 'medium'),
+                'integration': attrs.get('integration', 'false') == 'true',
+                'status': 'pending',
+                'created_at': datetime.now().isoformat()
+            }
+            self.todos.append(todo)
+            print(f"📋 Created todo: {todo['id']} - {todo['description']}")
+            
+        elif action_type == 'todo_update':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            new_status = attrs.get('status') or action.get('status')
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    old_status = todo['status']
+                    todo['status'] = new_status
+                    print(f"🔄 Updated todo {todo_id}: {old_status} → {new_status}")
+                    
+                    # If todo moved to in_progress, provide work guidance
+                    if new_status == 'in_progress':
+                        print(f"🎯 TODO IN PROGRESS: {todo['description']}")
+                        print(f"💡 Instructions: Start working on this todo now. Create the necessary files, implement the functionality, and test it works.")
+                        if todo.get('integration'):
+                            print(f"🔗 Integration Required: This todo requires testing with other components")
+                    break
+                    
+        elif action_type == 'todo_complete':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            integration_tested = attrs.get('integration_tested', 'false') == 'true'
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    todo['status'] = 'completed'
+                    todo['integration_tested'] = integration_tested
+                    todo['completed_at'] = datetime.now().isoformat()
+                    
+                    if integration_tested:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: Yes")
+                    else:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: No")
+                    break
+
+    def _display_todos(self):
+        """Display current todo status and return structured todo list"""
+        if not self.todos:
+            todo_tree = "📋 todos/\n└── (no todos created yet)"
+            print("📋 No todos created yet")
+            return todo_tree
+        
+        # Build structured todo tree
+        todo_tree = "📋 todos/\n"
+        
+        # Group todos by status
+        completed = [t for t in self.todos if t['status'] == 'completed']
+        in_progress = [t for t in self.todos if t['status'] == 'in_progress'] 
+        pending = [t for t in self.todos if t['status'] == 'pending']
+        
+        # Add completed todos
+        if completed:
+            todo_tree += f"├── ✅ completed/ ({len(completed)} items)\n"
+            for i, todo in enumerate(completed):
+                is_last = i == len(completed) - 1
+                integration_icon = "🔗" if todo.get('integration_tested') else "📝"
+                connector = "└──" if is_last else "├──"
+                todo_tree += f"│   {connector} {integration_icon} {todo['id']} - {todo['description']}\n"
+        
+        # Add in progress todos
+        if in_progress:
+            todo_tree += f"├── 🔄 in_progress/ ({len(in_progress)} items)\n"
+            for i, todo in enumerate(in_progress):
+                is_last = i == len(in_progress) - 1
+                priority_icon = "🔥" if todo.get('priority') == 'high' else "⚡" if todo.get('priority') == 'medium' else "📌"
+                connector = "└──" if is_last else "├──"
+                todo_tree += f"│   {connector} {priority_icon} {todo['id']} - {todo['description']}\n"
+        
+        # Add pending todos
+        if pending:
+            todo_tree += f"└── ⏳ pending/ ({len(pending)} items)\n"
+            for i, todo in enumerate(pending):
+                is_last = i == len(pending) - 1
+                priority_icon = "🔥" if todo.get('priority') == 'high' else "⚡" if todo.get('priority') == 'medium' else "📌"
+                connector = "└──" if is_last else "├──"
+                indent = "    " if is_last else "│   "
+                todo_tree += f"{indent}{connector} {priority_icon} {todo['id']} - {todo['description']}\n"
+        
+        # Print the tree structure
+        print("\n📋 CURRENT TODO STATUS:")
+        print("=" * 50)
+        print(todo_tree.rstrip())
+        print("=" * 50)
+        
+        return todo_tree.rstrip()
 
 def main():
     """Main function supporting both creation and update modes"""
@@ -2818,8 +2924,7 @@ def main():
         print("❌ Error: GROQ_API_KEY environment variable is required")
         return
     
-    # Determine mode based on arguments
-    print("🐛 DEBUG: Determining mode")
+    # Determine mode and prepare message
     if args.project_id and args.message:
         # UPDATE MODE
         print("🐛 DEBUG: Entering update mode")
@@ -2828,26 +2933,14 @@ def main():
         print(f"📋 Project ID: {args.project_id}")
         print(f"💬 Update Request: {args.message}")
         
-        # Initialize system
+        # Initialize system for existing project
         system = BoilerplatePersistentGroq(
             api_key='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',
             project_id=args.project_id
         )
         
-        # Process the update request
-        print(f"\n{'='*60}")
-        print("🔄 PROCESSING UPDATE REQUEST")
-        print("="*60)
-        
-        # Send the update message with interrupt support
-        system._process_update_request_with_interrupts(args.message)
-        
-        # Save updated conversation history
-        system._save_conversation_history()
-        
-        print(f"\n✅ UPDATE COMPLETED!")
-        print(f"🔄 Project updated successfully")
-        return
+        user_request = args.message
+        mode = "update"
         
     else:
         # CREATION MODE (default behavior)
@@ -2859,18 +2952,21 @@ def main():
             user_request = args.message
         else:
             # Demo request for testing
-            user_request = "Create a notes app for me simialr to notion where i can just write my notes and save them."
+            user_request = "build me a todo app"
         
         # Generate project name based on the request with timestamp for uniqueness
         print("🐛 DEBUG: Generating project name")
+        
         base_project_name = generate_project_name(user_request)
         timestamp = datetime.now().strftime("%H%M%S")  # Add time for uniqueness
         project_name = f"{base_project_name}-{timestamp}"
+        
         print(f"🐛 DEBUG: Project name: {project_name}")
         print("🐛 DEBUG: Creating BoilerplatePersistentGroq instance")
-        system = BoilerplatePersistentGroq(api_key, project_name)
-        print("🐛 DEBUG: BoilerplatePersistentGroq instance created successfully")
         
+        system = BoilerplatePersistentGroq(api_key, project_name)
+        
+        print("🐛 DEBUG: BoilerplatePersistentGroq instance created successfully")
         print("\n" + "="*60)
         print("🚀 Enhanced Boilerplate Persistent Groq System")
         print("="*60)
@@ -2882,62 +2978,36 @@ def main():
         print("✅ Model knows all packages are pre-installed")
         print()
         
-        print(f"\n{'='*20} PROJECT CREATION {'='*20}")
-        print(f"📝 {user_request}")
-        print(f"\n{'='*50}")
+        # Phase 2.5: Setup project environment (venv, packages) but DON'T start services
+        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
+        setup_success = system.setup_project_environment()
+        if setup_success:
+            print("✅ Project environment setup completed")
+            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
+        else:
+            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
         
-        # Use the new chunk-based generation system
-        response = system.send_message_with_chunks(user_request)
+
         
-        # Save full raw response to markdown file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        response_file = system.backend_dir / f"groq_chunks_response_{timestamp}.md"
-        
-        with open(response_file, 'w', encoding='utf-8') as f:
-            f.write(f"# Groq Model Response - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"## Request\n{user_request}\n\n")
-            f.write(f"## Response Summary\n{response}\n\n")
-            
-            # Save the actual plan XML if available
-            if hasattr(system, '_last_plan_response'):
-                f.write(f"## Full Plan XML\n\n")
-                f.write(system._last_plan_response)
-        
-        print(f"💾 Full raw response saved to: {response_file}")
-        
-        # Show clean response (without XML tags for demo)
-        lines = response.split('\n')
-        clean_lines = []
-        in_action = False
-        
-        for line in lines:
-            if '<action type="file"' in line:
-                in_action = True
-                continue
-            elif '</action>' in line:
-                in_action = False
-                continue
-            elif not in_action and not line.strip().startswith('<'):
-                clean_lines.append(line)
-        
-        clean_response = '\n'.join(clean_lines).strip()
-        if clean_response:
-            print(f"🤖 {clean_response}")
-        
-        print(f"\n📊 Project Status: {len(system.project_files)} files")
-        
-        # Show project structure after each request
-        context = system.get_project_context()
-        if context:
-            structure_lines = [line for line in context.split('\n') 
-                             if '📂 CURRENT FILE STRUCTURE:' in line or 
-                                line.startswith(('├──', '└──', 'demo_dashboard/'))]
-            if len(structure_lines) > 1:
-                print("\n📁 Updated Structure:")
-                for line in structure_lines[1:]:  # Skip the header
-                    print(line)
+        mode = "creation"
     
-    print('Project done ✅')    
+    # Process the request using the same method for both modes
+    print(f"\n{'='*60}")
+    print(f"🔄 PROCESSING {mode.upper()} REQUEST")
+    print("="*60)
+    print(f"📝 {user_request}")
+    print(f"\n{'='*50}")
+    
+    # Send the message with interrupt support (works for both creation and update)
+    system._process_update_request_with_interrupts(user_request)
+    
+    # Save updated conversation history
+    system._save_conversation_history()
+    
+    print(f"\n✅ {mode.upper()} COMPLETED!")
+    print(f"🔄 Project processed successfully")
+    
+    print('Project done ✅')
 
 if __name__ == "__main__":
     main()

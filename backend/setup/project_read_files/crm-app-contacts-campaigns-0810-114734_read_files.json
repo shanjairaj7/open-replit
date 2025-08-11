@@ -1,0 +1,21 @@
+{
+  "project_id": "crm-app-contacts-campaigns-0810-114734",
+  "created_at": "2025-08-10T11:52:08.636961",
+  "last_updated": "2025-08-10T11:52:08.636975",
+  "read_files": [
+    "backend/services/contact_service.py",
+    "backend/models/user.py",
+    "backend/test_check_campaign.py",
+    "backend/app.py",
+    "backend/test_send_campaign.py",
+    "backend/models/contact_models.py",
+    "backend/test_campaigns.py",
+    "backend/models/campaign_models.py",
+    "backend/test_full_flow.py",
+    "backend/test_contacts.py",
+    "backend/services/campaign_service.py",
+    "backend/test_check_contact.py",
+    "backend/services/__init__.py"
+  ],
+  "total_files_read": 13
+}

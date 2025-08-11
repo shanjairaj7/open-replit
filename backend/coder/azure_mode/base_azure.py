@@ -17,14 +17,39 @@ import time
 import argparse
 from datetime import datetime
 from pathlib import Path
+import sys
+
+# Add the parent directory to sys.path to enable imports
+backend_dir = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(backend_dir))
+
 from groq import Groq
 from typing import Generator, Dict, Optional
 from shared_models import GroqAgentState, StreamingXMLParser
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 
+# azure openai - DeepSeek-R1 Configuration (Tested and Working)
+endpoint = "https://rajsu-m9qoo96e-eastus2.openai.azure.com/"  # Updated to correct endpoint
+model_name = "DeepSeek-R1-0528"
+deployment = "DeepSeek-R1-0528"
 
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, senior_engineer_prompt
-from coder.index import coder
+subscription_key = "FMj8fTNAOYsSv4jMIq7W0CbHATRiQAUa0MQIR6wuqlS8vvaT6ZoSJQQJ99BDACHYHv6XJ3w3AAAAACOGVJL1"
+api_version = "2024-12-01-preview"  # Updated to correct API version
+
+azure_client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=endpoint,
+    api_key=subscription_key,
+)
+
+openai_client = OpenAI(
+    base_url='https://openrouter.ai/api/v1', 
+    api_key='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', 
+    default_headers={"x-include-usage": 'true'}
+)
+
+from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt
+from coder.azure_mode.index_fixed_azure import coder
 
 
 def generate_project_name(user_request: str) -> str:
@@ -62,9 +87,9 @@ class BoilerplatePersistentGroq:
     
     def __init__(self, api_key: str = None, project_name: str = None, api_base_url: str = "http://localhost:8000/api", project_id: str = None):
         print("🐛 DEBUG: Starting BoilerplatePersistentGroq __init__")
-        self.client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=api_key or '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', default_headers={"x-include-usage": 'true'})
-        print("🐛 DEBUG: Groq client created")
-        self.model = "qwen/qwen3-coder"
+        self.client = azure_client
+        print("🐛 DEBUG: Azure OpenAI client created with DeepSeek-R1")
+        self.model = deployment  # Use deployment name for Azure OpenAI
         self.conversation_history = []  # Store conversation messages
         self.api_base_url = api_base_url
         
@@ -72,8 +97,19 @@ class BoilerplatePersistentGroq:
         self.read_files_tracker = set()  # Files read in current session
         self.read_files_persistent = set()  # Files read across all sessions for THIS project
         
+        self.todos = []
+        
         # Simplified token tracking - just 3 variables
         self.token_usage = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_prompt_tokens": 0,      # For backwards compatibility
+            "total_completion_tokens": 0   # For backwards compatibility
+        }
+        
+        # Session-specific token tracking (reset each session)
+        self.session_token_usage = {
             "total_tokens": 0,
             "prompt_tokens": 0,
             "completion_tokens": 0
@@ -198,7 +234,9 @@ class BoilerplatePersistentGroq:
                     self.token_usage = {
                         'total_tokens': old_usage.get('total_tokens', 0),
                         'prompt_tokens': old_usage.get('total_prompt_tokens', 0),
-                        'completion_tokens': old_usage.get('total_completion_tokens', 0)
+                        'completion_tokens': old_usage.get('total_completion_tokens', 0),
+                        'total_prompt_tokens': old_usage.get('total_prompt_tokens', 0),
+                        'total_completion_tokens': old_usage.get('total_completion_tokens', 0)
                     }
             print(f"💬 Loaded conversation history from: {conversation_file}")
             print(f"📚 Loaded read files tracker: {len(self.read_files_persistent)} files previously read")
@@ -397,27 +435,48 @@ Make this summary extremely detailed and comprehensive. Include specific file na
 IMPORTANT: Write this as if explaining the project to a new developer who needs to understand everything that has happened so far."""
 
         try:
-            # Generate summary using API
+            # Generate summary using API with streaming
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert technical writer who creates comprehensive project documentation. Create detailed summaries that capture all important context for software development projects."},
                     {"role": "user", "content": summary_prompt}
                 ],
-                max_tokens=10000,  # Allow for very detailed summary
-                temperature=0.1,   # Keep it factual and consistent
+                max_completion_tokens=10000,  # Allow for very detailed summary
+                # temperature=0.1,   # Keep it factual and consistent
+                stream=True,
+                stream_options={"include_usage": True}
             )
             
-            summary_content = response.choices[0].message.content
-            
-            # Track token usage for summary generation
-            if hasattr(response, 'usage') and response.usage:
-                usage = response.usage
-                self.token_usage['prompt_tokens'] = usage.prompt_tokens
-                self.token_usage['completion_tokens'] = usage.completion_tokens
-                self.token_usage['total_tokens'] = usage.total_tokens
+            print("📝 SUMMARY: Generating project summary...")
+            summary_content = ""
+            for chunk in response:
+                # Check for usage information
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    print(f"\n💰 SUMMARY: Usage - Prompt: {chunk.usage.prompt_tokens}, Completion: {chunk.usage.completion_tokens}, Total: {chunk.usage.total_tokens}")
+                    # Update token usage tracking
+                    usage = chunk.usage
+                    self.token_usage['total_prompt_tokens'] += usage.prompt_tokens
+                    self.token_usage['total_completion_tokens'] += usage.completion_tokens
+                    self.token_usage['total_tokens'] = (
+                        self.token_usage['total_prompt_tokens'] + 
+                        self.token_usage['total_completion_tokens']
+                    )
                 
-                print(f"📊 Summary generation used: {usage.total_tokens} tokens")
+                if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta:
+                        # 🧠 CAPTURE DEEPSEEK'S REASONING/THINKING PROCESS
+                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            print(f"\n💭 THINKING: {delta.reasoning_content}", end='', flush=True)
+                        
+                        # Regular response content
+                        if hasattr(delta, 'content') and delta.content:
+                            content = delta.content
+                            print(content, end='', flush=True)
+                        summary_content += content
+            
+            print(f"\n✅ SUMMARY: Generated summary ({len(summary_content)} characters)")
             
             return summary_content
             
@@ -438,7 +497,9 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         self.token_usage = {
             'total_tokens': 0,
             'prompt_tokens': 0,
-            'completion_tokens': 0
+            'completion_tokens': 0,
+            'total_prompt_tokens': 0,
+            'total_completion_tokens': 0
         }
 
     def _get_filtered_conversation_history(self) -> list:
@@ -1464,14 +1525,22 @@ export function AppSidebar() {
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=planning_messages,
-                temperature=0.1,
-                max_tokens=8192,
-                stream=True  # Enable streaming for real-time output
+                # temperature=0.1,
+                max_completion_tokens=8192,
+                stream=True,  # Enable streaming for real-time output
+                stream_options={"include_usage": True}  # Include usage information in streaming
             )
             
             plan_response = ""
             for chunk in completion:
-                # print(chunk.usage if chunk.usage else 'no chunk...')
+                # Check for usage information
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    print(f"\n💰 PLANNING: Usage - Prompt: {chunk.usage.prompt_tokens}, Completion: {chunk.usage.completion_tokens}, Total: {chunk.usage.total_tokens}")
+                    # Log reasoning tokens if available
+                    if hasattr(chunk.usage, 'completion_tokens_details') and hasattr(chunk.usage.completion_tokens_details, 'reasoning_tokens'):
+                        if chunk.usage.completion_tokens_details.reasoning_tokens > 0:
+                            print(f"🧠 PLANNING: Reasoning Tokens: {chunk.usage.completion_tokens_details.reasoning_tokens}")
+                
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     print(content, end='', flush=True)
@@ -2185,27 +2254,48 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         summary_prompt = _build_summary_prompt(self)
         
         try:
-            # Call Groq to generate the summary
+            # Call Azure OpenAI to generate the summary with streaming
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are an expert technical writer who creates comprehensive project documentation. Create a detailed summary of the implemented project based on the conversation history."},
                     {"role": "user", "content": summary_prompt}
                 ],
-                max_tokens=4000,
-                temperature=0.3
+                max_completion_tokens=4000,
+                # temperature=0.3
+                stream=True,
+                stream_options={"include_usage": True}
             )
             
-            summary_content = response.choices[0].message.content
-            
-            # Track token usage for non-streaming call
-            if hasattr(response, 'usage'):
-                usage = response.usage
-                self.token_usage['prompt_tokens'] = usage.prompt_tokens
-                self.token_usage['completion_tokens'] = usage.completion_tokens
-                self.token_usage['total_tokens'] = usage.total_tokens
+            print("📝 PROJECT_SUMMARY: Generating final project summary...")
+            summary_content = ""
+            for chunk in response:
+                # Check for usage information
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    print(f"\n💰 PROJECT_SUMMARY: Usage - Prompt: {chunk.usage.prompt_tokens}, Completion: {chunk.usage.completion_tokens}, Total: {chunk.usage.total_tokens}")
+                    # Update token usage tracking
+                    usage = chunk.usage
+                    self.token_usage['total_prompt_tokens'] += usage.prompt_tokens
+                    self.token_usage['total_completion_tokens'] += usage.completion_tokens
+                    self.token_usage['total_tokens'] = (
+                        self.token_usage['total_prompt_tokens'] + 
+                        self.token_usage['total_completion_tokens']
+                    )
                 
-                print(f"📊 Token usage for summary: {usage.total_tokens} tokens")
+                if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta:
+                        # 🧠 CAPTURE DEEPSEEK'S REASONING/THINKING PROCESS
+                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            print(f"\n💭 THINKING: {delta.reasoning_content}", end='', flush=True)
+                        
+                        # Regular response content
+                        if hasattr(delta, 'content') and delta.content:
+                            content = delta.content
+                            print(content, end='', flush=True)
+                        summary_content += content
+            
+            print(f"\n✅ PROJECT_SUMMARY: Generated final summary ({len(summary_content)} characters)")
             
             # Save summary to MD file
             summary_file = summaries_dir / f"{self.project_id}_summary.md"
@@ -2394,7 +2484,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         print()
         
         # Start initial generation
-        response_content = self._generate_with_interrupts(messages)
+        response_content = coder(messages=messages, self=self)
         
         # Add final response to conversation history and save in real-time
         if response_content:
@@ -2408,13 +2498,71 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"✅ Update request processed successfully")
             return response_content
 
-    def _generate_with_interrupts(self, messages: list) -> str:
-        """Generate response with interrupt-and-continue pattern for read_file actions"""
-        print(f"🔄 Starting generation with interrupt support...")
-        
-        full_response = coder(messages=messages, self=self)
 
-        return full_response
+    def _handle_check_errors_interrupt(self, action: dict) -> dict:
+        """Handle check_errors action by calling the comprehensive error check API"""
+        print(f"🔍 CODER: Handling check_errors interrupt")
+        
+        try:
+            project_id = getattr(self, 'project_id', None)
+            if not project_id:
+                print("❌ CODER: No project_id found for error checking")
+                return None
+            
+            print(f"📡 CODER: Calling error check API for project: {project_id}")
+            
+            # Import requests for API call
+            import requests
+            import json
+            
+            # Call the error check API we implemented
+            api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+            if api_base_url.endswith('/api'):
+                api_base_url = api_base_url[:-4]  # Remove '/api' suffix
+            
+            error_check_url = f"{api_base_url}/api/projects/{project_id}/error-check"
+            
+            print(f"📡 CODER: Calling {error_check_url}")
+            
+            response = requests.get(error_check_url, timeout=60)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ CODER: Error check completed successfully")
+                print(f"📊 CODER: Overall status: {result.get('summary', {}).get('overall_status', 'unknown')}")
+                print(f"📈 CODER: Total errors: {result.get('summary', {}).get('total_errors', 0)}")
+                
+                # Log summary of errors found
+                backend_errors = result.get('backend', {}).get('error_count', 0)
+                frontend_errors = result.get('frontend', {}).get('error_count', 0)
+                
+                if backend_errors > 0:
+                    print(f"🐍 CODER: Backend has {backend_errors} errors")
+                else:
+                    print("🐍 CODER: Backend is clean")
+                    
+                if frontend_errors > 0:
+                    print(f"⚛️  CODER: Frontend has {frontend_errors} errors")
+                else:
+                    print("⚛️  CODER: Frontend is clean")
+                
+                return result
+            else:
+                print(f"❌ CODER: Error check API failed with status {response.status_code}")
+                print(f"❌ CODER: Response: {response.text}")
+                return None
+                
+        except requests.exceptions.ConnectionError:
+            print("❌ CODER: Connection error - is the API server running?")
+            return None
+        except requests.exceptions.Timeout:
+            print("❌ CODER: Error check request timed out")
+            return None
+        except Exception as e:
+            print(f"❌ CODER: Exception during error check: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _handle_read_file_interrupt(self, action: dict) -> str:
         """Handle read_file action during interrupt"""
@@ -2795,6 +2943,131 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         except Exception as e:
             print(f"❌ Error restarting frontend: {e}")
             return None
+    
+    def _handle_todo_actions(self, action: dict):
+        """Handle todo-related actions"""
+        action_type = action.get('type')
+        
+        if action_type == 'todo_create':
+            # Get attributes from raw_attrs if available
+            attrs = action.get('raw_attrs', {})
+            todo = {
+                'id': attrs.get('id') or action.get('id'),
+                'description': action.get('content', ''),
+                'priority': attrs.get('priority', 'medium'),
+                'integration': attrs.get('integration', 'false') == 'true',
+                'status': 'pending',
+                'created_at': datetime.now().isoformat()
+            }
+            self.todos.append(todo)
+            print(f"📋 Created todo: {todo['id']} - {todo['description']}")
+            
+        elif action_type == 'todo_update':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            new_status = attrs.get('status') or action.get('status')
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    old_status = todo['status']
+                    todo['status'] = new_status
+                    print(f"🔄 Updated todo {todo_id}: {old_status} → {new_status}")
+                    
+                    # If todo moved to in_progress, provide work guidance
+                    if new_status == 'in_progress':
+                        print(f"🎯 TODO IN PROGRESS: {todo['description']}")
+                        print(f"💡 Instructions: Start working on this todo now. Create the necessary files, implement the functionality, and test it works.")
+                        if todo.get('integration'):
+                            print(f"🔗 Integration Required: This todo requires testing with other components")
+                    break
+                    
+        elif action_type == 'todo_complete':
+            attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            integration_tested = attrs.get('integration_tested', 'false') == 'true'
+            
+            for todo in self.todos:
+                if todo['id'] == todo_id:
+                    todo['status'] = 'completed'
+                    todo['integration_tested'] = integration_tested
+                    todo['completed_at'] = datetime.now().isoformat()
+                    
+                    if integration_tested:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: Yes")
+                    else:
+                        print(f"✅ Completed todo: {todo_id}")
+                        print(f"   🔗 Integration tested: No")
+                    break
+
+    def _display_todos(self):
+        """Display current todo status and return structured todo list"""
+        if not self.todos:
+            todo_tree = "📋 todos/\n└── (no todos created yet)"
+            print("📋 No todos created yet")
+            return todo_tree
+        
+        # Build structured todo tree
+        todo_tree = "📋 todos/\n"
+        
+        # Group todos by status
+        completed = [t for t in self.todos if t['status'] == 'completed']
+        in_progress = [t for t in self.todos if t['status'] == 'in_progress'] 
+        pending = [t for t in self.todos if t['status'] == 'pending']
+        
+        # Always show completed todos section
+        todo_tree += f"├── ✅ completed/ ({len(completed)} items)\n"
+        if completed:
+            for i, todo in enumerate(completed):
+                is_last = i == len(completed) - 1
+                integration_icon = "🔗" if todo.get('integration_tested') else "📝"
+                connector = "└──" if is_last else "├──"
+                # Clean description - remove newlines and limit length
+                clean_desc = todo['description'].replace('\n', ' ').replace('\r', ' ').strip()
+                if len(clean_desc) > 80:
+                    clean_desc = clean_desc[:77] + "..."
+                todo_tree += f"│   {connector} {integration_icon} {todo['id']} - {clean_desc}\n"
+        else:
+            todo_tree += f"│   └── (no completed todos yet)\n"
+        
+        # Always show in progress todos section
+        todo_tree += f"├── 🔄 in_progress/ ({len(in_progress)} items)\n"
+        if in_progress:
+            for i, todo in enumerate(in_progress):
+                is_last = i == len(in_progress) - 1
+                priority_icon = "🔥" if todo.get('priority') == 'high' else "⚡" if todo.get('priority') == 'medium' else "📌"
+                connector = "└──" if is_last else "├──"
+                # Clean description - remove newlines and limit length
+                clean_desc = todo['description'].replace('\n', ' ').replace('\r', ' ').strip()
+                if len(clean_desc) > 80:
+                    clean_desc = clean_desc[:77] + "..."
+                todo_tree += f"│   {connector} {priority_icon} {todo['id']} - {clean_desc}\n"
+        else:
+            todo_tree += f"│   └── (no todos in progress)\n"
+        
+        # Always show pending todos section  
+        todo_tree += f"└── ⏳ pending/ ({len(pending)} items)\n"
+        if pending:
+            for i, todo in enumerate(pending):
+                is_last = i == len(pending) - 1
+                priority_icon = "🔥" if todo.get('priority') == 'high' else "⚡" if todo.get('priority') == 'medium' else "📌"
+                connector = "└──" if is_last else "├──"
+                indent = "    " if is_last else "│   "
+                # Clean description - remove newlines and limit length
+                clean_desc = todo['description'].replace('\n', ' ').replace('\r', ' ').strip()
+                if len(clean_desc) > 80:
+                    clean_desc = clean_desc[:77] + "..."
+                todo_tree += f"{indent}{connector} {priority_icon} {todo['id']} - {clean_desc}\n"
+        else:
+            todo_tree += f"    └── (no pending todos)\n"
+        
+        # Print the tree structure
+        print("\n📋 CURRENT TODO STATUS:")
+        print("=" * 50)
+        print(todo_tree.rstrip())
+        print("=" * 50)
+        
+        return todo_tree.rstrip()
 
 def main():
     """Main function supporting both creation and update modes"""
@@ -2818,8 +3091,7 @@ def main():
         print("❌ Error: GROQ_API_KEY environment variable is required")
         return
     
-    # Determine mode based on arguments
-    print("🐛 DEBUG: Determining mode")
+    # Determine mode and prepare message
     if args.project_id and args.message:
         # UPDATE MODE
         print("🐛 DEBUG: Entering update mode")
@@ -2828,26 +3100,14 @@ def main():
         print(f"📋 Project ID: {args.project_id}")
         print(f"💬 Update Request: {args.message}")
         
-        # Initialize system
+        # Initialize system for existing project
         system = BoilerplatePersistentGroq(
             api_key='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',
             project_id=args.project_id
         )
         
-        # Process the update request
-        print(f"\n{'='*60}")
-        print("🔄 PROCESSING UPDATE REQUEST")
-        print("="*60)
-        
-        # Send the update message with interrupt support
-        system._process_update_request_with_interrupts(args.message)
-        
-        # Save updated conversation history
-        system._save_conversation_history()
-        
-        print(f"\n✅ UPDATE COMPLETED!")
-        print(f"🔄 Project updated successfully")
-        return
+        user_request = args.message
+        mode = "update"
         
     else:
         # CREATION MODE (default behavior)
@@ -2859,18 +3119,21 @@ def main():
             user_request = args.message
         else:
             # Demo request for testing
-            user_request = "Create a notes app for me simialr to notion where i can just write my notes and save them."
+            user_request = "build me a todo app"
         
         # Generate project name based on the request with timestamp for uniqueness
         print("🐛 DEBUG: Generating project name")
+        
         base_project_name = generate_project_name(user_request)
         timestamp = datetime.now().strftime("%H%M%S")  # Add time for uniqueness
         project_name = f"{base_project_name}-{timestamp}"
+        
         print(f"🐛 DEBUG: Project name: {project_name}")
         print("🐛 DEBUG: Creating BoilerplatePersistentGroq instance")
-        system = BoilerplatePersistentGroq(api_key, project_name)
-        print("🐛 DEBUG: BoilerplatePersistentGroq instance created successfully")
         
+        system = BoilerplatePersistentGroq(api_key, project_name)
+        
+        print("🐛 DEBUG: BoilerplatePersistentGroq instance created successfully")
         print("\n" + "="*60)
         print("🚀 Enhanced Boilerplate Persistent Groq System")
         print("="*60)
@@ -2882,62 +3145,36 @@ def main():
         print("✅ Model knows all packages are pre-installed")
         print()
         
-        print(f"\n{'='*20} PROJECT CREATION {'='*20}")
-        print(f"📝 {user_request}")
-        print(f"\n{'='*50}")
+        # Phase 2.5: Setup project environment (venv, packages) but DON'T start services
+        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
+        setup_success = system.setup_project_environment()
+        if setup_success:
+            print("✅ Project environment setup completed")
+            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
+        else:
+            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
         
-        # Use the new chunk-based generation system
-        response = system.send_message_with_chunks(user_request)
+
         
-        # Save full raw response to markdown file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        response_file = system.backend_dir / f"groq_chunks_response_{timestamp}.md"
-        
-        with open(response_file, 'w', encoding='utf-8') as f:
-            f.write(f"# Groq Model Response - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"## Request\n{user_request}\n\n")
-            f.write(f"## Response Summary\n{response}\n\n")
-            
-            # Save the actual plan XML if available
-            if hasattr(system, '_last_plan_response'):
-                f.write(f"## Full Plan XML\n\n")
-                f.write(system._last_plan_response)
-        
-        print(f"💾 Full raw response saved to: {response_file}")
-        
-        # Show clean response (without XML tags for demo)
-        lines = response.split('\n')
-        clean_lines = []
-        in_action = False
-        
-        for line in lines:
-            if '<action type="file"' in line:
-                in_action = True
-                continue
-            elif '</action>' in line:
-                in_action = False
-                continue
-            elif not in_action and not line.strip().startswith('<'):
-                clean_lines.append(line)
-        
-        clean_response = '\n'.join(clean_lines).strip()
-        if clean_response:
-            print(f"🤖 {clean_response}")
-        
-        print(f"\n📊 Project Status: {len(system.project_files)} files")
-        
-        # Show project structure after each request
-        context = system.get_project_context()
-        if context:
-            structure_lines = [line for line in context.split('\n') 
-                             if '📂 CURRENT FILE STRUCTURE:' in line or 
-                                line.startswith(('├──', '└──', 'demo_dashboard/'))]
-            if len(structure_lines) > 1:
-                print("\n📁 Updated Structure:")
-                for line in structure_lines[1:]:  # Skip the header
-                    print(line)
+        mode = "creation"
     
-    print('Project done ✅')    
+    # Process the request using the same method for both modes
+    print(f"\n{'='*60}")
+    print(f"🔄 PROCESSING {mode.upper()} REQUEST")
+    print("="*60)
+    print(f"📝 {user_request}")
+    print(f"\n{'='*50}")
+    
+    # Send the message with interrupt support (works for both creation and update)
+    system._process_update_request_with_interrupts(user_request)
+    
+    # Save updated conversation history
+    system._save_conversation_history()
+    
+    print(f"\n✅ {mode.upper()} COMPLETED!")
+    print(f"🔄 Project processed successfully")
+    
+    print('Project done ✅')
 
 if __name__ == "__main__":
     main()

@@ -31,7 +31,21 @@ def coder(messages, self: GroqAgentState):
         if todo_status:
             print('---- TODOS -----\n')
             print(f"⚠️ CODER: Found todo status ({len(todo_status)} chars), adding to context")
-            todo_msg = {"role": "user", "content": f"Current todo status:\n\n{todo_status}\n\nNote: Continue with the highest priority todo. Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end."}
+            
+            # Determine message based on whether todos exist
+            if 'no todos created yet' in todo_status:
+                note = "No todos have been created yet. Please plan and create todos to then follow and systematically work on tasks."
+            else:
+                note = "Continue with the highest priority todo."
+            
+            todo_msg = {"role": "user", "content": f"""
+Current todo status:\n\n{todo_status}\n\n
+Note: {note}
+- Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end. 
+- As you work on each todo, update the todo status to in_progress. 
+- Once you have completed a todo, update the todo status to completed.
+- If you are not sure what to do next, check the todo status and pick the highest priority todo."""}
+            
             messages.append(todo_msg)
             self.conversation_history.append(todo_msg)
             print(f"📤 CODER: Added todo status to messages and conversation history: {todo_msg['content']}")
@@ -46,10 +60,10 @@ def coder(messages, self: GroqAgentState):
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.1,
-                max_tokens=16000,
+                # temperature=0.1,
+                max_completion_tokens=16000,
                 stream=True,
-                stream_options={"include_usage": "true"}
+                stream_options={"include_usage": True}
             )
             print("✅ CODER: Streaming completion created successfully")
             
@@ -95,18 +109,50 @@ def coder(messages, self: GroqAgentState):
                         
                         # Update internal tracking
                         print("💾 CODER: Updating internal token tracking...")
-                        old_total = self.token_usage.get('total_tokens', 0)
+                        old_total = self.token_usage.get('total_prompt_tokens', 0) + self.token_usage.get('total_completion_tokens', 0)
+                        
+                        # Update both session and cumulative tracking
+                        self.session_token_usage['prompt_tokens'] += usage.prompt_tokens
+                        self.session_token_usage['completion_tokens'] += usage.completion_tokens
+                        self.session_token_usage['total_tokens'] = (
+                            self.session_token_usage['prompt_tokens'] + 
+                            self.session_token_usage['completion_tokens']
+                        )
+                        
+                        # Update both sets of keys for compatibility
                         self.token_usage['prompt_tokens'] += usage.prompt_tokens
                         self.token_usage['completion_tokens'] += usage.completion_tokens
-                        self.token_usage['total_tokens'] += usage.total_tokens
+                        self.token_usage['total_prompt_tokens'] += usage.prompt_tokens
+                        self.token_usage['total_completion_tokens'] += usage.completion_tokens
+                        self.token_usage['total_tokens'] = (
+                            self.token_usage['prompt_tokens'] + 
+                            self.token_usage['completion_tokens']
+                        )
                         
-                        print(f"💰 Running Total: {old_total:,} → {self.token_usage['total_tokens']:,} tokens")
+                        # Log detailed usage including reasoning tokens if available
+                        if hasattr(usage, 'completion_tokens_details'):
+                            details = usage.completion_tokens_details
+                            if hasattr(details, 'reasoning_tokens') and details.reasoning_tokens > 0:
+                                print(f"🧠 Reasoning Tokens: {details.reasoning_tokens}")
+                        
+                        new_total = self.token_usage['total_tokens']
+                        print(f"💰 Session Total: {self.session_token_usage['total_tokens']:,} tokens")
+                        print(f"💰 Running Total: {old_total:,} → {new_total:,} tokens")
 
 
-                if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    print(content, end='', flush=True)
-                    accumulated_content += content
+                if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    content = ""  # Initialize content variable
+                    
+                    # 🧠 CAPTURE DEEPSEEK'S REASONING/THINKING PROCESS
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        print(f"\n💭 THINKING: {delta.reasoning_content}", end='', flush=True)
+                    
+                    # Regular response content
+                    if hasattr(delta, 'content') and delta.content:
+                        content = delta.content
+                        print(content, end='', flush=True)
+                        accumulated_content += content
                     
                     # if len(content) > 50:  # Only log for larger content chunks
                     #     print(f"\n📝 CODER: Added {len(content)} chars, total: {len(accumulated_content)}")
@@ -118,23 +164,32 @@ def coder(messages, self: GroqAgentState):
                         print(f"\n🚨 CODER: EARLY DETECTION - Found update_file action, waiting for path...")
                         print(f"🔍 CODER: Update buffer length: {len(update_file_buffer)} chars")
                     
-                    # Early detection: Check for complete file creation action  
-                    if '<action type="file"' in accumulated_content:
-                        # print(f"\n🔍 CODER: Detected file action start, checking for completion...")
-                        # Check if we have the complete action (with closing tag)
-                        if '</action>' in accumulated_content:
-                            print(f"\n🚨 CODER: COMPLETE FILE ACTION DETECTED - Creating file immediately...")
+                    # Improved early detection: Use parser to check for complete file creation action
+                    if '<action type="file"' in accumulated_content and '</action>' in accumulated_content:
+                        print(f"🔧 DEBUG: USING FIXED VERSION - found file action tags, validating...")
+                        # Use the proper parser to validate we have a complete, valid action
+                        temp_parser = StreamingXMLParser()
+                        temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                        
+                        # Check if we found any complete file actions
+                        file_actions = [action for action in temp_actions if action.get('type') == 'file']
+                        
+                        if file_actions:
+                            print(f"\n🚨 CODER: COMPLETE FILE ACTION VALIDATED - Creating {len(file_actions)} file(s) immediately...")
                             print(f"📊 CODER: File action content length: {len(accumulated_content)} chars")
+                            print(f"📋 CODER: Files to create: {[action.get('path') for action in file_actions]}")
+                            
                             # Process file creation in real-time
                             should_interrupt = True
                             interrupt_action = {
                                 'type': 'create_file_realtime',
-                                'content': accumulated_content
+                                'content': accumulated_content,
+                                'validated_actions': file_actions
                             }
-                            print("⚡ CODER: Breaking from chunk loop for file creation interrupt")
+                            print("⚡ CODER: Breaking from chunk loop for validated file creation interrupt")
                             break
                         else:
-                            # print(f"⏳ CODER: File action incomplete, continuing to stream...")
+                            print(f"⏳ CODER: File action tags found but not yet complete/valid, continuing to stream...")
                             pass
                     
                     # If we detected update_file, keep buffering until we get the path
@@ -250,6 +305,12 @@ def coder(messages, self: GroqAgentState):
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for restart_frontend")
                             break
+                        elif action_type == 'check_errors':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected check_errors action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for check_errors")
+                            break
                         elif action_type.startswith('todo_'):
                             print(f"\n📋 CODER: Processing todo action inline: {action_type}")
                             # Process todo actions inline without interrupting
@@ -257,7 +318,16 @@ def coder(messages, self: GroqAgentState):
                                 self._handle_todo_actions(action)
                             else:
                                 print(f"📋 CODER: Todo action {action_type} - system doesn't support todos")
-                            # Don't set should_interrupt for todo actions
+                            
+                            # For todo_complete, we should interrupt AFTER processing to prompt continuation
+                            if action_type == 'todo_complete':
+                                print(f"\n🚨 CODER: INTERRUPT - todo_complete processed, need continuation prompt")
+                                should_interrupt = True
+                                interrupt_action = action
+                                interrupt_action['already_processed'] = True  # Mark that we already handled the action
+                                print("⚡ CODER: Breaking from action loop for todo_complete")
+                                break
+                            # Other todo actions don't interrupt
                     
                     if should_interrupt:
                         print("🛑 CODER: Interrupt flag set, breaking from chunk processing loop")
@@ -480,8 +550,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to start backend service, stopping generation")
-                        break
+                        print(f"❌ Failed to start backend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Backend failed to start. There are errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try starting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'start_frontend':
                     service_result = self._handle_start_frontend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -498,8 +579,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to start frontend service, stopping generation")
-                        break
+                        print(f"❌ Failed to start frontend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Frontend failed to start. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try starting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'restart_backend':
                     service_result = self._handle_restart_backend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -516,8 +608,19 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to restart backend service, stopping generation")
-                        break
+                        print(f"❌ Failed to restart backend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Backend restart failed. There are likely errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try restarting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
                 elif interrupt_action.get('type') == 'restart_frontend':
                     service_result = self._handle_restart_frontend_interrupt(interrupt_action)
                     if service_result is not None:
@@ -534,15 +637,170 @@ def coder(messages, self: GroqAgentState):
                         
                         continue
                     else:
-                        print(f"❌ Failed to restart frontend service, stopping generation")
+                        print(f"❌ Failed to restart frontend service, passing error to model for fixing")
+                        # Pass the error back to the model so it can fix the issues
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        user_msg = {"role": "user", "content": f"❌ Frontend restart failed. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try restarting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                elif interrupt_action.get('type') == 'check_errors':
+                    error_check_result = self._handle_check_errors_interrupt(interrupt_action)
+                    if error_check_result is not None:
+                        # Add the error check result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        # Format the error results into a readable message
+                        backend_status = "✅ No errors" if error_check_result.get('summary', {}).get('backend_has_errors', True) == False else f"❌ {error_check_result.get('backend', {}).get('error_count', 0)} errors"
+                        frontend_status = "✅ No errors" if error_check_result.get('summary', {}).get('frontend_has_errors', True) == False else f"❌ {error_check_result.get('frontend', {}).get('error_count', 0)} errors"
+                        
+                        error_summary = f"""Error Check Results:
+📊 Overall Status: {error_check_result.get('summary', {}).get('overall_status', 'unknown')}
+🐍 Backend: {backend_status}
+⚛️  Frontend: {frontend_status}
+📈 Total Errors: {error_check_result.get('summary', {}).get('total_errors', 0)}
+
+"""
+                        
+                        # Add detailed errors if any
+                        if error_check_result.get('backend', {}).get('errors'):
+                            error_summary += f"🐍 **Backend Errors:**\n```\n{error_check_result['backend']['errors'][:1000]}\n```\n\n"
+                        
+                        if error_check_result.get('frontend', {}).get('errors'):
+                            error_summary += f"⚛️  **Frontend Errors:**\n```\n{error_check_result['frontend']['errors'][:1000]}\n```\n\n"
+                        
+                        error_summary += "Please fix any critical errors and continue with your response."
+                        
+                        user_msg = {"role": "user", "content": error_summary}
+                        
+                        messages.append(assistant_msg)
+                        messages.append(user_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self.conversation_history.append(user_msg)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to run error check, stopping generation")
                         break
+                elif interrupt_action.get('type') == 'todo_complete':
+                    # Todo was already processed inline, just need to prompt continuation
+                    print(f"✅ CODER: Todo completion processed, prompting continuation")
+                    
+                    # Get current todo status to show what's next
+                    todo_status = self._display_todos()
+                    
+                    # Add messages to prompt continuation
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    user_msg = {"role": "user", "content": f"Great! You've completed a todo. Here's the current todo status:\n\n{todo_status}\n\nPlease continue with the next highest priority task."}
+                    
+                    messages.append(assistant_msg)
+                    messages.append(user_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self.conversation_history.append(user_msg)
+                    
+                    continue
             else:
                 # No interruption, process any remaining actions and finish
                 print("🎬 CODER: No interrupt detected, processing remaining actions...")
                 print(f"📝 CODER: Processing remaining actions with {len(accumulated_content)} chars of content")
                 self._process_remaining_actions(accumulated_content)
-                print("✅ CODER: Finished processing remaining actions, breaking from iteration loop")
-                break
+                
+                # Check if we have an incomplete action (opened but not closed)
+                has_incomplete_action = False
+                if '<action' in accumulated_content and accumulated_content.rfind('<action') > accumulated_content.rfind('</action>'):
+                    has_incomplete_action = True
+                    print("⚠️ CODER: Detected incomplete action tag - stream was likely cut off")
+                
+                # Check if we only created todos without doing any actual work
+                todos_created_without_work = False
+                if 'todo_create' in accumulated_content:
+                    # Parse to check what actions were in this response
+                    temp_parser = StreamingXMLParser()
+                    temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                    
+                    todo_creates = [a for a in temp_actions if a.get('type') == 'todo_create']
+                    work_actions = [a for a in temp_actions if a.get('type') in ['file', 'update_file', 'run_command', 'todo_update']]
+                    
+                    # If we created todos but didn't do any work
+                    if todo_creates and not work_actions:
+                        todos_created_without_work = True
+                        print(f"📋 CODER: Created {len(todo_creates)} todos but no work actions found")
+                
+                # Check if response contains non-implementation tags (like artifact, planning, etc)
+                non_implementation_response = False
+                if any(tag in accumulated_content for tag in ['<artifact', '<planning>', '<thinking>']):
+                    # Check if there are any actual implementation actions
+                    temp_parser = StreamingXMLParser()
+                    temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                    implementation_actions = [a for a in temp_actions if a.get('type') in ['file', 'update_file', 'run_command']]
+                    
+                    if not implementation_actions:
+                        non_implementation_response = True
+                        print("📄 CODER: Response contains only planning/artifact tags without implementation")
+                
+                if has_incomplete_action:
+                    # Add a message to prompt continuation
+                    print("🔄 CODER: Prompting model to continue incomplete action")
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    user_msg = {"role": "user", "content": "The previous response was cut off. Please continue from where you left off to complete the file action."}
+                    
+                    messages.append(assistant_msg)
+                    messages.append(user_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self.conversation_history.append(user_msg)
+                    
+                    print("🔄 CODER: Continuing iteration to complete the action")
+                    continue
+                elif todos_created_without_work:
+                    # Prompt to start working on the todos that were just created
+                    print("🔄 CODER: Todos created without implementation - prompting to start work")
+                    
+                    # Get current todo status
+                    todo_status = self._display_todos()
+                    
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    user_msg = {"role": "user", "content": f"Good! You've created the todos. Here's the current status:\n\n{todo_status}\n\nNow please start implementing the highest priority todo. Remember to:\n1. Update the todo status to 'in_progress' using todo_update\n2. Create/modify the necessary files\n3. Test your implementation\n4. Mark the todo as completed when done"}
+                    
+                    messages.append(assistant_msg)
+                    messages.append(user_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self.conversation_history.append(user_msg)
+                    
+                    print("🔄 CODER: Continuing iteration to implement todos")
+                    continue
+                elif non_implementation_response:
+                    # Response only contains planning/artifacts without actual implementation
+                    print("🔄 CODER: Planning/artifact only response - prompting for implementation")
+                    
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    user_msg = {"role": "user", "content": "Good planning! Now please proceed with the actual implementation. Start creating or modifying the necessary files to implement what you've planned."}
+                    
+                    messages.append(assistant_msg)
+                    messages.append(user_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self.conversation_history.append(user_msg)
+                    
+                    print("🔄 CODER: Continuing iteration to implement the plan")
+                    continue
+                else:
+                    print("✅ CODER: Finished processing remaining actions, breaking from iteration loop")
+                    break
     
         except Exception as e:
             print(f"❌ CODER: Exception during generation in iteration {iteration}: {e}")
@@ -554,7 +812,7 @@ def coder(messages, self: GroqAgentState):
     
     print(f"\n🏁 CODER: Completed iteration loop after {iteration} iterations")
     print(f"📊 CODER: Final full_response length: {len(full_response)} chars")
-   
+    
     
     # Add current project errors as context at the end of generation
     print("🔍 -- CHECKING FOR ERRORS -----\n")
@@ -572,6 +830,7 @@ def coder(messages, self: GroqAgentState):
     
     print(f"🎉 CODER: Returning full_response with {len(full_response)} chars")
     return full_response
+
 
 def _get_project_errors(self):
     """Get current TypeScript errors for this project (quick read)"""
