@@ -1,0 +1,30 @@
+{
+  "project_id": "crm-app-contacts-tags-0814-094742",
+  "created_at": "2025-08-14T10:31:30.494095",
+  "last_updated": "2025-08-14T10:31:30.494112",
+  "read_files": [
+    "backend/services/campaign_service.py",
+    "frontend/src/pages/TagsPage.tsx",
+    "backend/services/auth_service.py",
+    "backend/services/contact_service.py",
+    "frontend/src/stores/crmStore.ts",
+    "frontend/src/pages/ContactsPage.tsx",
+    "frontend/src/App.tsx",
+    "backend/services/tag_service.py",
+    "backend/database/contact.py",
+    "frontend/src/api/crmApi.ts",
+    "frontend/src/types/crm_types.ts",
+    "frontend/src/index.css",
+    "backend/services/__init__.py",
+    "backend/database/user.py",
+    "backend/app.py",
+    "backend/database/__init__.py",
+    "backend/test_setup.py",
+    "backend/models/crm_models.py",
+    "backend/database/tag.py",
+    "backend/database/campaign_recipient.py",
+    "backend/database/campaign.py",
+    "frontend/src/pages/CampaignsPage.tsx"
+  ],
+  "total_files_read": 22
+}

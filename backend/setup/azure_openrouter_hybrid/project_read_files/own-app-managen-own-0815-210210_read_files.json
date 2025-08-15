@@ -1,0 +1,16 @@
+{
+  "project_id": "own-app-managen-own-0815-210210",
+  "created_at": "2025-08-15T21:07:21.583719",
+  "last_updated": "2025-08-15T21:07:21.583728",
+  "read_files": [
+    "backend/database/base.py",
+    "backend/models/contact_models.py",
+    "backend/test_api.py",
+    "backend/routes/__init__.py",
+    "backend/database/models.py",
+    "backend/app.py",
+    "backend/services/contact_service.py",
+    "backend/database/session.py"
+  ],
+  "total_files_read": 8
+}

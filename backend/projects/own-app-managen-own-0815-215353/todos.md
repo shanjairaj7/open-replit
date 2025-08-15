@@ -1,0 +1,31 @@
+# Todo List
+
+## Completed
+
+- [x] Create a public subscription form page. [integration_tested: true] [integration_tested: true] (id: frontend_subscription_form)
+- [x] Create `frontend/src/pages/NewslettersPage.tsx` to list, create, and send newsletters, with tag selection. [priority: high] (id: frontend_newsletters_page)
+- [x] Implement send newsletter functionality in `NewslettersPage.tsx`, including tag selection for recipients. [priority: high] (id: frontend_newsletters_send_functionality)
+- [x] Implement create newsletter form in `NewslettersPage.tsx`, including linking to a blog post. [priority: high] (id: frontend_newsletters_create_form)
+- [x] Implement newsletter listing and display in `NewslettersPage.tsx`. [priority: high] (id: frontend_newsletters_list_display)
+- [x] Create `frontend/src/pages/BlogPostsPage.tsx` to list, add, edit, and delete blog posts. [priority: high] (id: frontend_blog_posts_page)
+- [x] Implement add/edit blog post form in `BlogPostsPage.tsx`. [priority: high] (id: frontend_blog_posts_add_edit_form)
+- [x] Implement blog post listing and display in `BlogPostsPage.tsx`. [priority: high] (id: frontend_blog_posts_list_display)
+- [x] Create `frontend/src/pages/ContactsPage.tsx` to list, add, edit, and delete contacts, including tag management and CSV import. [priority: high] (id: frontend_contacts_page)
+- [x] Implement CSV import functionality in `ContactsPage.tsx`. (id: frontend_contacts_csv_import)
+- [x] Implement tag management for contacts (add/remove tags) in `ContactsPage.tsx`. (id: frontend_contacts_tag_management)
+- [x] Implement add/edit contact form in `ContactsPage.tsx` (or a sub-component). [priority: high] (id: frontend_contacts_add_edit_form)
+- [x] Implement contact listing and display in `ContactsPage.tsx`. [priority: high] (id: frontend_contacts_list_display)
+- [x] Create `frontend/src/services/api.ts` for centralized API calls. [priority: high] (id: frontend_api_service)
+- [x] Create a responsive navigation bar component. (id: frontend_navbar)
+- [x] Set up React Router in `frontend/src/App.tsx` with basic routes for Home, Contacts, Blog Posts, and Newsletters. [priority: high] (id: frontend_routing)
+- [x] Configure Chakra UI in `frontend/src/main.tsx` and `frontend/src/theme.ts`. [priority: high] (id: frontend_base_setup)
+- [x] Register blog and newsletter routes in `backend/services/__init__.py`. [priority: high] (id: backend_register_blog_newsletter_routes)
+- [x] Implement email sending logic within `blog_newsletter_service.py` for newsletters, including filtering by tags. [priority: high] (id: backend_email_sending_logic)
+- [x] Create `backend/services/blog_newsletter_service.py` with CRUD operations for Blog Posts and Newsletters. [priority: high] (id: backend_blog_newsletter_service)
+- [x] Modify `backend/app.py` to include database table creation and route registration. [priority: high] (id: backend_app_init)
+- [x] Ensure `backend/database/session.py` is correctly configured for SQLAlchemy. (id: backend_db_session_update)
+- [x] Register contact and tag routes in `backend/services/__init__.py`. [priority: high] (id: backend_register_routes)
+- [x] Create `backend/services/contact_service.py` with CRUD operations for contacts and tags. [priority: high] (id: backend_contact_service)
+- [x] Create `backend/models/contact_models.py` for Pydantic `Contact` and `Tag` models (Base, Create, Response). [priority: high] (id: backend_pydantic_models)
+- [x] Create `backend/database/models.py` for SQLAlchemy `Contact` and `Tag` models. [priority: high] (id: backend_db_setup)
+

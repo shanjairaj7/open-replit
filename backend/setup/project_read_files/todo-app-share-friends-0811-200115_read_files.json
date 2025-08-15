@@ -1,0 +1,32 @@
+{
+  "project_id": "todo-app-share-friends-0811-200115",
+  "created_at": "2025-08-11T20:44:39.315197",
+  "last_updated": "2025-08-11T20:44:39.315205",
+  "read_files": [
+    "backend/routes/__init__.py",
+    "backend/app.py",
+    "backend/models/orm_models.py",
+    "backend/final_demo.py",
+    "backend/test_api_final.py",
+    "backend/check_db.py",
+    "backend/test_complete_app.py",
+    "backend/models/todo.py",
+    "backend/debug_db.py",
+    "backend/simple_test.py",
+    "backend/debug_friendship.py",
+    "backend/requirements.txt",
+    "backend/services/__init__.py",
+    "backend/services/health_service.py",
+    "backend/simple_friend_test.py",
+    "backend/services/todo_service.py",
+    "backend/services/friend_service.py",
+    "backend/database.py",
+    "backend/test_friends.py",
+    "backend/test_api.py",
+    "backend/test_friends_complete.py",
+    "backend/models/user.py",
+    "backend/services/user_service.py",
+    "backend/models/friend.py"
+  ],
+  "total_files_read": 24
+}

@@ -72,12 +72,161 @@ class StreamingXMLParser:
         self.buffer = ""
         
     def _parse_attributes(self, attr_string: str) -> Dict[str, str]:
-        """Parse XML attributes from string"""
+        """Parse XML attributes from string with proper quote handling"""
         attrs = {}
-        # Simple regex to parse key="value" pairs
-        for match in re.finditer(r'(\w+)="([^"]*)"', attr_string):
-            attrs[match.group(1)] = match.group(2)
+        
+        # Use a more robust regex-based approach that handles complex nested quotes
+        # This pattern matches: attribute_name="value" where value can contain various quote patterns
+        
+        # First, let's handle the simple cases with a standard regex
+        simple_pattern = r'(\w+)="([^"]*)"(?=\s|$|/>|>)'
+        simple_matches = re.findall(simple_pattern, attr_string)
+        
+        # Track which parts we've processed
+        processed_parts = set()
+        
+        for attr_name, attr_value in simple_matches:
+            # Only use this if the value doesn't look like it was truncated
+            # (i.e., doesn't contain unmatched quotes or incomplete shell commands)
+            if not self._looks_like_truncated_command(attr_value):
+                attrs[attr_name] = attr_value
+                # Mark this part as processed
+                pattern = f'{attr_name}="{re.escape(attr_value)}"'
+                match = re.search(pattern, attr_string)
+                if match:
+                    for i in range(match.start(), match.end()):
+                        if i < len(attr_string):
+                            processed_parts.add(i)
+            else:
+                # This looks truncated, don't mark it as processed so complex parsing can handle it
+                print(f"Detected truncated attribute '{attr_name}': '{attr_value[:50]}...', will use complex parsing")
+        
+        # For more complex cases, fall back to manual parsing
+        # Focus on attributes that weren't successfully parsed by the simple regex
+        remaining_attr_string = ""
+        for i, char in enumerate(attr_string):
+            if i not in processed_parts:
+                remaining_attr_string += char
+            else:
+                remaining_attr_string += " "  # Preserve spacing
+        
+        # Clean up the remaining string
+        remaining_attr_string = re.sub(r'\s+', ' ', remaining_attr_string).strip()
+        
+        if remaining_attr_string and '=' in remaining_attr_string:
+            # Parse remaining attributes manually
+            self._parse_complex_attributes(remaining_attr_string, attrs)
+        
         return attrs
+    
+    def _looks_like_truncated_command(self, value: str) -> bool:
+        """Check if a value looks like it was truncated during parsing"""
+        # Check for patterns that suggest truncation
+        truncation_indicators = [
+            # Shell commands that end abruptly
+            lambda v: '|' in v and any(v.endswith(f'| {cmd}') for cmd in ['grep', 'awk', 'sed', 'sort', 'cut']),
+            # Unmatched quotes (more opening than closing or vice versa)
+            lambda v: v.count("'") % 2 != 0,
+            # Commands that end with quote followed by space (likely truncated)
+            lambda v: re.search(r'[\'"] $', v),
+            # grep -o patterns that look incomplete
+            lambda v: 'grep -o' in v and ("'" in v or '"' in v) and not v.strip().endswith(("'", '"')),
+            # Specific pattern: grep -o followed by unmatched quotes (like our failing case)
+            lambda v: 'grep -o' in v and "'" in v and v.count("'") == 1,
+            # Commands that have pipes but don't end with complete command words
+            lambda v: '|' in v and not re.search(r'\w+\s*$', v.strip()),
+        ]
+        
+        return any(indicator(value) for indicator in truncation_indicators)
+    
+    def _parse_complex_attributes(self, attr_string: str, attrs: dict):
+        """Parse complex attributes that the simple regex couldn't handle"""
+        # For command attributes specifically, be more liberal about quote handling
+        
+        # Look for command="..." patterns specifically
+        command_pattern = r'command="([^"]*(?:"[^"]*"[^"]*)*)"'
+        command_match = re.search(command_pattern, attr_string)
+        
+        if command_match:
+            command_value = command_match.group(1)
+            # If this looks like a complete shell command, use it
+            if self._looks_like_complete_command(command_value):
+                attrs['command'] = command_value
+                return
+        
+        # Fall back to a more permissive approach for the command attribute
+        # Look for command=" and then find the end by looking for " followed by next attribute or end
+        if 'command="' in attr_string:
+            start_idx = attr_string.find('command="') + len('command="')
+            
+            # Find the closing quote by looking for quote followed by (space + word + =) or end
+            # Be more careful about quotes that might be inside shell commands
+            end_idx = len(attr_string)
+            for i in range(start_idx, len(attr_string)):
+                if attr_string[i] == '"':
+                    # Check what follows this quote
+                    remaining = attr_string[i+1:].strip()
+                    
+                    # This quote ends the attribute if followed by:
+                    # 1. Nothing (end of string)
+                    # 2. XML end markers (/, >)  
+                    # 3. Another XML attribute (word + =)
+                    
+                    # But NOT if it's followed by something that looks like:
+                    # - Part of a regex pattern
+                    # - Continuation of a shell command
+                    
+                    is_end_quote = False
+                    
+                    if not remaining:
+                        # End of string
+                        is_end_quote = True
+                    elif remaining.startswith('/>') or remaining.startswith('>'):
+                        # XML tag end
+                        is_end_quote = True
+                    elif re.match(r'\w+\s*=', remaining):
+                        # Next attribute
+                        is_end_quote = True
+                    elif remaining.startswith('/'):
+                        # Could be XML tag end or part of regex - check context
+                        # If we're in a shell command context, this might be part of a regex
+                        command_so_far = attr_string[start_idx:i]
+                        if ('grep' in command_so_far and 
+                            any(pattern in command_so_far for pattern in ['-o', '-E', '-P'])):
+                            # This looks like a grep regex pattern, don't end here
+                            is_end_quote = False
+                        else:
+                            is_end_quote = True
+                    
+                    if is_end_quote:
+                        end_idx = i
+                        break
+            
+            if end_idx > start_idx:
+                command_value = attr_string[start_idx:end_idx]
+                attrs['command'] = command_value
+    
+    def _looks_like_complete_command(self, value: str) -> bool:
+        """Check if a command value looks complete"""
+        # A complete command should:
+        # 1. Not end abruptly with operators
+        # 2. Have balanced quotes (for shell commands)
+        # 3. End with reasonable command completion
+        
+        if not value.strip():
+            return False
+            
+        # Don't end with pipe or incomplete operators
+        if re.search(r'[|&;]$', value.strip()):
+            return False
+            
+        # For grep commands with -o, should end with the pattern and pipe continuation
+        if 'grep -o' in value:
+            # Should have a pattern and possibly continue with pipe
+            if re.search(r"grep -o '[^']+'\s*(\||$)", value) or re.search(r'grep -o "[^"]+"\s*(\||$)', value):
+                return True
+                
+        return True
         
     def process_chunk(self, chunk: str) -> Generator[Dict, None, None]:
         """Process a chunk of streaming data and yield complete actions"""
@@ -104,6 +253,7 @@ class StreamingXMLParser:
                     'integration': attrs.get('integration', ''),
                     'status': attrs.get('status', ''),
                     'integration_tested': attrs.get('integration_tested', ''),
+                    'query': attrs.get('query', ''),
                     'content': '',
                     'raw_attrs': attrs
                 }
@@ -148,6 +298,7 @@ class StreamingXMLParser:
                 'integration': attrs.get('integration', ''),
                 'status': attrs.get('status', ''),
                 'integration_tested': attrs.get('integration_tested', ''),
+                'query': attrs.get('query', ''),
                 'content': content,
                 'raw_attrs': attrs
             }

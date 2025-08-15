@@ -1,0 +1,23 @@
+{
+  "project_id": "crm-app-0815-164314",
+  "created_at": "2025-08-15T16:55:02.005163",
+  "last_updated": "2025-08-15T16:55:02.005169",
+  "read_files": [
+    "backend/database/__init__.py",
+    "backend/test_backend_comprehensive.py",
+    "backend/app.py",
+    "backend/requirements.txt",
+    "backend/database/campaign.py",
+    "backend/db_config.py",
+    "backend/database/contact.py",
+    "backend/routes/crm.py",
+    "backend/services/__init__.py",
+    "backend/database/user.py",
+    "backend/database/deal.py",
+    "backend/database/init_db.py",
+    "backend/routes/auth.py",
+    "backend/routes/__init__.py",
+    "backend/database/company.py"
+  ],
+  "total_files_read": 15
+}

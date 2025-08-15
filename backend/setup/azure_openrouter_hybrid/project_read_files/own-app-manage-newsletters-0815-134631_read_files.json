@@ -1,0 +1,22 @@
+{
+  "project_id": "own-app-manage-newsletters-0815-134631",
+  "created_at": "2025-08-15T13:55:49.431261",
+  "last_updated": "2025-08-15T13:55:49.431288",
+  "read_files": [
+    "backend/routes/contacts.py",
+    "backend/test_contacts.py",
+    "frontend/package.json",
+    "frontend/src/api/contacts.ts",
+    "frontend/src/pages/Contacts.tsx",
+    "backend/services/api_router.py",
+    "README.md",
+    "backend/database/user.py",
+    "backend/test_backend.py",
+    "backend/routes/__init__.py",
+    "backend/db_config.py",
+    "backend/app.py",
+    "backend/database/contact.py",
+    "backend/database/__init__.py"
+  ],
+  "total_files_read": 14
+}

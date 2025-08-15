@@ -1,0 +1,64 @@
+{
+  "project_id": "sqlite-fastapi-crud-item-0811-181440",
+  "created_at": "2025-08-11T18:14:54.255991",
+  "last_updated": "2025-08-11T18:14:54.256005",
+  "summary_generated": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Create SQLite FastAPI CRUD for Item model. Generate ALL the code files I need. Don't use todos - just create the actual Python files with complete working code. Show me main.py, models.py, database.py, requirements.txt.\n\n<project_files>\nProject Structure:\n├── backend/\n│   ├── app.py\n│   ├── models/\n│   │   ├── __init__.py\n│   │   └── user.py\n│   ├── python-error-checker.py\n│   ├── requirements.txt\n│   ├── routes/\n│   │   └── __init__.py\n│   └── services/\n│       ├── __init__.py\n│       └── health_service.py\n└── frontend/\n    ├── README.md\n    ├── eslint.config.js\n    ├── index.html\n    ├── package.json\n    ├── public/\n    │   └── vite.svg\n    ├── src/\n    │   ├── App.css\n    │   ├── App.tsx\n    │   ├── assets/\n    │   │   └── react.svg\n    │   ├── components/\n    │   │   └── app-sidebar.tsx\n    │   ├── index.css\n    │   ├── main.tsx\n    │   └── pages/\n    │       ├── HomePage.tsx\n    │       ├── ProfilePage.tsx\n    │       └── SettingsPage.tsx\n    ├── ts-check-service.js\n    ├── ts-error-checker.cjs\n    ├── tsconfig.app.json\n    ├── tsconfig.fast.json\n    ├── tsconfig.incremental.json\n    ├── tsconfig.json\n    ├── tsconfig.node.json\n    ├── tsconfig.skip.json\n    ├── tsconfig.syntax.json\n    ├── tsconfig.ultra.json\n    └── vite.config.ts\n</project_files>"
+    }
+  ],
+  "token_usage": {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0
+  },
+  "project_state": {
+    "files_created": [
+      ".project_metadata.json",
+      "frontend/ts-check-service.js",
+      "frontend/.tsbuildinfo-build",
+      "frontend/tsconfig.node.json",
+      "frontend/index.html",
+      "frontend/tsconfig.app.json",
+      "frontend/tsconfig.fast.json",
+      "frontend/tsconfig.syntax.json",
+      "frontend/README.md",
+      "frontend/.gitignore",
+      "frontend/package.json",
+      "frontend/tsconfig.build.json",
+      "frontend/tsconfig.json",
+      "frontend/eslint.config.js",
+      "frontend/.tsbuildinfo-fast",
+      "frontend/vite.config.ts",
+      "frontend/ts-error-checker.cjs",
+      "frontend/.tsbuildinfo-ultra",
+      "frontend/tsconfig.ultra.json",
+      "frontend/.tsbuildinfo",
+      "frontend/tsconfig.skip.json",
+      "frontend/tsconfig.incremental.json",
+      "frontend/public/vite.svg",
+      "frontend/src/App.tsx",
+      "frontend/src/main.tsx",
+      "frontend/src/App.css",
+      "frontend/src/index.css",
+      "frontend/src/vite-env.d.ts",
+      "frontend/src/components/app-sidebar.tsx",
+      "frontend/src/assets/react.svg",
+      "frontend/src/pages/SettingsPage.tsx",
+      "frontend/src/pages/ProfilePage.tsx",
+      "frontend/src/pages/HomePage.tsx",
+      "backend/requirements.txt",
+      "backend/python-error-checker.py",
+      "backend/app.py",
+      "backend/.python-errors.txt",
+      "backend/models/user.py",
+      "backend/models/__init__.py",
+      "backend/routes/__init__.py",
+      "backend/services/health_service.py",
+      "backend/services/__init__.py"
+    ],
+    "last_preview_status": "running"
+  }
+}

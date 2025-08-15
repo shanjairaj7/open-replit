@@ -1,0 +1,9 @@
+{
+  "project_id": "own-app-manage-newsletters-0815-141336",
+  "created_at": "2025-08-15T14:14:50.562526",
+  "last_updated": "2025-08-15T14:14:50.562542",
+  "read_files": [
+    "backend/database/__init__.py"
+  ],
+  "total_files_read": 1
+}

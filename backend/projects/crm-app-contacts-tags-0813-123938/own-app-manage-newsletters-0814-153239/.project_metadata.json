@@ -1,0 +1,11 @@
+{
+  "id": "own-app-manage-newsletters-0814-153239",
+  "path": "/Users/shanjairaj/local-projects/projects/own-app-manage-newsletters-0814-153239",
+  "created_at": "2025-08-14T15:32:40.495443",
+  "status": "created",
+  "type": "monorepo",
+  "structure": {
+    "frontend": "/Users/shanjairaj/local-projects/projects/own-app-manage-newsletters-0814-153239/frontend",
+    "backend": "/Users/shanjairaj/local-projects/projects/own-app-manage-newsletters-0814-153239/backend"
+  }
+}

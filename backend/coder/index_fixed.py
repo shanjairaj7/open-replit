@@ -3,6 +3,130 @@ import json
 import os
 from datetime import datetime
 
+def _handle_check_logs_interrupt(self: GroqAgentState, interrupt_action: dict) -> dict:
+    """Handle check_logs interrupt by fetching logs from the API"""
+    try:
+        service = interrupt_action.get('service', 'backend')
+        new_only = interrupt_action.get('new_only', True)
+        
+        print(f"📋 Fetching {service} logs (new_only={new_only})")
+        
+        # Get project ID from context
+        project_id = getattr(self, 'project_id', None)
+        if not project_id:
+            print("❌ No project ID available for check_logs")
+            return None
+        
+        # Call the check_logs API
+        api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+        if api_base_url.endswith('/api'):
+            api_base_url = api_base_url[:-4]
+        
+        logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
+        
+        # ALWAYS get full logs first to ensure we have content
+        params = {
+            'service': service,
+            'include_new_only': False  # Always get full logs
+        }
+        
+        import requests
+        response = requests.get(logs_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            logs_data = response.json()
+            logs_content = logs_data.get('logs', '')
+            
+            # If there's actual log content, always return the latest half
+            if logs_content and logs_content.strip():
+                lines = logs_content.split('\n')
+                # Remove checkpoint lines
+                clean_lines = [line for line in lines if not line.strip().startswith('<!-- CHECKPOINT:')]
+                
+                if clean_lines:
+                    # Return latest half of logs (but at least 50 lines if available)
+                    half_point = max(len(clean_lines) // 2, len(clean_lines) - 100)
+                    latest_logs = '\n'.join(clean_lines[half_point:])
+                    
+                    # Update the logs_data with the processed content
+                    logs_data['logs'] = latest_logs
+                    logs_data['total_lines'] = len(clean_lines)
+                    logs_data['new_lines'] = len(clean_lines) - half_point
+                    
+                    print(f"✅ Successfully fetched {service} logs: {len(clean_lines)} total lines, returning {len(clean_lines) - half_point} lines")
+                    return logs_data
+                else:
+                    print(f"⚠️  No actual log content found for {service}")
+                    return logs_data
+            else:
+                print(f"⚠️  Empty logs content for {service}")
+                return logs_data
+        else:
+            print(f"❌ Failed to fetch logs: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error handling check_logs interrupt: {e}")
+        return None
+
+def _handle_rename_file_interrupt(self: GroqAgentState, interrupt_action: dict) -> dict:
+    """Handle rename_file interrupt by calling the API to rename/move a file"""
+    try:
+        path = interrupt_action.get('path', '')
+        new_name = interrupt_action.get('new_name', '')
+        
+        if not path or not new_name:
+            print("❌ Missing path or new_name for rename_file action")
+            return {"error": "Missing required parameters"}
+        
+        print(f"🔄 Renaming file: {path} -> {new_name}")
+        
+        # Get project ID from context
+        project_id = getattr(self, 'project_id', None)
+        if not project_id:
+            print("❌ No project ID available for rename_file")
+            return {"error": "No project ID available"}
+        
+        # Determine the new path
+        # If new_name contains path separators, treat it as a full path
+        # Otherwise, it's just a new filename in the same directory
+        if '/' in new_name:
+            new_path = new_name
+        else:
+            # Keep the file in the same directory, just change the name
+            import os
+            dir_path = os.path.dirname(path)
+            new_path = os.path.join(dir_path, new_name) if dir_path else new_name
+        
+        # Call the rename API
+        api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+        if api_base_url.endswith('/api'):
+            api_base_url = api_base_url[:-4]
+        
+        rename_url = f"{api_base_url}/api/projects/{project_id}/files/{path}/rename"
+        
+        import requests
+        payload = {"new_path": new_path}
+        response = requests.post(rename_url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ Successfully renamed {path} to {new_path}")
+            return result
+        else:
+            error_msg = f"Failed to rename file: HTTP {response.status_code}"
+            try:
+                error_detail = response.json()
+                error_msg = f"{error_msg}: {error_detail}"
+            except:
+                error_msg = f"{error_msg}: {response.text}"
+            print(f"❌ {error_msg}")
+            return {"error": error_msg}
+            
+    except Exception as e:
+        print(f"❌ Error handling rename_file interrupt: {e}")
+        return {"error": str(e)}
+
 def coder(messages, self: GroqAgentState):
     print("🚀 CODER: Starting coder() function")
     print(f"📊 CODER: Input - {len(messages)} messages, max_iterations=30")
@@ -17,47 +141,25 @@ def coder(messages, self: GroqAgentState):
     
     print(f"🔄 CODER: Starting iteration loop (max: {max_iterations})")
     
+    # Message accumulator that persists across iterations
+    full_user_msg = ""
+    
     while iteration < max_iterations:
         iteration += 1
         print(f"\n{'='*60}")
         print(f"📝 CODER: Generation iteration {iteration}/{max_iterations}")
         print(f"📊 CODER: Current full_response length: {len(full_response)} chars")
         print(f"🎯 CODER: Using model: {self.model}")
-        print(f"📤 CODER: Sending {len(messages)} messages to API")
         
-        # Add current todo status as context at the end of generation
-        print("🔍 CODER: Checking for todo status...")
-        todo_status = self._display_todos()
-        if todo_status:
-            print('---- TODOS -----\n')
-            print(f"⚠️ CODER: Found todo status ({len(todo_status)} chars), adding to context")
-            
-            # Check if no todos exist yet
-            if 'no todos created yet' in todo_status:
-                todo_msg = {"role": "user", "content": f"""
-Current todo status:\n\n{todo_status}\n\n
-Note: No todos have been created yet. Please plan and create todos to then follow and systematically work on tasks.
-- First, analyze the user's request and break it down into specific, actionable todos
-- Create todos with appropriate priorities (high, medium, low)
-- Then systematically work on each todo until all are completed, integrated and tested to make sure it works end to end
-- As you work on each todo, update the todo status to in_progress
-- Once you have completed a todo, update the todo status to completed"""}
-            else:
-                todo_msg = {"role": "user", "content": f"""
-Current todo status:\n\n{todo_status}\n\n
-Note: Continue with the highest priority todo. 
-- Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end. 
-- As you work on each todo, update the todo status to in_progress. 
-- Once you have completed a todo, update the todo status to completed.
-- If you are not sure what to do next, check the todo status and pick the highest priority todo."""}
-            
-            messages.append(todo_msg)
-            self.conversation_history.append(todo_msg)
-            print(f"📤 CODER: Added todo status to messages and conversation history: {todo_msg['content']}")
-            
-            print('---- TODOS -----\n')
-        else:
-            print("✅ CODER: No todo status found")
+        # Add accumulated messages from previous iteration (action results + todo status + service status)
+        if full_user_msg.strip():
+            print(f"📤 CODER: Adding accumulated context from previous iteration ({len(full_user_msg)} chars)")
+            messages.append({"role": "user", "content": full_user_msg})
+            self.conversation_history.append({"role": "user", "content": full_user_msg})
+            self._save_conversation_history()  # Save after each iteration
+            full_user_msg = ""  # Reset for this iteration
+        
+        print(f"📤 CODER: Sending {len(messages)} messages to API")
         
         try:
             print("🔌 CODER: Creating streaming completion...")
@@ -86,6 +188,7 @@ Note: Continue with the highest priority todo.
             
             # Token tracking
             final_chunk = None
+            generation_id = None  # Track generation ID for usage query
             
             print("🌊 CODER: Starting to process streaming chunks...")
             chunk_count = 0
@@ -93,6 +196,11 @@ Note: Continue with the highest priority todo.
             for chunk in completion:
                 chunk_count += 1
                 final_chunk = chunk  # Keep track of last chunk for token usage
+                
+                # Capture generation ID from first chunk for separate usage query
+                if generation_id is None and hasattr(chunk, 'id') and chunk.id:
+                    generation_id = chunk.id
+                    print(f"🆔 CODER: Captured generation ID: {generation_id}")
                 
                 # if chunk_count % 10 == 0:  # Every 10th chunk
                 #     # print(f"📊 CODER: Processed {chunk_count} chunks, accumulated: {len(accumulated_content)} chars")
@@ -199,6 +307,31 @@ Note: Continue with the highest priority todo.
                         else:
                             print("⏳ CODER: File path not yet available in update_file action, continuing...")
                     
+                    # Check for invalid XML tags first
+                    invalid_tags = _detect_invalid_xml_tags(content)
+                    if invalid_tags:
+                        print(f"\n🚨 CODER: INVALID XML TAGS DETECTED: {invalid_tags}")
+                        for invalid_tag in invalid_tags:
+                            full_user_msg += f"""
+<action_result type="invalid_tool_action">
+❌ Invalid tool action detected: `{invalid_tag}`
+
+**Available Action Tags:**
+- `<action type="read_file" path="file/path"/>` - Read a file
+- `<action type="file" filePath="path">content</action>` - Create new file
+- `<action type="update_file" path="path">content</action>` - Update existing file
+- `<action type="run_command" cwd="directory" command="command"/>` - Run terminal command
+- `<action type="start_backend"/>` - Start backend service
+- `<action type="start_frontend"/>` - Start frontend service
+- `<action type="check_errors"/>` - Check for project errors
+- `<action type="ast_analyze" target="backend|frontend" focus="routes|imports|env|database|structure|all"/>` - Deep structural code analysis
+- `<action type="todo_create" id="task_id" priority="high|medium|low">task description</action>` - Create todo
+- `<action type="todo_update" id="task_id" status="in_progress|completed"/>` - Update todo status
+
+Please use the correct action tags to perform actions based on your plan and the user's requirements.
+</action_result>
+"""
+                    
                     # Check for read_file, run_command, and update_file actions
                     actions = list(parser.process_chunk(content))  # Convert generator to list
                     if actions:
@@ -284,6 +417,24 @@ Note: Continue with the highest priority todo.
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for check_errors")
                             break
+                        elif action_type == 'todo_list':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected todo_list action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for todo_list")
+                            break
+                        elif action_type == 'ast_analyze':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected ast_analyze action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for ast_analyze")
+                            break
+                        elif action_type == 'check_logs':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected check_logs action")
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for check_logs")
+                            break
                         elif action_type.startswith('todo_'):
                             print(f"\n📋 CODER: Processing todo action inline: {action_type}")
                             # Process todo actions inline without interrupting
@@ -304,6 +455,12 @@ Note: Continue with the highest priority todo.
             full_response += accumulated_content
             print(f"📈 CODER: New full_response length: {len(full_response)} chars")
             
+            # Query usage statistics using generation ID (works even after early breaks)
+            if generation_id:
+                query_generation_usage(self, generation_id)
+            else:
+                print("⚠️ CODER: No generation ID available for usage query")
+            
             # Check interrupt status
             print(f"🔍 CODER: Checking interrupt status...")
             print(f"   should_interrupt: {should_interrupt}")
@@ -321,17 +478,28 @@ Note: Continue with the highest priority todo.
                         print(f"✅ CODER: Successfully read file, content length: {len(file_content)} chars")
                         # Add the read file content to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"File content for {interrupt_action.get('path')}:\n\n```\n{file_content}\n```\n\nPlease continue with your response based on this file content."}
                         
                         print(f"📤 CODER: Adding assistant message ({len(assistant_msg['content'])} chars) to messages")
-                        print(f"📤 CODER: Adding user message ({len(user_msg['content'])} chars) to messages")
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
+                        
+                        full_user_msg += f"""
+<action_result type=\"read_file\" path=\"{interrupt_action.get('path')}\">
+File content for {interrupt_action.get('path')}:
+```
+{file_content}
+```
+</action_result>
+"""
                         
                         # Also add to conversation history for persistence
                         print("💾 CODER: Adding messages to conversation history")
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+
+                        # full_user_msg persists to next iteration
+                        print(f"💾 CODER: Accumulated messages will carry to next iteration ({len(full_user_msg)} chars)")
                         
                         print(f"🔄 CODER: Continuing iteration with {len(messages)} total messages")
                         continue
@@ -349,12 +517,41 @@ Note: Continue with the highest priority todo.
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
                         self.conversation_history.append(error_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'create_file_realtime':
                     # Handle real-time file creation
                     create_result = self._handle_create_file_realtime(interrupt_action)
                     if create_result is not None:
+                        # Check if file creation was blocked due to empty content
+                        if create_result.get('empty_file_warning'):
+                            print(f"⚠️ File creation blocked due to empty content")
+                            # Add the empty file warning to user messages
+                            assistant_msg = {"role": "assistant", "content": accumulated_content}
+                            full_user_msg += f"""
+<action_result type=\"create_file_realtime\" file_path=\"{create_result.get('file_path')}\">
+{create_result.get('message')}
+</action_result>
+"""
+                            messages.append(assistant_msg)
+                            self.conversation_history.append(assistant_msg)
+                            self._save_conversation_history()  # Save after each iteration
+                            
+                            # Add todo and service context before continuing
+                            full_user_msg = _add_context_to_message(self, full_user_msg)
+                            
+                            # Accumulated messages will be added at the start of next iteration
+                            print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                            
+                            continue
+                        
                         file_path = create_result.get('file_path')
                         print(f"✅ Created file: {file_path}")
                         
@@ -375,38 +572,69 @@ Note: Continue with the highest priority todo.
                             error_messages.append(f"Python validation errors:\n{python_errors}")
                         if typescript_errors:
                             error_messages.append(f"TypeScript validation errors:\n{typescript_errors}")
+                            
+                        # Check if the created file uses os.environ but doesn't have load_dotenv
+                        dotenv_warning = None
+                        if file_path.endswith('.py'):
+                            # Get the actual file content from the create_result
+                            file_content = create_result.get('file_content', '')
+                                
+                            # Check if file uses os.environ but doesn't import/call load_dotenv
+                            uses_environ = 'os.environ' in file_content
+                            has_load_dotenv = 'load_dotenv' in file_content
+                            
+                            if uses_environ and not has_load_dotenv:
+                                dotenv_warning = f"""
+====
+⚠️  **Environment Variable Warning:**
+The file '{file_path}' uses `os.environ` but doesn't call `load_dotenv()`.
 
+**To fix this, add these lines at the top of your file:**
+"""
                         if error_messages:
-                            user_content = f"""✅ File '{file_path}' created.
+                            user_content = f"""
+✅ File '{file_path}' created.
 
-                        **Static Analysis Results:**
-                        {'\n\n'.join(error_messages)}
+**Static Analysis Results:**
+{'\n\n'.join(error_messages)}
 
-                        **NEXT STEPS:**
-                        1. Fix these static errors first
-                        2. If this is a backend service, create a test file (e.g., `backend/test_api.py`) to verify it works
-                        3. Run the test file with `python backend/test_api.py`
-                        4. Fix any runtime errors
-                        5. Delete the test file when done
+**NEXT STEPS:**
+1. Fix these static errors first
+2. If this is a backend service, create a test file (e.g., `backend/test_api.py`) to verify it works
+3. Run the test file with `python backend/test_api.py`
+4. Fix any runtime errors
+5. Delete the test file when done
 
-                        Continue with your implementation and testing."""
+Continue with your implementation and testing."""
                         else:
-                            user_content = f"""✅ File '{file_path}' created successfully.
+                            user_content = f"""
+✅ File '{file_path}' created successfully.
 
-                        If this was a backend service:
-                        1. Create a test file (e.g., `backend/test_api.py`) 
-                        2. Write Python code to test your endpoints
-                        3. Run it with `python backend/test_api.py`
-                        4. Verify it works, then delete the test file."""
+If this was a backend service:
+1. Create a test file (e.g., `backend/test_api.py`) 
+2. Write Python code to test your endpoints
+3. Run it with `python backend/test_api.py`
+4. Verify it works, then delete the test file."""
 
-                        user_msg = {"role": "user", "content": user_content}
-                        
+
+                        full_user_msg += f"""
+<action_result type=\"create_file_realtime\" file_path=\"{file_path}\">
+{user_content}
+
+{dotenv_warning if dotenv_warning else ""}
+</action_result>
+"""
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'run_command':
@@ -416,26 +644,36 @@ Note: Continue with the highest priority todo.
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         user_msg = {
                             "role": "user", "content": f"""
-                            Command output for `{interrupt_action.get('command')}` in {interrupt_action.get('cwd')}:
-                            {command_output}
+Command output for `{interrupt_action.get('command')}` in {interrupt_action.get('cwd')}:
+{command_output}
 
-                            **Instructions:**
-                            - These are the logs from the terminal command execution
-                            - If there are any errors, warnings, or issues in the output above, please fix them immediately
-                            - Use `<action type=\"read_file\" path=\"...\"/>` to examine files that have errors
-                            - Use `<action type=\"update_file\" path=\"...\">` to fix any issues found
-                            - Continue with your response and next steps after addressing any problems
+**Instructions:**
+- These are the logs from the terminal command execution
+- If there are any errors, warnings, or issues in the output above, please fix them immediately
+- Use `<action type=\"read_file\" path=\"...\"/>` to examine files that have errors
+- Use `<action type=\"update_file\" path=\"...\">` to fix any issues found
+- Continue with your response and next steps after addressing any problems
 
-                            Please continue with your next steps..
+Please continue with your next steps..
                             """
                         }
-                        
+
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
+                        full_user_msg += f"""
+<action_result type=\"run_command\" command=\"{interrupt_action.get('command')}\" cwd=\"{interrupt_action.get('cwd')}\">
+{command_output}
+</action_result>
+"""
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
@@ -444,36 +682,75 @@ Note: Continue with the highest priority todo.
                 elif interrupt_action.get('type') == 'update_file':
                     update_result = self._handle_update_file_interrupt(interrupt_action)
                     if update_result is not None:
+                        # Check if this is an empty file warning
+                        if isinstance(update_result, str) and "File update blocked" in update_result:
+                            print(f"⚠️ File update blocked due to empty content")
+                            # Add the empty file warning to user messages
+                            assistant_msg = {"role": "assistant", "content": accumulated_content}
+                            full_user_msg += f"""
+<action_result type=\"update_file\" path=\"{interrupt_action.get('path')}\">
+{update_result}
+</action_result>
+"""
+                            messages.append(assistant_msg)
+                            self.conversation_history.append(assistant_msg)
+                            self._save_conversation_history()  # Save after each iteration
+                            
+                            # Add todo and service context before continuing
+                            full_user_msg = _add_context_to_message(self, full_user_msg)
+                            
+                            # Accumulated messages will be added at the start of next iteration
+                            print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                            
+                            continue
+                        
                         # Add the update result to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"File '{interrupt_action.get('path')}' has been updated successfully. Please continue with your response."}
-                        
+                        full_user_msg += f"""
+<action_result type=\"update_file\" path=\"{interrupt_action.get('path')}\">
+File '{interrupt_action.get('path')}' has been updated successfully.
+</action_result>
+"""
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
                         print(f"❌ Failed to update file {interrupt_action.get('path')}, stopping generation")
                         break
                 elif interrupt_action.get('type') == 'rename_file':
-                    rename_result = self._handle_rename_file_interrupt(interrupt_action)
-                    if rename_result is not None:
+                    rename_result = _handle_rename_file_interrupt(self, interrupt_action)
+                    if rename_result is not None and not rename_result.get('error'):
                         # Add the rename result to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        old_path = interrupt_action.get('path')
-                        new_name = interrupt_action.get('new_name')
-                        user_msg = {"role": "user", "content": f"File '{old_path}' has been renamed to '{new_name}' successfully. Please continue with your response."}
+                        old_path = rename_result.get('old_path', interrupt_action.get('path'))
+                        new_path = rename_result.get('new_path', interrupt_action.get('new_name'))
+                        full_user_msg += f"""
+<action_result type=\"rename_file\" path=\"{old_path}\" new_path=\"{new_path}\">
+File '{old_path}' has been renamed to '{new_path}' successfully.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
@@ -485,14 +762,23 @@ Note: Continue with the highest priority todo.
                         # Add the delete result to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         file_path = interrupt_action.get('path')
-                        user_msg = {"role": "user", "content": f"File '{file_path}' has been deleted successfully. Please continue with your response."}
-                        
+                        full_user_msg += f"""
+<action_result type=\"delete_file\" path=\"{file_path}\">
+File '{file_path}' has been deleted successfully.
+</action_result>
+"""
+
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
-                        
+
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
@@ -500,118 +786,218 @@ Note: Continue with the highest priority todo.
                         break
                 elif interrupt_action.get('type') == 'start_backend':
                     service_result = self._handle_start_backend_interrupt(interrupt_action)
-                    if service_result is not None:
-                        # Add the service result to messages and conversation history
+                    if service_result and service_result.get('status') == 'success':
+                        # Success case
+                        backend_result = service_result.get('result', {})
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"Backend service started successfully on port {service_result.get('backend_port')}. API available at {service_result.get('api_url')}. Please continue with your response."}
-                        
+                        full_user_msg += f"""
+<action_result type=\"start_backend\">
+Backend service started successfully on port {backend_result.get('backend_port')}. API available at {backend_result.get('backend_url')}.
+</action_result>
+"""
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
+                        # Error case - get actual error details
+                        error_details = "Unknown error"
+                        if service_result and service_result.get('error'):
+                            error_details = service_result.get('error')
+                        
                         print(f"❌ Failed to start backend service, passing error to model for fixing")
-                        # Pass the error back to the model so it can fix the issues
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"❌ Backend failed to start. There are errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try starting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        full_user_msg += f"""
+<action_result type=\"start_backend_error\">
+❌ Backend failed to start. Error details: {error_details}
+
+Please fix the issues and try starting the backend again.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'start_frontend':
                     service_result = self._handle_start_frontend_interrupt(interrupt_action)
-                    if service_result is not None:
-                        # Add the service result to messages and conversation history
+                    if service_result and service_result.get('status') == 'success':
+                        # Success case
+                        frontend_result = service_result.get('result', {})
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"Frontend service started successfully on port {service_result.get('frontend_port')}. Available at {service_result.get('frontend_url')}. Please continue with your response."}
+                        full_user_msg += f"""
+<action_result type=\"start_frontend\">
+Frontend service started successfully on port {frontend_result.get('frontend_port')}. Available at {frontend_result.get('frontend_url')}.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
+                        # Error case - get actual error details
+                        error_details = "Unknown error"
+                        if service_result and service_result.get('error'):
+                            error_details = service_result.get('error')
+                        
                         print(f"❌ Failed to start frontend service, passing error to model for fixing")
                         # Pass the error back to the model so it can fix the issues
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"❌ Frontend failed to start. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try starting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        full_user_msg += f"""
+<action_result type=\"start_frontend_error\">
+❌ Frontend failed to start. Error details: {error_details}
+
+Please fix the issues and try starting the frontend again.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'restart_backend':
                     service_result = self._handle_restart_backend_interrupt(interrupt_action)
-                    if service_result is not None:
-                        # Add the service result to messages and conversation history
+                    if service_result and service_result.get('status') == 'success':
+                        # Success case
+                        backend_result = service_result.get('result', {})
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"Backend service restarted successfully on port {service_result.get('backend_port')}. API available at {service_result.get('api_url')}. Please continue with your response."}
+                        full_user_msg += f"""
+<action_result type=\"restart_backend\">
+Backend service restarted successfully on port {backend_result.get('backend_port')}. API available at {backend_result.get('backend_url')}.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
+                        # Error case - get actual error details
+                        error_details = "Unknown error"
+                        if service_result and service_result.get('error'):
+                            error_details = service_result.get('error')
+                        
                         print(f"❌ Failed to restart backend service, passing error to model for fixing")
-                        # Pass the error back to the model so it can fix the issues
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"❌ Backend restart failed. There are likely errors that need to be fixed before the backend can run. Please investigate and fix the backend errors, then try restarting the backend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        full_user_msg += f"""
+<action_result type=\"restart_backend_error\">
+❌ Backend restart failed. Error details: {error_details}
+
+Please fix the issues and try restarting the backend again.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'restart_frontend':
                     service_result = self._handle_restart_frontend_interrupt(interrupt_action)
-                    if service_result is not None:
-                        # Add the service result to messages and conversation history
+                    if service_result and service_result.get('status') == 'success':
+                        # Success case
+                        frontend_result = service_result.get('result', {})
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"Frontend service restarted successfully on port {service_result.get('frontend_port')}. Available at {service_result.get('frontend_url')}. Please continue with your response."}
+                        full_user_msg += f"""
+<action_result type=\"restart_frontend\">
+Frontend service restarted successfully on port {frontend_result.get('frontend_port')}. Available at {frontend_result.get('frontend_url')}.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
+                        # Error case - get actual error details
+                        error_details = "Unknown error"
+                        if service_result and service_result.get('error'):
+                            error_details = service_result.get('error')
+                        
                         print(f"❌ Failed to restart frontend service, passing error to model for fixing")
-                        # Pass the error back to the model so it can fix the issues
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        user_msg = {"role": "user", "content": f"❌ Frontend restart failed. There may be errors that need to be fixed before the frontend can run. Please investigate and fix any frontend errors, then try restarting the frontend again. Use check_errors or read relevant files to identify and resolve the issues."}
+                        full_user_msg += f"""
+<action_result type=\"restart_frontend_error\">
+❌ Frontend restart failed. Error details: {error_details}
+
+Please fix the issues and try restarting the frontend again.
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                 elif interrupt_action.get('type') == 'check_errors':
@@ -641,27 +1027,472 @@ Note: Continue with the highest priority todo.
                         
                         error_summary += "Please fix any critical errors and continue with your response."
                         
-                        user_msg = {"role": "user", "content": error_summary}
+                        full_user_msg += f"""
+<action_result type=\"check_errors\">
+{error_summary}
+</action_result>
+"""
                         
                         messages.append(assistant_msg)
-                        messages.append(user_msg)
                         
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self.conversation_history.append(user_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         
                         continue
                     else:
                         print(f"❌ Failed to run error check, stopping generation")
                         break
+                elif interrupt_action.get('type') == 'todo_list':
+                    # Handle todo_list action - display todos and return the status
+                    print(f"📋 CODER: Processing todo_list interrupt")
+                    
+                    # Get current todo status
+                    todo_status = self._display_todos()
+                    
+                    if todo_status:
+                        # Add the todo status to the response
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        full_user_msg += f"""
+<action_result type="todo_list">
+{todo_status}
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        
+                        continue
+                    else:
+                        # No todos exist
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        full_user_msg += f"""
+<action_result type="todo_list">
+No todos have been created yet. Use the following actions to manage todos:
+- <action type="todo_create" id="unique_id" priority="high|medium|low">Task description</action>
+- <action type="todo_update" id="todo_id" status="in_progress|completed"/>
+- <action type="todo_list"/> (to view all todos)
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        
+                        continue
+                elif interrupt_action.get('type') == 'todo_complete':
+                    # Todo was already processed inline, just need to prompt continuation
+                    print(f"✅ CODER: Todo completion processed, prompting continuation")
+                    
+                    # Get current todo status to show what's next
+                    todo_status = self._display_todos()
+                    
+                    # Add messages to prompt continuation
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    full_user_msg += f"""
+<action_result type=\"todo_complete\">
+Great! You've completed a todo. Please continue with the next highest priority task.
+</action_result>
+"""
+                    
+                    messages.append(assistant_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self._save_conversation_history()  # Save after each iteration
+                    
+                    # Add todo and service context before continuing
+                    full_user_msg = _add_context_to_message(self, full_user_msg)
+                    
+                    # Accumulated messages will be added at the start of next iteration
+                    print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                    
+                    continue
+                elif interrupt_action.get('type') == 'ast_analyze':
+                    # Handle AST analysis action
+                    print(f"🧠 CODER: Processing ast_analyze interrupt")
+                    
+                    ast_result = self._handle_ast_analyze_interrupt(interrupt_action)
+                    if ast_result is not None:
+                        # Add the AST analysis result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        # Format the analysis results
+                        target = interrupt_action.get('target', 'backend')
+                        focus = interrupt_action.get('focus', 'all')
+                        
+                        analysis_summary = ast_result.get('summary', {})
+                        insights = ast_result.get('insights', [])
+                        recommendations = ast_result.get('recommendations', [])
+                        errors = ast_result.get('errors', [])
+                        
+                        result_text = f"""AST Analysis Results ({target} - {focus}):
+
+📊 **Summary:**
+- Files analyzed: {analysis_summary.get('files_analyzed', 0)}
+- Routes found: {analysis_summary.get('total_routes', 0)}
+- Functions: {analysis_summary.get('total_functions', 0)}
+- Classes: {analysis_summary.get('total_classes', 0)}
+- Errors: {analysis_summary.get('errors_found', 0)}
+
+"""
+                        
+                        if insights:
+                            result_text += "💡 **Key Insights:**\n"
+                            for insight in insights:
+                                result_text += f"- {insight}\n"
+                            result_text += "\n"
+                        
+                        if errors:
+                            result_text += "❌ **Critical Issues:**\n"
+                            for error in errors[:5]:  # Limit to 5 most critical
+                                result_text += f"- {error.get('type', 'error')}: {error.get('message', 'Unknown error')} in {error.get('file', 'unknown file')}\n"
+                            result_text += "\n"
+                        
+                        if recommendations:
+                            result_text += "🔧 **Recommendations:**\n"
+                            for rec in recommendations[:3]:  # Limit to top 3
+                                result_text += f"- {rec.get('description', 'Fix recommended')} (Priority: {rec.get('priority', 'medium')})\n"
+                        
+                        result_text += "\nUse this analysis to understand the project structure and identify areas that need attention."
+                        
+                        full_user_msg += f"""
+<action_result type="ast_analyze" target="{target}" focus="{focus}">
+{result_text}
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to run AST analysis, stopping generation")
+                        break
+                elif interrupt_action.get('type') == 'web_search':
+                    # Handle web_search action
+                    print(f"🔍 CODER: Processing web_search interrupt")
+                    
+                    search_result = self._handle_web_search_interrupt(interrupt_action)
+                    if search_result is not None:
+                        # Add the search result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        # Format the search results
+                        query = search_result.get('query', '')
+                        results = search_result.get('results', '')
+                        success = search_result.get('success', False)
+                        error = search_result.get('error', '')
+                        
+                        if success:
+                            result_text = f"""Web search completed for: "{query}"
+
+**Search Results:**
+{results}
+"""
+                        else:
+                            result_text = f"""Web search failed for: "{query}"
+
+❌ **Error:** {error}
+
+💡 **Next Steps:**
+- Try rephrasing the query
+- Check if the search service is available
+- Consider alternative research methods"""
+                        
+                        # Create user message with search results
+                        search_msg = {
+                            "role": "user", 
+                            "content": result_text
+                        }
+                        
+                        # Update conversation history and messages
+                        self.conversation_history.extend([assistant_msg, search_msg])
+                        messages.extend([assistant_msg, search_msg])
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        print(f"✅ CODER: Web search results added to conversation")
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        
+                        # Continue generation with search results
+                        continue
+                    else:
+                        print(f"❌ Failed to perform web search, stopping generation")
+                        break
+                elif interrupt_action.get('type') == 'check_logs':
+                    # Handle check_logs action
+                    print(f"📋 CODER: Processing check_logs interrupt")
+                    
+                    logs_result = _handle_check_logs_interrupt(self, interrupt_action)
+                    if logs_result is not None:
+                        # Add the logs result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        # Format the logs results
+                        service = interrupt_action.get('service', 'backend')
+                        new_only = interrupt_action.get('new_only', True)
+                        
+                        logs_content = logs_result.get('logs', '')
+                        total_lines = logs_result.get('total_lines', 0)
+                        new_lines = logs_result.get('new_lines', 0)
+                        service_running = logs_result.get('service_running', False)
+                        
+                        # Truncate logs if they're too long
+                        if len(logs_content) > 4000:
+                            lines = logs_content.split('\n')
+                            if len(lines) > 50:
+                                # Keep first 10 and last 40 lines
+                                truncated_logs = '\n'.join(lines[:10] + ['...[truncated]...'] + lines[-40:])
+                            else:
+                                # Just truncate by characters
+                                truncated_logs = logs_content[:2000] + '\n...[truncated]...\n' + logs_content[-2000:]
+                            logs_content = truncated_logs
+                        
+                        status_emoji = "🟢" if service_running else "🔴"
+                        
+                        result_text = f"""Logs for {service} service ({status_emoji} {'Running' if service_running else 'Stopped'}):
+
+📊 **Log Summary:**
+- Total lines: {total_lines}
+- New lines since last check: {new_lines}
+- Service status: {'Running' if service_running else 'Stopped'}
+
+📝 **Log Content:**
+```
+{logs_content.strip() if logs_content.strip() else 'No logs available'}
+```
+
+💡 **Analysis Tips:**
+- Look for error messages, stack traces, and warning patterns
+- Check startup/initialization logs for issues
+- Monitor API request/response logs for debugging
+- Use this information to identify and fix problems systematically
+"""
+                        
+                        full_user_msg += f"""
+<action_result type="check_logs" service="{service}">
+{result_text}
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence  
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        print(f"📋 CODER: Retrieved {new_lines} new lines from {service} service logs")
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to check logs, stopping generation")
+                        break
             else:
-                # No interruption, process any remaining actions and finish
+                 # No interruption, process any remaining actions and finish
                 print("🎬 CODER: No interrupt detected, processing remaining actions...")
                 print(f"📝 CODER: Processing remaining actions with {len(accumulated_content)} chars of content")
                 self._process_remaining_actions(accumulated_content)
-                print("✅ CODER: Finished processing remaining actions, breaking from iteration loop")
-                break
+                
+                # Check if we have an incomplete action (opened but not closed)
+                has_incomplete_action = False
+                if '<action' in accumulated_content and accumulated_content.rfind('<action') > accumulated_content.rfind('</action>'):
+                    has_incomplete_action = True
+                    print("⚠️ CODER: Detected incomplete action tag - stream was likely cut off")
+                
+                # Check if we only created todos without doing any actual work
+                todos_created_without_work = False
+                if 'todo_create' in accumulated_content:
+                    # Parse to check what actions were in this response
+                    temp_parser = StreamingXMLParser()
+                    temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                    
+                    todo_creates = [a for a in temp_actions if a.get('type') == 'todo_create']
+                    work_actions = [a for a in temp_actions if a.get('type') in ['file', 'update_file', 'run_command', 'todo_update']]
+                    
+                    # If we created todos but didn't do any work
+                    if todo_creates and not work_actions:
+                        todos_created_without_work = True
+                        print(f"📋 CODER: Created {len(todo_creates)} todos but no work actions found")
+                
+                # Check if response contains non-implementation tags (like artifact, planning, etc)
+                non_implementation_response = False
+                if any(tag in accumulated_content for tag in ['<artifact', '<planning>', '<thinking>']):
+                    # Check if there are any actual implementation actions
+                    temp_parser = StreamingXMLParser()
+                    temp_actions = list(temp_parser.process_chunk(accumulated_content))
+                    implementation_actions = [a for a in temp_actions if a.get('type') in ['file', 'update_file', 'run_command']]
+                    
+                    if not implementation_actions:
+                        non_implementation_response = True
+                        print("📄 CODER: Response contains only planning/artifact tags without implementation")
+                
+                if has_incomplete_action:
+                    # Add a message to prompt continuation
+                    print("🔄 CODER: Prompting model to continue incomplete action")
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    full_user_msg += f"""
+<action_result type=\"file_action_cutoff\">
+The previous response was cut off. Please continue from where you left off to complete the file action.
+</action_result>
+"""
+                    
+                    messages.append(assistant_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self._save_conversation_history()  # Save after each iteration
+                    
+                    # Store accumulated messages for next iteration
+                    unified_user_message = full_user_msg
+                    print(f"💾 CODER: Stored unified message before continue ({len(unified_user_message)} chars)")
+                    
+                    print("🔄 CODER: Continuing iteration to complete the action")
+                    continue
+                elif todos_created_without_work:
+                    # Prompt to start working on the todos that were just created
+                    print("🔄 CODER: Todos created without implementation - prompting to start work")
+                    
+                    # Get current todo status
+                    todo_status = self._display_todos()
+                    
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    full_user_msg += f"""
+<action_result>
+Good! You've created the todos. Here's the current status:\n\n{todo_status}\n\nNow please start implementing the highest priority todo. Remember to:\n1. Update the todo status to 'in_progress' using todo_update\n2. Create/modify the necessary files\n3. Test your implementation\n4. Mark the todo as completed when done
+</action_result>
+"""
+                    
+                    messages.append(assistant_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self._save_conversation_history()  # Save after each iteration
+                    
+                    # Store accumulated messages for next iteration
+                    unified_user_message = full_user_msg
+                    print(f"💾 CODER: Stored unified message before continue ({len(unified_user_message)} chars)")
+                    
+                    print("🔄 CODER: Continuing iteration to implement todos")
+                    continue
+                elif non_implementation_response:
+                    # Response only contains planning/artifacts without actual implementation
+                    print("🔄 CODER: Planning/artifact only response - prompting for implementation")
+                    
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    full_user_msg += f"""
+<action_result>
+Good planning! Now please proceed with the actual implementation. Start creating or modifying the necessary files to implement what you've planned.
+</action_result>
+"""
+                    
+                    messages.append(assistant_msg)
+                    
+                    # Also add to conversation history for persistence
+                    self.conversation_history.append(assistant_msg)
+                    self._save_conversation_history()  # Save after each iteration
+                    
+                    # Store accumulated messages for next iteration
+                    unified_user_message = full_user_msg
+                    print(f"💾 CODER: Stored unified message before continue ({len(unified_user_message)} chars)")
+                    
+                    print("🔄 CODER: Continuing iteration to implement the plan")
+                    continue
+                else:
+                    print("✅ CODER: Finished processing remaining actions")
+                    
+                    # Check if there are more todos to work on
+                    pending_todos = [todo for todo in getattr(self, 'todos', []) if todo.get('status') == 'pending']
+                    in_progress_todos = [todo for todo in getattr(self, 'todos', []) if todo.get('status') == 'in_progress']
+                    
+                    print(f"📋 CODER: Current todo status - Pending: {len(pending_todos)}, In Progress: {len(in_progress_todos)}")
+                    
+                    if pending_todos or in_progress_todos:
+                        print("🔄 CODER: There are still todos to work on, continuing iteration...")
+                        
+                        # Get current todo status to show what's next
+                        todo_status = self._display_todos() if hasattr(self, '_display_todos') else "Todo status not available"
+                        
+                        # Add a message to prompt continuation with next todo
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        full_user_msg += f"""
+<action_result type="continue_todos">
+Great! You've made progress. Here's the current todo status:
+
+{todo_status}
+
+Please continue working on the next highest priority todo. Remember to:
+1. Update the todo status to 'in_progress' using <action type="todo_update" id="todo_id" status="in_progress"/>
+2. Implement the required functionality
+3. Test your implementation
+4. Mark the todo as completed when done using <action type="todo_update" id="todo_id" status="completed"/>
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        continue
+                    else:
+                        print("✅ CODER: All todos completed or no todos exist, breaking from iteration loop")
+                        break
     
+              
+            # 💡 additional context - Add todo and service status
+            full_user_msg = _add_context_to_message(self, full_user_msg)
+            
+            # Accumulated messages (action results + todo status + service status) will be added at start of next iteration
+            print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of full context for next iteration")
+            
         except Exception as e:
             print(f"❌ CODER: Exception during generation in iteration {iteration}: {e}")
             print(f"🔍 CODER: Exception type: {type(e).__name__}")
@@ -673,45 +1504,647 @@ Note: Continue with the highest priority todo.
     print(f"\n🏁 CODER: Completed iteration loop after {iteration} iterations")
     print(f"📊 CODER: Final full_response length: {len(full_response)} chars")
     
-    
-    # Add current project errors as context at the end of generation
-    print("🔍 -- CHECKING FOR ERRORS -----\n")
-    project_errors = _get_project_errors(self)
-    if project_errors:
-        print(f"⚠️ CODER: Found project errors ({len(project_errors)} chars), adding to context")
-        error_msg = {"role": "user", "content": f"Current codebase errors:\n\n{project_errors}\n\nNote: Fix critical errors if needed, otherwise continue with main task."}
-        messages.append(error_msg)
-        self.conversation_history.append(error_msg)
-        print('---- CHECKING FOR ERRORS -----\n')
-        print("📤 CODER: Added error context to messages and conversation history")
-    else:
-        print("✅ CODER: No project errors found")
-    
+    # Add any remaining accumulated messages to conversation history
+    if full_user_msg.strip():
+        print(f"📤 CODER: Adding final accumulated context to conversation ({len(full_user_msg)} chars)")
+        # Add todo and service context to the final message
+        full_user_msg = _add_context_to_message(self, full_user_msg)
+        print(f"📊 CODER: Final message with context: {len(full_user_msg)} chars")
+        messages.append({"role": "user", "content": full_user_msg})
+        self.conversation_history.append({"role": "user", "content": full_user_msg})
+        self._save_conversation_history()  # Save after each iteration
     
     print(f"🎉 CODER: Returning full_response with {len(full_response)} chars")
     return full_response
 
 
-def _get_project_errors(self):
-    """Get current TypeScript errors for this project (quick read)"""
+def _is_service_actually_working(self, service):
+    """Check if the service is actually working by testing connectivity"""
     try:
-        project_id = getattr(self, 'project_id', None)
-        if not project_id:
-            return ""
+        if service == 'backend':
+            # Check if backend is responding
+            backend_url = getattr(self, 'backend_url', None)
+            if not backend_url:
+                # Try to detect backend URL from processes
+                project_id = getattr(self, 'project_id', None)
+                if project_id and hasattr(self, 'processes') and project_id in self.processes:
+                    backend_port = self.processes[project_id].get('backend_port')
+                    if backend_port:
+                        backend_url = f"http://localhost:{backend_port}"
             
-        error_file_path = f"/opt/codebase-platform/projects/{project_id}/frontend/.ts-errors.txt"
-        
-        # Read current errors if file exists
-        import os
-        if os.path.exists(error_file_path):
-            with open(error_file_path, 'r') as f:
-                content = f.read().strip()
-                if content and content != "No errors":
-                    return content
-        return ""
+            if backend_url:
+                import requests
+                # Try multiple health endpoints
+                endpoints_to_try = [
+                    f"{backend_url}/health",
+                    f"{backend_url}/",
+                    f"{backend_url}/api"
+                ]
+                
+                for endpoint in endpoints_to_try:
+                    try:
+                        response = requests.get(endpoint, timeout=3)
+                        if response.status_code in [200, 404, 405]:  # Server responding
+                            print(f"✅ CODER: {service} is responding at {endpoint}")
+                            return True
+                    except:
+                        continue
+                        
+            print(f"❌ CODER: {service} is not responding to health checks")
+            return False
+            
+        elif service == 'frontend':
+            # Check if frontend is responding  
+            frontend_url = getattr(self, 'preview_url', None)
+            if not frontend_url:
+                # Try to detect frontend URL from processes
+                project_id = getattr(self, 'project_id', None)
+                if project_id and hasattr(self, 'processes') and project_id in self.processes:
+                    frontend_port = self.processes[project_id].get('frontend_port')
+                    if frontend_port:
+                        frontend_url = f"http://localhost:{frontend_port}"
+            
+            if frontend_url:
+                import requests
+                try:
+                    response = requests.get(frontend_url, timeout=3)
+                    if response.status_code in [200, 404]:  # Frontend responding
+                        print(f"✅ CODER: {service} is responding at {frontend_url}")
+                        return True
+                except:
+                    pass
+                    
+            print(f"❌ CODER: {service} is not responding to health checks")
+            return False
+            
     except Exception as e:
-        print(f"Failed to read project errors: {e}")
-        return ""
+        print(f"⚠️ CODER: Error checking {service} health: {e}")
+        
+    return False
+
+def _add_context_to_message(self, full_user_msg):
+    """Add todo status and service status to the message accumulator"""
+    # Add current todo status as context
+    print("🔍 CODER: Adding todo and service context...")
+    todo_status = self._display_todos()
+    if todo_status:
+        print(f"⚠️ CODER: Found todo status ({len(todo_status)} chars), adding to context")
+        
+        # Check if no todos exist yet
+        if 'no todos created yet' in todo_status:
+            full_user_msg += f"""
+<todo_status>
+Current todo status:\n\n{todo_status}\n\n
+
+====
+Note: No todos have been created yet. Please plan and create todos to then follow and systematically work on tasks.
+- First, analyze the user's request and break it down into specific, actionable todos
+- Create todos with appropriate priorities (high, medium, low)
+- Then systematically work on each todo until all are completed, integrated and tested to make sure it works end to end
+- As you work on each todo, update the todo status to in_progress
+- Once you have completed a todo, update the todo status to completed
+</todo_status>
+"""
+        else:
+            full_user_msg += f"""
+<todo_status>
+Current todo status:\n\n{todo_status}\n\n
+
+====
+Note: Continue with the highest priority todo. 
+- Systematically work on each todo until all are completed, integrated and tested to make sure it works end to end. 
+- As you work on each todo, update the todo status to in_progress. 
+- Once you have completed a todo, update the todo status to completed.
+- If you are not sure what to do next, check the todo status and pick the highest priority todo.
+</todo_status>
+"""
+    else:
+        print("✅ CODER: No todo status found")
+    
+    # Add backend and frontend urls and status
+    backend_url = self.backend_url
+    frontend_url = self.preview_url
+    
+    # Ping backend and frontend to check status using multiple methods
+    backend_status = "Not running"
+    frontend_status = "Not running"
+    
+    # checking backend status
+    if backend_url:
+        try:
+            import requests
+            # Try multiple endpoints to check if backend is working
+            endpoints_to_try = [
+                f"{backend_url}/health",
+                f"{backend_url}/",
+                f"{backend_url}/api",
+                f"{backend_url}/status"
+            ]
+            
+            for endpoint in endpoints_to_try:
+                try:
+                    response = requests.get(endpoint, timeout=3)
+                    if response.status_code in [200, 404, 405]:  # 404/405 means server is running but endpoint doesn't exist
+                        backend_status = f"Running and responding (status: {response.status_code})"
+                        break
+                except:
+                    continue
+            else:
+                # If all endpoints fail, try a simple TCP connection check
+                try:
+                    import socket
+                    from urllib.parse import urlparse
+                    parsed = urlparse(backend_url)
+                    host = parsed.hostname or 'localhost'
+                    port = parsed.port or 80
+                    
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    result = sock.connect_ex((host, port))
+                    sock.close()
+                    
+                    if result == 0:
+                        backend_status = "Port is open but HTTP not responding"
+                    else:
+                        backend_status = "Port is closed"
+                except Exception as e:
+                    backend_status = f"Connection check failed: {str(e)}"
+                    
+        except Exception as e:
+            backend_status = f"Error checking status: {str(e)}"
+    
+    # checking frontend status
+    if frontend_url:
+        try:
+            import requests
+            # For frontend, try the main page and common paths
+            endpoints_to_try = [
+                frontend_url,
+                f"{frontend_url}/",
+                f"{frontend_url}/index.html",
+                f"{frontend_url}/static"
+            ]
+            
+            for endpoint in endpoints_to_try:
+                try:
+                    response = requests.get(endpoint, timeout=3)
+                    if response.status_code in [200, 404, 405]:
+                        frontend_status = f"Running and responding (status: {response.status_code})"
+                        break
+                except:
+                    continue
+            else:
+                # TCP connection check for frontend
+                try:
+                    import socket
+                    from urllib.parse import urlparse
+                    parsed = urlparse(frontend_url)
+                    host = parsed.hostname or 'localhost'
+                    port = parsed.port or 80
+                    
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    result = sock.connect_ex((host, port))
+                    sock.close()
+                    
+                    if result == 0:
+                        frontend_status = "Port is open but HTTP not responding"
+                    else:
+                        frontend_status = "Port is closed"
+                except Exception as e:
+                    frontend_status = f"Connection check failed: {str(e)}"
+                    
+        except Exception as e:
+            frontend_status = f"Error checking status: {str(e)}"
+    
+    # Check for errors in logs (only new lines since last checkpoint)
+    def _check_service_has_errors(service):
+        """Intelligent error detection with false positive prevention"""
+        try:
+            project_id = getattr(self, 'project_id', None)
+            if not project_id:
+                return False
+                
+            # Import requests for API call
+            import requests
+            from datetime import datetime, timedelta
+            
+            # Call the check_logs API with new_only=True to check only since last checkpoint
+            api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+            if api_base_url.endswith('/api'):
+                api_base_url = api_base_url[:-4]
+            
+            logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
+            params = {
+                'service': service,
+                'include_new_only': True  # Only check new logs since last checkpoint
+            }
+            
+            response = requests.get(logs_url, params=params, timeout=5)
+            if response.status_code == 200:
+                logs_data = response.json()
+                logs_content = logs_data.get('logs', '').lower()
+                new_lines = logs_data.get('new_lines', 0)
+                
+                # Enhanced error patterns for frontend and backend
+                backend_error_patterns = [
+                    'error:', 'exception:', 'traceback', 'failed:', 
+                    'importerror:', 'syntaxerror:', 'typeerror:', 'attributeerror:',
+                    'connectionerror:', 'timeout:', 'crash', 'fatal:', 'critical:',
+                    'cannot import', 'module not found', 'file not found'
+                ]
+                
+                frontend_error_patterns = [
+                    'error:', 'syntaxerror:', 'typeerror:', 'referenceerror:', 'rangeerror:',
+                    'uncaught error:', 'uncaught syntaxerror:', 'uncaught typeerror:',
+                    'module not found', 'cannot resolve', 'failed to resolve',
+                    'does not provide an export', 'is not defined', 'is not a function',
+                    'failed to compile', 'compilation failed', 'parse error'
+                ]
+                
+                error_patterns = frontend_error_patterns if service == 'frontend' else backend_error_patterns
+                
+                # Step 1: Check for NEW errors since last checkpoint
+                if new_lines > 0 and logs_content.strip():
+                    # Skip checkpoint-only logs (just contains "CHECKPOINT:")
+                    if logs_content.strip().startswith('<!-- checkpoint:') and logs_content.count('\n') <= 3:
+                        print(f"🔍 CODER: {service} new logs contain only checkpoints")
+                    else:
+                        # Check for actual errors in new content
+                        has_new_errors = any(pattern in logs_content for pattern in error_patterns)
+                        if has_new_errors:
+                            print(f"🚨 CODER: Detected FRESH {service} errors since last checkpoint ({new_lines} new lines)")
+                            return True
+                        else:
+                            print(f"🔍 CODER: {service} has {new_lines} new log lines but no error patterns")
+                
+                # Step 2: Enhanced logic for frontend JavaScript errors
+                # Frontend can serve HTTP 200 but have broken JavaScript - need special handling
+                if service == 'frontend':
+                    print(f"🔍 CODER: No new {service} errors, checking for persistent JavaScript issues...")
+                    
+                    # Get recent logs to check for persistent errors
+                    full_params = {'service': service, 'include_new_only': False}
+                    full_response = requests.get(logs_url, params=full_params, timeout=5)
+                    
+                    if full_response.status_code == 200:
+                        full_logs_data = full_response.json()
+                        full_logs_raw = full_logs_data.get('logs', '')
+                        
+                        # Parse timestamps and errors to check for recent persistent issues
+                        recent_errors = _extract_recent_frontend_errors(full_logs_raw)
+                        
+                        if recent_errors:
+                            # Check if these errors are recent (within last 10 minutes)
+                            current_time = datetime.now()
+                            has_recent_persistent_errors = False
+                            
+                            for error_info in recent_errors:
+                                error_time = error_info.get('timestamp')
+                                if error_time and (current_time - error_time).total_seconds() < 600:  # 10 minutes
+                                    has_recent_persistent_errors = True
+                                    break
+                            
+                            if has_recent_persistent_errors:
+                                print(f"🚨 CODER: Found recent persistent {service} JavaScript errors (within 10 minutes)")
+                                return True
+                            else:
+                                print(f"✅ CODER: {service} had errors but they appear resolved (older than 10 minutes)")
+                                return False
+                        else:
+                            print(f"✅ CODER: No persistent {service} errors detected")
+                            return False
+                else:
+                    # Backend error detection (original logic)
+                    print(f"🔍 CODER: No new {service} errors, verifying if service is actually working...")
+                    
+                    if _is_service_actually_working(self, service):
+                        print(f"✅ CODER: {service} service is working - no errors to report")
+                        return False
+                    else:
+                        # Service is broken, check recent logs for the cause
+                        print(f"⚠️ CODER: {service} service appears broken, checking recent logs for active errors...")
+                        
+                        # Get recent logs to check for persistent errors causing the service failure
+                        full_params = {'service': service, 'include_new_only': False}
+                        full_response = requests.get(logs_url, params=full_params, timeout=5)
+                        
+                        if full_response.status_code == 200:
+                            full_logs_data = full_response.json()
+                            full_logs_content = full_logs_data.get('logs', '').lower()
+                            
+                            # Check only the most recent logs (last 20 lines) for active errors
+                            recent_lines = full_logs_content.split('\n')[-20:] if full_logs_content else []
+                            recent_logs = '\n'.join(recent_lines)
+                            
+                            # Look for error patterns that could be causing current service failure
+                            has_active_errors = any(pattern in recent_logs for pattern in error_patterns)
+                            
+                            if has_active_errors:
+                                print(f"🚨 CODER: Found active {service} errors causing service failure")
+                                return True
+                            else:
+                                print(f"🔍 CODER: {service} service broken but no clear error patterns in recent logs")
+                                return False
+                        
+                return False
+        except Exception as e:
+            print(f"⚠️ CODER: Error checking {service} logs: {e}")
+            
+        return False
+
+    def _extract_recent_frontend_errors(logs_content):
+        """Extract frontend errors with timestamps for false positive prevention"""
+        try:
+            from datetime import datetime
+            import re
+            
+            if not logs_content:
+                return []
+            
+            errors = []
+            lines = logs_content.split('\n')
+            
+            for line in lines:
+                # Look for frontend error patterns with timestamps
+                # Format: [2025-08-15T16:31:43.058Z] [ERROR] Uncaught Error: ...
+                timestamp_match = re.search(r'\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\]', line)
+                
+                if timestamp_match and '[error]' in line.lower():
+                    # Check if it's a JavaScript/frontend error
+                    frontend_error_keywords = [
+                        'syntaxerror:', 'uncaught error:', 'uncaught syntaxerror:', 
+                        'does not provide an export', 'module not found', 'cannot resolve',
+                        'failed to resolve', 'is not defined', 'compilation failed'
+                    ]
+                    
+                    line_lower = line.lower()
+                    if any(keyword in line_lower for keyword in frontend_error_keywords):
+                        try:
+                            # Parse the timestamp
+                            timestamp_str = timestamp_match.group(1)
+                            error_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            
+                            errors.append({
+                                'timestamp': error_time.replace(tzinfo=None),  # Remove timezone for comparison
+                                'message': line.strip(),
+                                'type': 'javascript_error'
+                            })
+                        except ValueError:
+                            # If timestamp parsing fails, skip this error
+                            continue
+            
+            # Return only unique errors (deduplicate by message)
+            unique_errors = []
+            seen_messages = set()
+            
+            for error in errors:
+                error_key = error['message'][:100]  # Use first 100 chars as key for deduplication
+                if error_key not in seen_messages:
+                    seen_messages.add(error_key)
+                    unique_errors.append(error)
+            
+            return unique_errors[-5:]  # Return last 5 unique errors to avoid overwhelming
+            
+        except Exception as e:
+            print(f"⚠️ CODER: Error parsing frontend errors: {e}")
+            return []
+    
+    # Check for errors in both services (regardless of whether they're running)
+    # This is important because crashed services won't have URLs but may have errors in logs
+    backend_has_errors = _check_service_has_errors('backend')
+    frontend_has_errors = _check_service_has_errors('frontend')
+    
+    # Create error indicators with critical urgency
+    backend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"backend\"/> to see errors and FIX IMMEDIATELY" if backend_has_errors else ""
+    frontend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"frontend\"/> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
+    
+    # Add service status to full_user_msg
+    full_user_msg += f"""
+<service_status>
+Backend: {f"🟢 Running ・ Available at {backend_url} (available from BACKEND_URL environment variable)" if backend_url else "🚫 Not running"} ・ {backend_status}{backend_error_indicator}
+Frontend: {f"🟢 Running ・ Available at {frontend_url}" if frontend_url else "🚫 Not running"} ・ {frontend_status}{frontend_error_indicator}
+
+{"" if backend_url else "Backend is not running. Use <action type=\"start_backend\"/> to start or <action type=\"restart_backend\"/> to restart it."}
+    - Remember to load_dotenv() in your backend code to use the environment variables.
+{"" if frontend_url else "Frontend is not running. Use <action type=\"start_frontend\"/> to start or <action type=\"restart_frontend\"/> to restart it."}
+</service_status>
+"""
+    print(f"🔍 CODER: Backend status: {backend_status}")
+    print(f"🔍 CODER: Frontend status: {frontend_status}")
+    print(f"🔍 CODER: Backend has errors: {backend_has_errors}")
+    print(f"🔍 CODER: Frontend has errors: {frontend_has_errors}")
+    
+    return full_user_msg
+
+
+def query_generation_usage(self, generation_id):    
+    """
+    Query usage statistics for a generation using OpenRouter API.
+    Implements retry logic with exponential backoff since OpenRouter has a delay
+    before generations are recorded in their system.
+    """
+    if not generation_id:
+        print(f"⚠️ CODER: No generation ID provided for usage query")
+        return None
+    
+    # Configurable pricing (can be updated based on actual OpenRouter rates)
+    INPUT_PRICE_PER_MILLION = 0.20   # $0.20 per 1M input tokens
+    OUTPUT_PRICE_PER_MILLION = 0.80  # $0.80 per 1M output tokens
+    
+    try:
+        import requests
+        import time
+        
+        print(f"💰 CODER: Querying usage for generation ID: {generation_id}")
+        print(f"📊 CODER: Using pricing - Input: ${INPUT_PRICE_PER_MILLION}/M, Output: ${OUTPUT_PRICE_PER_MILLION}/M")
+        
+        # Retry logic with exponential backoff
+        max_retries = 1
+        base_delay = 2  # Start with 2 seconds
+        max_delay = 5  # Cap at 60 seconds
+        
+        for attempt in range(max_retries):
+            if attempt > 0:
+                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                print(f"🔄 CODER: Retry attempt {attempt + 1}/{max_retries}, waiting {delay}s...")
+                time.sleep(delay)
+            
+            headers = {
+                "Authorization": f"Bearer {self.client.api_key}"
+            }
+            
+            try:
+                response = requests.get(
+                    f"https://openrouter.ai/api/v1/generation?id={generation_id}",
+                    headers=headers,
+                    timeout=15  # Increased timeout for retries
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'data' in data:
+                        gen_data = data['data']
+                        prompt_tokens = gen_data.get('tokens_prompt', 0) or 0
+                        completion_tokens = gen_data.get('tokens_completion', 0) or 0
+                        total_tokens = prompt_tokens + completion_tokens
+                        
+                        # Calculate cost estimates using configurable pricing
+                        input_cost = (prompt_tokens / 1_000_000) * INPUT_PRICE_PER_MILLION
+                        output_cost = (completion_tokens / 1_000_000) * OUTPUT_PRICE_PER_MILLION
+                        iteration_cost = input_cost + output_cost
+                        
+                        print(f"\n📈 Usage Statistics (Generation {generation_id}):")
+                        print(f"Total Tokens: {total_tokens}")
+                        print(f"Prompt Tokens: {prompt_tokens}")
+                        print(f"Completion Tokens: {completion_tokens}")
+                        print(f"💰 This Iteration Cost (Our Estimate): ${iteration_cost:.6f}")
+                        print(f"   - Input cost: ${input_cost:.6f} ({prompt_tokens:,} × ${INPUT_PRICE_PER_MILLION}/M)")
+                        print(f"   - Output cost: ${output_cost:.6f} ({completion_tokens:,} × ${OUTPUT_PRICE_PER_MILLION}/M)")
+                        if gen_data.get('total_cost'):
+                            print(f"💳 OpenRouter Actual Cost: ${gen_data.get('total_cost'):.6f}")
+                            print(f"📊 Cost Comparison: Our ${iteration_cost:.6f} vs OpenRouter ${gen_data.get('total_cost'):.6f}")
+                        
+                        # Update internal tracking
+                        print("💾 CODER: Updating internal token tracking...")
+                        old_total = self.token_usage.get('total_tokens', 0)
+                        old_prompt = self.token_usage.get('prompt_tokens', 0)
+                        old_completion = self.token_usage.get('completion_tokens', 0)
+                        
+                        self.token_usage['prompt_tokens'] += prompt_tokens
+                        self.token_usage['completion_tokens'] += completion_tokens
+                        self.token_usage['total_tokens'] += total_tokens
+                        
+                        # Calculate running cost totals using configurable pricing
+                        total_input_cost = (self.token_usage['prompt_tokens'] / 1_000_000) * INPUT_PRICE_PER_MILLION
+                        total_output_cost = (self.token_usage['completion_tokens'] / 1_000_000) * OUTPUT_PRICE_PER_MILLION
+                        total_cost = total_input_cost + total_output_cost
+                        
+                        print(f"💰 Running Totals:")
+                        print(f"   Tokens: {old_total:,} → {self.token_usage['total_tokens']:,}")
+                        print(f"   Input: {old_prompt:,} → {self.token_usage['prompt_tokens']:,}")
+                        print(f"   Output: {old_completion:,} → {self.token_usage['completion_tokens']:,}")
+                        print(f"   💲 Total Cost: ${total_cost:.6f}")
+                        print(f"      - Input: ${total_input_cost:.6f}")
+                        print(f"      - Output: ${total_output_cost:.6f}")
+                        
+                        return {
+                            'prompt_tokens': prompt_tokens,
+                            'completion_tokens': completion_tokens,
+                            'total_tokens': total_tokens,
+                            'iteration_cost': iteration_cost,
+                            'total_cost_estimate': total_cost,
+                            'openrouter_cost': gen_data.get('total_cost')
+                        }
+                    else:
+                        print(f"⚠️ CODER: Unexpected response format: {data}")
+                        if attempt == max_retries - 1:
+                            break
+                        continue
+                        
+                elif response.status_code == 404:
+                    if attempt == max_retries - 1:
+                        print(f"❌ CODER: Generation not found after {max_retries} attempts")
+                        print(f"💡 This usually means the generation ID is invalid or expired")
+                        print(f"🔍 Generation ID: {generation_id}")
+                        break
+                    else:
+                        print(f"⏳ CODER: Generation not found yet (attempt {attempt + 1}), will retry...")
+                        continue
+                        
+                else:
+                    print(f"⚠️ CODER: Usage query failed ({response.status_code}): {response.text[:200]}")
+                    if attempt == max_retries - 1:
+                        break
+                    continue
+                    
+            except requests.Timeout:
+                print(f"⏰ CODER: Request timed out (attempt {attempt + 1})")
+                if attempt == max_retries - 1:
+                    print(f"❌ CODER: All attempts timed out")
+                    break
+                continue
+                
+            except requests.RequestException as e:
+                print(f"🌐 CODER: Request error (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    break
+                continue
+        
+        # If we get here, all retries failed
+        print(f"❌ CODER: Failed to query usage after {max_retries} attempts")
+        print(f"💡 The generation may not be recorded yet, or there's an API issue")
+        
+        # Fallback: try to estimate tokens from the response content
+        print(f"🔄 CODER: Attempting fallback token estimation...")
+        try:
+            # This is a rough estimate - 1 token ≈ 4 characters
+            estimated_tokens = len(self.last_response_content or "") // 4
+            if estimated_tokens > 0:
+                print(f"📊 CODER: Fallback estimate: ~{estimated_tokens} tokens")
+                # Don't update token tracking with estimates, just log it
+                return {
+                    'prompt_tokens': 0,
+                    'completion_tokens': estimated_tokens,
+                    'total_tokens': estimated_tokens,
+                    'iteration_cost': 0,
+                    'total_cost_estimate': 0,
+                    'openrouter_cost': None,
+                    'note': 'Fallback estimation used'
+                }
+        except Exception as e:
+            print(f"⚠️ CODER: Fallback estimation also failed: {e}")
+            
+    except Exception as e:
+        print(f"❌ CODER: Unexpected error in usage query: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return None
+
+
+def _detect_invalid_xml_tags(content):
+    """
+    Detect invalid action-like XML tags in model responses.
+    Only flags tags that appear to be intended as action tags but are malformed.
+    Returns a list of invalid tags found.
+    """
+    import re
+    
+    # Find tags that look like they're trying to be action tags but might be malformed
+    # Look for patterns like <something type="..."> or similar action-like structures
+    potential_action_pattern = r'<[a-zA-Z_][a-zA-Z0-9_\-]*\s+type="[^"]*"[^>]*/?>'
+    potential_actions = re.findall(potential_action_pattern, content)
+    
+    # Also look for self-closing tags that might be actions
+    potential_self_closing = r'<[a-zA-Z_][a-zA-Z0-9_\-]*\s+[^>]*path="[^"]*"[^>]*/?>'
+    potential_actions.extend(re.findall(potential_self_closing, content))
+    
+    # Valid action tag patterns that we expect
+    valid_action_patterns = [
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
+        r'<artifact\s+[^>]*>',
+        r'<thinking>'
+    ]
+    
+    invalid_tags = []
+    
+    for tag in potential_actions:
+        is_valid = False
+        
+        # Check if this tag matches any valid action pattern
+        for valid_pattern in valid_action_patterns:
+            if re.match(valid_pattern, tag):
+                is_valid = True
+                break
+        
+        if not is_valid:
+            invalid_tags.append(tag)
+    
+    # Remove duplicates and return
+    return list(set(invalid_tags))
+
 
 def _run_file_diagnostics(self, file_path):
     """Run diagnostic commands after file operations and return formatted results"""

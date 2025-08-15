@@ -1,0 +1,20 @@
+{
+  "project_id": "crm-app-contacts-tags-0812-102154",
+  "created_at": "2025-08-12T10:29:57.591944",
+  "last_updated": "2025-08-12T10:29:57.591954",
+  "read_files": [
+    "backend/routes/contacts.py",
+    "backend/models/__init__.py",
+    "backend/models/user.py",
+    "backend/routes/tags.py",
+    "backend/database.py",
+    "backend/requirements.txt",
+    "backend/models/contact.py",
+    "backend/app.py",
+    "backend/models/tag.py",
+    "backend/models/campaign.py",
+    "backend/debug_test.py",
+    "backend/routes/campaigns.py"
+  ],
+  "total_files_read": 12
+}

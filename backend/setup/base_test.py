@@ -15,6 +15,7 @@ import requests
 import asyncio
 import time
 import argparse
+import uuid
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -44,7 +45,7 @@ azure_client = AzureOpenAI(
 
 openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='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', default_headers={"x-include-usage": 'true'})
 
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt
+from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, prompt
 from coder.index_fixed import coder
 
 
@@ -85,15 +86,21 @@ class BoilerplatePersistentGroq:
         print("🐛 DEBUG: Starting BoilerplatePersistentGroq __init__")
         self.client = openai_client
         print("🐛 DEBUG: Groq client created")
-        self.model = 'qwen/qwen3-coder'
+        self.model = 'google/gemini-2.5-flash'
         self.conversation_history = []  # Store conversation messages
         self.api_base_url = api_base_url
+        
+        # Set project_id early - needed for todo storage
+        self.project_id = project_id
+        print(f"🐛 DEBUG: Initial project_id set to: {self.project_id}")
         
         # Track files that have been read - project-specific persistence
         self.read_files_tracker = set()  # Files read in current session
         self.read_files_persistent = set()  # Files read across all sessions for THIS project
         
         self.todos = []
+        # Initialize persistent todo storage
+        self._ensure_todos_loaded()
         
         # Simplified token tracking - just 3 variables
         self.token_usage = {
@@ -109,35 +116,43 @@ class BoilerplatePersistentGroq:
         self.boilerplate_path = self.backend_dir / "boilerplate" / "shadcn-boilerplate"
         print("🐛 DEBUG: Paths set up successfully")
         
-        if project_id:
-            # Load existing project
-            self.project_id = project_id
-            self.project_name = project_id  # Use project_id as name for now
+        print(f"🐛 DEBUG: About to check project_id condition, value is: {self.project_id}")
+        if self.project_id:
+            # Load existing project with already set project_id
+            print(f"🐛 DEBUG: Using existing project_id: {self.project_id}")
+            self.project_name = self.project_id  # Use project_id as name for now
             self.project_files = {}
-            self._scan_project_files_via_api()
             
-            # Load project summary and conversation history
-            self._load_project_context()
-            
-            # Load project-specific read files tracking
-            self._load_read_files_tracking()
-            
-            # Load system prompt
-            self.system_prompt = self._load_system_prompt()
-            
-            print(f"✅ Loaded existing project for updates: {self.project_name} (ID: {self.project_id})")
-            print(f"📁 Total files: {len(self.project_files)}")
-            print(f"💬 Loaded conversation history: {len(self.conversation_history)} messages")
+            # Only call API if this looks like a real project (not a test)
+            if not self.project_id.startswith('test-'):
+                self._scan_project_files_via_api()
+                
+                # Load project summary and conversation history
+                self._load_project_context()
+                
+                # Load project-specific read files tracking
+                self._load_read_files_tracking()
+                
+                # Load system prompt
+                self.system_prompt = self._load_system_prompt()
+                
+                print(f"✅ Loaded existing project for updates: {self.project_name} (ID: {self.project_id})")
+                print(f"📁 Total files: {len(self.project_files)}")
+                print(f"💬 Loaded conversation history: {len(self.conversation_history)} messages")
+            else:
+                # Test project - minimal setup
+                self.system_prompt = "Test system prompt"
+                print(f"✅ Test project initialized: {self.project_name} (ID: {self.project_id})")
             
         else:
             # Create new project
             if project_name:
                 self.project_name = project_name
-                self.project_id = self._setup_project_via_api(project_name)
+                self.project_id = self.create_project_via_api(project_name)
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.project_name = f"project_{timestamp}"
-                self.project_id = self._setup_project_via_api(self.project_name)
+                self.project_id = self.create_project_via_api(self.project_name)
                 
             self.project_files = {}
             self._scan_project_files_via_api()
@@ -166,28 +181,13 @@ class BoilerplatePersistentGroq:
     
     def _load_system_prompt(self) -> str:
         """Load system prompt from file with project context"""
-        # Use the update prompt since it has all the capabilities
-        # prompt_file = Path(__file__).parent / "SYSTEM_PROMPT_UPDATE.md"
-        # print(f"🔍 Loading system prompt from: {prompt_file}")
-            
-        # if prompt_file.exists():
-        #     with open(prompt_file, 'r', encoding='utf-8') as f:
-        #         base_prompt = f.read()
-        #     print(f"✅ Loaded system prompt: {len(base_prompt)} characters")
-        #     # Show first few lines to verify which prompt was loaded
-        #     first_lines = '\n'.join(base_prompt.split('\n')[:3])
-        #     print(f"📝 Prompt preview: {first_lines}")
-        # else:
-        #     # Fallback to basic prompt if file not found
-        #     print(f"❌ System prompt file not found: {prompt_file}")
-        #     base_prompt = "You are Bolt, an expert full-stack developer."
-        
-        base_prompt = senior_engineer_prompt
 
-        # Add current project context and extra enforcement for update mode
-        context_addition = f"\n\nCURRENT PROJECT:\n{self.get_project_context()}"
+        # base_prompt = senior_engineer_prompt
+        base_prompt = prompt
         
-        return base_prompt + context_addition
+        # any additions to system prompt based on project context, can be added here
+        
+        return base_prompt
 
     def _load_project_context(self):
         """Load existing project summary and conversation history for update mode"""
@@ -238,11 +238,11 @@ class BoilerplatePersistentGroq:
         conversation_file = conversations_dir / f"{self.project_id}_messages.json"
         
         # Check if we need to summarize conversation
-        if self.token_usage['total_tokens'] >= 75000:
+        if self.token_usage['total_tokens'] >= 500000:
             # Mid-task summarization (token limit reached)
             print(f"🔄 Triggering summarization: {self.token_usage['total_tokens']:,} total tokens")
             self._check_and_summarize_conversation(is_mid_task=True)
-        elif self.token_usage['total_tokens'] >= 75000 and len(self.conversation_history) > 50:
+        elif self.token_usage['total_tokens'] >= 500000 and len(self.conversation_history) > 50:
             # Optional summarization for completed tasks (lower threshold)
             print(f"🔄 Optional summarization for completed task: {self.token_usage['total_tokens']:,} total tokens")
             self._check_and_summarize_conversation(is_mid_task=False)
@@ -365,47 +365,30 @@ PROJECT CONTEXT:
 - Total tokens used: {self.token_usage['total_tokens']:,}
 - Files in project: {len(self.project_files)}
 
-REQUIRED SUMMARY SECTIONS:
+1. Current Work:
+   [Detailed description]
 
-1. **User Requirements & Objectives**
-   - List every user request and requirement mentioned
-   - Include both major features and minor changes
-   - Note any evolving or changing requirements
+2. Key Technical Concepts:
+   - [Concept 1]
+   - [Concept 2]
+   - [...]
 
-2. **Implementation Details**
-   - All files created, updated, or read
-   - Terminal commands executed and their purposes
-   - Dependencies added or modified
-   - Configuration changes made
+3. Relevant Files and Code:
+   - [File Name 1]
+      - [Summary of why this file is important]
+      - [Summary of the changes made to this file, if any]
+      - [Important Code Snippet]
+   - [File Name 2]
+      - [Important Code Snippet]
+   - [...]
 
-3. **Technical Architecture**
-   - Current file structure and organization
-   - Key components and their relationships
-   - Important identifiers, functions, and classes
-   - Design patterns and conventions used
+4. Problem Solving:
+   [Detailed description]
 
-4. **Issues & Solutions**
-   - Errors encountered and how they were resolved
-   - Debugging steps taken
-   - Important fixes and workarounds
-   - Things to watch out for in future development
-
-5. **Project State**
-   - Current functionality and features
-   - What's working and what's in progress
-   - Testing status and known limitations
-   - Next steps or areas for improvement
-
-6. **Development Context**
-   - Important decisions made and reasoning
-   - Alternative approaches considered
-   - Best practices followed
-   - Conventions established
-
-7. **File Tree & Changes**
-   - Current project structure
-   - Recently modified files
-   - Important file locations and purposes
+5. Pending Tasks and Next Steps:
+   - [Task 1 details & next steps]
+   - [Task 2 details & next steps]
+   - [...]
 
 """ + ("""
 8. **CURRENT TASK STATUS & CONTINUATION** ⚠️ MID-TASK SUMMARY
@@ -749,7 +732,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         print(f"📚 Saved read files tracking to: {read_files_file}")
 
 
-    def _setup_project_via_api(self, project_name: str) -> str:
+    def create_project_via_api(self, project_name: str) -> str:
         """Create project via API"""
         try:
             # Check if project already exists
@@ -1006,185 +989,6 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return {"status": "error", "error": error_msg}
 
     
-    def _ensure_folder_structure(self):
-        """Create proper folder structure for organized development"""
-        folders = [
-            'src/pages',
-            'src/components/ui',  # Already exists
-            'src/components/common',
-            'src/hooks',
-            'src/lib',
-            'src/types'
-        ]
-        
-        for folder in folders:
-            (self.project_dir / folder).mkdir(parents=True, exist_ok=True)
-        
-        print(f"📁 Ensured proper folder structure")
-    
-    def _clean_default_routes(self):
-        """Remove default boilerplate routes and create clean starting point"""
-        try:
-            # Remove default page files
-            default_pages = ['HomePage.tsx', 'SettingsPage.tsx', 'ProfilePage.tsx']
-            for page in default_pages:
-                page_file = self.project_dir / 'src' / 'pages' / page
-                if page_file.exists():
-                    page_file.unlink()
-            
-            # Create minimal App.tsx with no default routes
-            app_content = '''import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
-import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
-import { AppSidebar } from '@/components/app-sidebar'
-import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from '@/components/ui/breadcrumb'
-import { Separator } from '@/components/ui/separator'
-
-function WelcomePage() {
-  return (
-    <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4">
-      <h1 className="text-4xl font-bold tracking-tight">Welcome</h1>
-      <p className="text-muted-foreground text-lg text-center max-w-md">
-        Your application is ready. New pages will appear here as you create them.
-      </p>
-    </div>
-  )
-}
-
-function App() {
-  return (
-    <Router>
-      <SidebarProvider>
-        <div className="flex min-h-screen w-full">
-          <AppSidebar />
-          <main className="flex-1">
-            <header className="flex h-16 shrink-0 items-center gap-2 border-b px-4">
-              <SidebarTrigger className="-ml-1" />
-              <Separator orientation="vertical" className="mr-2 h-4" />
-              <Breadcrumb>
-                <BreadcrumbList>
-                  <BreadcrumbItem>
-                    <BreadcrumbPage>Application</BreadcrumbPage>
-                  </BreadcrumbItem>
-                </BreadcrumbList>
-              </Breadcrumb>
-            </header>
-            <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
-              <div className="min-h-[100vh] flex-1 rounded-xl bg-muted/50 md:min-h-min p-6">
-                <Routes>
-                  <Route path="/" element={<WelcomePage />} />
-                </Routes>
-              </div>
-            </div>
-          </main>
-        </div>
-      </SidebarProvider>
-    </Router>
-  )
-} 
-
-export default App'''
-            
-            app_file = self.project_dir / 'src' / 'App.tsx'
-            with open(app_file, 'w') as f:
-                f.write(app_content)
-            
-            # Create minimal sidebar with no default routes
-            sidebar_content = '''import { useLocation } from 'react-router-dom'
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarHeader,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-} from '@/components/ui/sidebar'
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { Badge } from '@/components/ui/badge'
-import { Home } from 'lucide-react'
-import { cn } from '@/lib/utils'
-
-// Routes will be dynamically added here by the AI system
-const baseRoutes = [
-  {
-    title: 'Home',
-    url: '/',
-    icon: Home,
-  },
-]
-
-export function AppSidebar() {
-  const location = useLocation()
-
-  return (
-    <Sidebar>
-      <SidebarHeader className="border-b px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-purple-600">
-            <Home className="h-4 w-4 text-white" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold">My App</h2>
-            <p className="text-xs text-muted-foreground">v1.0.0</p>
-          </div>
-        </div>
-      </SidebarHeader>
-
-      <SidebarContent className="px-4">
-        <SidebarGroup>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {baseRoutes.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton 
-                    asChild
-                    className={cn(
-                      "w-full justify-start",
-                      location.pathname === item.url && "bg-accent text-accent-foreground"
-                    )}
-                  >
-                    <a href={item.url}>
-                      <item.icon className="h-4 w-4" />
-                      <span>{item.title}</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </SidebarContent>
-
-      <SidebarFooter className="border-t p-4">
-        <div className="flex items-center gap-3">
-          <Avatar className="h-8 w-8">
-            <AvatarImage src="/placeholder-avatar.jpg" />
-            <AvatarFallback className="bg-gradient-to-br from-blue-500 to-purple-600 text-white text-xs">
-              JD
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate">John Doe</p>
-            <p className="text-xs text-muted-foreground truncate">john@example.com</p>
-          </div>
-          <Badge variant="secondary" className="text-xs">Pro</Badge>
-        </div>
-      </SidebarFooter>
-    </Sidebar>
-  )
-}'''
-            
-            sidebar_file = self.project_dir / 'src' / 'components' / 'app-sidebar.tsx'
-            with open(sidebar_file, 'w') as f:
-                f.write(sidebar_content)
-            
-            print(f"🧹 Cleaned default routes - project ready for new pages")
-            
-        except Exception as e:
-            print(f"⚠️ Error cleaning default routes: {e}")
-
     def _scan_project_files_via_api(self):
         """Scan LOCAL project directory and build file tree"""
         self.project_files = {}
@@ -1266,43 +1070,12 @@ export function AppSidebar() {
         
         context = "\n\nCURRENT PROJECT STATE:\n"
         context += f"Project Directory: {self.project_name}\n"
-        context += "This is a complete Vite + React + TypeScript + shadcn/ui + React Router boilerplate.\n\n"
+        context += "This is a complete Vite + React + TypeScript + Router setup.\n\n"
         
         context += "🏗️ BOILERPLATE INCLUDES:\n"
         context += "- ⚡ Vite for fast development\n"
-        context += "- ⚛️ React 18 with TypeScript\n"
-        context += "- 🎨 Tailwind CSS (fully configured)\n"
-        context += "- 🧩 shadcn/ui components (ALL COMPONENTS AVAILABLE: accordion, alert-dialog, alert, aspect-ratio, avatar, badge, breadcrumb, button, calendar, card, carousel, chart, checkbox, collapsible, command, context-menu, dialog, drawer, dropdown-menu, form, hover-card, input-otp, input, label, menubar, navigation-menu, pagination, popover, progress, radio-group, resizable, scroll-area, select, separator, sheet, sidebar, skeleton, slider, sonner, switch, table, tabs, textarea, toggle-group, toggle, tooltip)\n"
-        context += "- 🛣️ React Router for navigation\n"
-        context += "- 🎯 Lucide React icons\n"
-        context += "- 📁 Proper TypeScript path aliases (@/*)\n"
+        context += "- ⚛️ React with TypeScript\n"
         context += "- 🗂️ Organized folder structure (pages/, components/, hooks/, etc.)\n\n"
-        
-        # Get existing routes information
-        routes_info = self._get_routes_info()
-        
-        context += f"🛣️ EXISTING ROUTES & PAGES:\n"
-        if routes_info['routes'] and len(routes_info['routes']) > 1:
-            for route in routes_info['routes']:
-                if route['component'] != 'WelcomePage':  # Don't show internal welcome page
-                    context += f"- {route['path']} → {route['component']} (in pages/{route['component']}.tsx)\n"
-        else:
-            context += "- / → WelcomePage (built-in welcome page)\n"
-            context += "- 📝 This is a CLEAN project - no default routes\n"
-            context += "- 🎯 New pages you create will automatically be added here\n"
-        context += "\n"
-        
-        # Get route groups information
-        route_groups_info = self._get_route_groups_info()
-        context += f"📂 CURRENT ROUTE GROUPS:\n"
-        if route_groups_info:
-            for group_name, routes in route_groups_info.items():
-                context += f"- {group_name}: {len(routes)} routes\n"
-                for route in routes:
-                    context += f"  └── {route['label']} ({route['url']})\n"
-        else:
-            context += "- No route groups configured yet\n"
-        context += "\n"
         
         context += "📂 CURRENT FILE STRUCTURE:\n"
         
@@ -1336,776 +1109,8 @@ export function AppSidebar() {
         context += f"{self.project_name}/\n"
         context += print_tree(tree)
         
-        # Add file contents for key files to give model better context
-        key_files = ['frontend/src/App.tsx', 'frontend/src/main.tsx', 'frontend/src/index.css']
-        context += f"\n📄 KEY FILE CONTENTS:\n"
-        
-        for file_path in key_files:
-            if file_path in self.project_files:
-                try:
-                    content = self._read_file_via_api(file_path)
-                    if content:
-                        context += f"\n{file_path}:\n```\n{content}\n```\n"
-                except Exception as e:
-                    context += f"\n{file_path}: (Error reading: {e})\n"
-        
-        context += f"\n📊 SUMMARY:\n"
-        context += f"- Total files: {len(self.project_files)}\n"
-        context += f"- Complete boilerplate with navigation, styling, and routing\n"
-        context += f"- Ready for development with npm run dev\n"
-        
         return context
 
-    def _get_routes_info(self) -> dict:
-        """Extract route information from App.tsx and sidebar"""
-        routes = []
-        
-        # Try to read App.tsx to extract existing routes
-        try:
-            content = self._read_file_via_api('frontend/src/App.tsx')
-            if content:
-                # Extract route patterns
-                import re
-                route_pattern = r'<Route\s+path="([^"]+)"\s+element={<(\w+)\s*/?>}\s*/>'
-                matches = re.findall(route_pattern, content)
-                
-                for path, component in matches:
-                    routes.append({
-                        'path': path,
-                        'component': component
-                    })
-                    
-        except Exception as e:
-            print(f"⚠️ Could not read routes from App.tsx: {e}")
-        
-        return {'routes': routes}
-
-    def _get_route_groups_info(self) -> dict:
-        """Extract route groups information from sidebar"""
-        route_groups = {}
-        
-        # Try to read app-sidebar.tsx to extract route groups
-        try:
-            content = self._read_file_via_api('frontend/src/components/app-sidebar.tsx')
-            if content:
-                # Extract routeGroups array
-                import re
-                groups_pattern = r'const routeGroups = \[(.*?)\]'
-                groups_match = re.search(groups_pattern, content, re.DOTALL)
-                
-                if groups_match:
-                    groups_content = groups_match.group(1)
-                    
-                    # Extract individual groups
-                    group_pattern = r'{\s*title:\s*["\']([^"\']+)["\'][^}]*items:\s*\[(.*?)\]\s*}'
-                    group_matches = re.findall(group_pattern, groups_content, re.DOTALL)
-                    
-                    for group_title, items_content in group_matches:
-                        route_groups[group_title] = []
-                        
-                        # Extract individual items
-                        item_pattern = r'{\s*title:\s*["\']([^"\']+)["\'][^}]*url:\s*["\']([^"\']+)["\'][^}]*}'
-                        item_matches = re.findall(item_pattern, items_content)
-                        
-                        for item_title, item_url in item_matches:
-                            route_groups[group_title].append({
-                                'label': item_title,
-                                'url': item_url
-                            })
-                    
-        except Exception as e:
-            print(f"⚠️ Could not read route groups from sidebar: {e}")
-        
-        return route_groups
-
-    def send_message_with_chunks(self, message: str) -> str:
-        """Enhanced message handling with planning and step-by-step generation"""
-        
-        # Step 1: Generate implementation plan
-        print("🎯 Phase 1: Generating implementation plan...")
-        plan_xml = self._generate_plan(message)
-        
-        if not plan_xml:
-            print("❌ Failed to generate plan")
-            return "Failed to generate implementation plan"
-        
-        # Save raw plan for debugging
-        self._last_plan_response = plan_xml
-        
-        # Step 2: Parse plan and extract implementation steps
-        print("📋 Phase 2: Parsing implementation plan...")
-        steps = self._parse_plan_xml(plan_xml)
-        
-        if not steps:
-            print("❌ Failed to parse plan into implementation steps")
-            return "Failed to parse implementation plan"
-        
-        print(f"✅ Plan parsed successfully: {len(steps)} implementation steps identified")
-        
-        # Step 2.5: Setup project environment (venv, packages) but DON'T start services
-        print("🔧 Phase 2.5: Setting up project environment (venv, packages)...")
-        setup_success = self.setup_project_environment()
-        if setup_success:
-            print("✅ Project environment setup completed")
-            print("ℹ️  Services will start only when model uses action tags like <action type='start_backend'/>")
-        else:
-            print("⚠️ Warning: Environment setup had issues, but continuing with generation")
-        
-        # Step 3: Generate files for each step
-        print("🔨 Phase 3: Implementing files step by step...")
-        for i, step in enumerate(steps, 1):
-            print(f"🔄 Step {i}/{len(steps)}: {step['name']}")
-            success = self._generate_step(step, i)
-            
-            if not success:
-                print(f"❌ Failed to implement step {i}: {step['name']}")
-                return f"Failed to implement: {step['name']}"
-            
-            print(f"✅ Step {i} completed: {step['name']}")
-        
-        print("🎉 All files generated successfully!")
-        return f"Project generated successfully in {len(steps)} steps"
-
-    def _generate_plan(self, user_request: str) -> str:
-        """Generate detailed implementation plan in XML format"""
-        
-        # Update system prompt with current project context
-        current_system_prompt = self._load_system_prompt()
-        
-        planning_prompt = plan_prompts.format(user_request=user_request)
-
-        try:
-            # Use full system prompt with planning instructions
-            planning_messages = [
-                {"role": "system", "content": current_system_prompt},
-                {"role": "user", "content": planning_prompt}
-            ]
-            
-            print("\n🤖 Model response:")
-            print("-" * 60)
-            
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=planning_messages,
-                # temperature=0.1,
-                max_tokens=8192,
-                stream=True  # Enable streaming for real-time output
-            )
-            
-            plan_response = ""
-            for chunk in completion:
-                # print(chunk.usage if chunk.usage else 'no chunk...')
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    print(content, end='', flush=True)
-                    plan_response += content
-            
-            print("\n" + "-" * 60)
-            
-            # Add plan to conversation history for later chunks
-            self.conversation_history.extend([
-                {"role": "user", "content": f"Create implementation plan for: {user_request}"},
-                {"role": "assistant", "content": plan_response}
-            ])
-            
-            return plan_response
-            
-        except Exception as e:
-            print(f"❌ Error generating plan: {e}")
-            return None
-
-    def _parse_plan_xml(self, plan_xml: str) -> list:
-        """Parse XML plan into structured chunks using regex to handle malformed XML"""
-        try:
-            # Extract plan XML from response
-            plan_match = re.search(r'<plan>(.*?)</plan>', plan_xml, re.DOTALL)
-            if not plan_match:
-                print("❌ No <plan> tags found in response")
-                print("Full response for debugging:")
-                print(plan_xml[:500] + "..." if len(plan_xml) > 500 else plan_xml)
-                return None
-            
-            plan_content = plan_match.group(1)
-            
-            # Debug: Show extracted plan content
-            print("\n📄 Extracted plan content:")
-            print("-" * 60)
-            print(plan_content[:1000] + "..." if len(plan_content) > 1000 else plan_content)
-            print("-" * 60)
-            
-            steps = []
-            
-            # Extract steps section first
-            steps_match = re.search(r'<steps>(.*?)</steps>', plan_content, re.DOTALL)
-            if not steps_match:
-                print("❌ No <steps> element found in plan")
-                return None
-            
-            steps_content = steps_match.group(1)
-            
-            # Find all step elements with flexible attribute ordering
-            # This pattern handles steps with optional priority and dependencies in any order
-            step_pattern = r'<step\s+([^>]+)>(.*?)</step>'
-            
-            for match in re.finditer(step_pattern, steps_content, re.DOTALL):
-                attributes_str = match.group(1)
-                step_content = match.group(2)
-                
-                # Parse attributes from the step tag
-                id_match = re.search(r'id="([^"]+)"', attributes_str)
-                name_match = re.search(r'name="([^"]+)"', attributes_str)
-                priority_match = re.search(r'priority="([^"]+)"', attributes_str)
-                deps_match = re.search(r'dependencies="([^"]*)"', attributes_str)
-                
-                if not id_match or not name_match:
-                    print(f"⚠️  Skipping step with missing id or name: {attributes_str}")
-                    continue
-                
-                step_id = id_match.group(1)
-                step_name = name_match.group(1)
-                step_priority = priority_match.group(1) if priority_match else 'medium'
-                step_dependencies = deps_match.group(1) if deps_match else ''
-                
-                # Extract description
-                desc_match = re.search(r'<description>(.*?)</description>', step_content, re.DOTALL)
-                description = desc_match.group(1).strip() if desc_match else ''
-                
-                # Extract files section as raw string (everything between <files> tags)
-                files_match = re.search(r'<files>(.*?)</files>', step_content, re.DOTALL)
-                files_raw = files_match.group(1).strip() if files_match else ''
-                
-                # Check for malformed file tags and warn
-                if files_raw and '</' not in files_raw.split('>')[0]:
-                    # Likely has malformed tags like <frontend/src/file.ts>
-                    malformed_pattern = r'<([^/>\s]+/[^>]+)>'
-                    malformed_matches = re.findall(malformed_pattern, files_raw)
-                    if malformed_matches:
-                        print(f"⚠️  Found {len(malformed_matches)} malformed file tag(s) in step {step_id}")
-                        for malformed in malformed_matches[:3]:  # Show first 3
-                            print(f"    - <{malformed}>")
-                
-                step_data = {
-                    'id': step_id,
-                    'name': step_name,
-                    'priority': step_priority,
-                    'dependencies': [d.strip() for d in step_dependencies.split(',') if d.strip()],
-                    'description': description,
-                    'files_raw': files_raw
-                }
-                
-                steps.append(step_data)
-                
-                print(f"📌 Parsed step {step_id}: {step_name}")
-                print(f"   Files content: {len(files_raw)} chars")
-                if step_dependencies:
-                    print(f"   Dependencies: {step_dependencies}")
-            
-            if not steps:
-                print("❌ No steps found in plan")
-                return None
-                
-            print(f"\n✅ Successfully parsed {len(steps)} steps")
-            return steps
-            
-        except Exception as e:
-            print(f"❌ Error parsing plan with regex: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _generate_step(self, step: dict, step_number: int) -> bool:
-        """Generate all files for a specific implementation step using unified interrupt-based approach"""
-        
-        step_name = step['name']
-        step_description = step['description']
-        files_raw = step.get('files_raw', '')
-        
-        # Use the raw files content directly
-        files_to_create = files_raw if files_raw else "No files specified"
-
-        # Create natural user message for the coder
-        step_user_message = f"""
-{f"✅ Step {step_number-1} is complete. Now starting:" if step_number > 1 else "Starting:"}
-
-🎯 STEP {step_number}: {step_name}
-
-**YOUR TASK:**
-{step_description}
-
-**CRITICAL BACKEND TESTING RULES:**
-1. Start backend: <action type="start_backend"/>
-2. {f'This is the backend url: {self.backend_url}. Use this for your integrations, Do not change this' if self.backend_url else "Run 'start_backend' action command to get the backend URL"}
-3. NEVER use localhost - the backend is on a cloud server
-4. Test with urllib using the ACTUAL URL you received
-
-Remember: If backend URL is provided, you MUST only use that. Dont assume anything else. If not, start the backend.
-"""
-
-        try:
-            print(f"🚀 Starting step {step_number}: {step_name}")
-            
-            # Prepare step info for the unified function
-            step_info = {
-                'step_number': step_number,
-                'name': step_name,
-                'description': step_description,
-                'files_raw': files_raw
-            }
-            
-            # Use the unified interrupt-based approach for step generation
-            # This provides: filtered conversation history, runtime env info, real-time saving, summarization
-            success = self._process_update_request_with_interrupts(
-                user_message=step_user_message,
-                mode="step",
-                step_info=step_info
-            )
-            
-            if success:
-                print(f"\n🎯 Step {step_number} completed: {step_name}")
-                return True
-            else:
-                print(f"\n❌ Step {step_number} failed: {step_name}")
-                return False
-            
-        except Exception as e:
-            print(f"❌ Error generating step {step_number}: {e}")
-            return False
-
-    def _add_route_to_app(self, path: str, component: str, icon: str, label: str, group: str = None):
-        """Automatically add a route to App.tsx and update sidebar"""
-        # Update App.tsx with the route
-        self._update_routes_in_app(path, component)
-        
-        # Update the sidebar with the new route
-        self._update_sidebar_routes(path, component, icon, label, group)
-
-    def _update_routes_in_app(self, path: str, component: str):
-        """Add route to App.tsx Routes section"""
-        content = self._read_file_via_api('frontend/src/App.tsx')
-        if not content:
-            return
-        
-        # Add import for the component if not already present
-        if f'import {component}' not in content:
-            # Add import after existing imports
-            import_section = content.split('\n')
-            last_import_line = -1
-            for i, line in enumerate(import_section):
-                if line.strip().startswith('import'):
-                    last_import_line = i
-            
-            if last_import_line >= 0:
-                import_section.insert(last_import_line + 1, f"import {component} from './pages/{component}'")
-                content = '\n'.join(import_section)
-        
-        # Add route to Routes section (only if it doesn't exist)
-        if f'path="{path}"' not in content:
-            # Find the last Route line and add after it with proper indentation
-            lines = content.split('\n')
-            last_route_index = -1
-            
-            for i, line in enumerate(lines):
-                if '<Route' in line and 'path=' in line:
-                    last_route_index = i
-            
-            if last_route_index != -1:
-                # Get indentation from the last route
-                last_route_line = lines[last_route_index]
-                indent = len(last_route_line) - len(last_route_line.lstrip())
-                new_route = ' ' * indent + f'<Route path="{path}" element={{<{component} />}} />'
-                
-                # Insert the new route after the last route
-                lines.insert(last_route_index + 1, new_route)
-                content = '\n'.join(lines)
-        
-        # Write updated content via API
-        self._write_file_via_api('frontend/src/App.tsx', content)
-
-    def _update_sidebar_routes(self, path: str, component: str, icon: str, label: str, group: str = None):
-        """Add route to AppSidebar component with group support"""
-        # Skip dynamic routes (containing :parameter) from sidebar
-        if ':' in path:
-            print(f"🚫 Skipping dynamic route {path} from sidebar (dynamic routes shouldn't appear in navigation)")
-            return
-        
-        content = self._read_file_via_api('frontend/src/components/app-sidebar.tsx')
-        if not content:
-            return
-        
-        # Check if route already exists
-        if f'url: "{path}"' in content:
-            print(f"🔄 Route {path} already exists in sidebar")
-            return
-        
-        # Add icon import if not present
-        if f'{icon}' not in content:
-            # Find the lucide-react import and add the icon
-            import_pattern = r"import \{\s*([^}]+)\s*\} from ['\"]lucide-react['\"]"
-            match = re.search(import_pattern, content)
-            if match:
-                current_imports = match.group(1).strip()
-                import_list = [imp.strip() for imp in current_imports.split(',')]
-                if icon not in import_list:
-                    import_list.append(icon)
-                    new_imports = ',\n  '.join(import_list)
-                    new_import_line = f"import {{ \n  {new_imports}\n}} from \"lucide-react\""
-                    content = content.replace(match.group(0), new_import_line)
-        
-        # Now try to find the target group and add the route
-        target_group = group or "Overview"
-        
-        # Look for the group and add the route item
-        group_pattern = rf'(\{{[\s\S]*?title:\s*"{re.escape(target_group)}"[\s\S]*?items:\s*\[)([\s\S]*?)(\][\s\S]*?\}})'
-        group_match = re.search(group_pattern, content)
-        
-        if group_match:
-            # Add to existing group
-            items_section = group_match.group(2)
-            new_item = f'      {{ title: "{label}", url: "{path}", icon: {icon} }},'
-            
-            # Add the new item at the end of the items array
-            if items_section.strip():
-                updated_items = f"{items_section}\n{new_item}"
-            else:
-                updated_items = f"\n{new_item}\n      "
-            
-            content = content.replace(group_match.group(2), updated_items)
-            
-        else:
-            # Create new group - find the routeGroups array end and add before it
-            route_groups_match = re.search(r'const routeGroups = \[([\s\S]*?)\]', content)
-            if route_groups_match:
-                existing_groups = route_groups_match.group(1)
-                new_group = f"""  {{
-    title: "{target_group}",
-    items: [
-      {{ title: "{label}", url: "{path}", icon: {icon} }},
-    ]
-  }},
-"""
-                # Add the new group before the closing bracket
-                updated_groups = f"{existing_groups}{new_group}"
-                content = content.replace(route_groups_match.group(1), updated_groups)
-                print(f"📝 Created new group: {target_group}")
-        
-        # Write updated content via API
-        self._write_file_via_api('frontend/src/components/app-sidebar.tsx', content)
-
-    def _apply_streaming_action(self, action: Dict):
-        """Apply a single action from streaming response immediately using existing functions"""
-        if action['type'] == 'file':
-            file_path = action['path']
-            content = action['content']
-            
-            # Use same protection logic as existing _process_actions
-            protected_files = [
-                'package.json', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json',
-                'src/App.tsx', 'frontend/src/App.tsx', 'backend/app.py'
-            ]
-            if any(file_path.endswith(protected) or file_path == protected for protected in protected_files):
-                print(f"\n🚫 BLOCKED: {file_path}")
-                return
-            
-            # Clean content and apply file - same as existing logic
-            cleaned_content = self._clean_file_content(content)
-            result = self._write_file_via_api(file_path, cleaned_content)
-            if result["success"]:
-                success_msg = f"\n✅ Applied: {file_path}"
-                if result["python_errors"]:
-                    success_msg += f"\n\n{result['python_errors']}"
-                print(success_msg)
-                
-        elif action['type'] == 'read_file':
-            # Handle read_file action
-            file_path = action.get('path')
-            start_line = action.get('start_line')
-            end_line = action.get('end_line')
-            
-            if file_path:
-                file_content = self._read_file_via_api(file_path, start_line, end_line)
-                if file_content is not None:
-                    print(f"\n📖 Read: {file_path}")
-                    if start_line or end_line:
-                        print(f"   Lines: {start_line or 1}-{end_line or 'end'}")
-                    
-                    # Add the file content as an assistant message to continue the conversation
-                    content_preview = file_content[:200] + "..." if len(file_content) > 200 else file_content
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": f"File content for `{file_path}`:\n\n```\n{file_content}\n```"
-                    })
-                else:
-                    print(f"\n❌ Failed to read: {file_path}")
-                    
-        elif action['type'] == 'update_file':
-            # Handle update_file action (similar to file but with different messaging)
-            file_path = action.get('path')
-            content = action.get('content', '')
-            
-            if file_path and content:
-                # Clean content and apply file
-                cleaned_content = self._clean_file_content(content)
-                result = self._write_file_via_api(file_path, cleaned_content)
-                if result["success"]:
-                    success_msg = f"\n🔄 Updated: {file_path}"
-                    if result["python_errors"]:
-                        success_msg += f"\n\n{result['python_errors']}"
-                    print(success_msg)
-                else:
-                    print(f"\n❌ Failed to update: {file_path}")
-            else:
-                print(f"\n❌ Invalid update_file action: missing path or content")
-                
-        elif action['type'] == 'route':
-            # Use existing route processing function
-            path = action.get('path')
-            component = action.get('component') 
-            icon = action.get('icon')
-            label = action.get('label')
-            group = action.get('group')
-            
-            if path and component and icon and label:
-                try:
-                    self._add_route_to_app(path, component, icon, label, group)
-                    group_info = f" (group: {group})" if group else ""
-                    print(f"\n🛣️ Route: {path} -> {component}{group_info}")
-                except Exception as e:
-                    print(f"\n❌ Route error: {e}")
-
-    def _process_actions(self, response: str):
-        """Extract and execute actions from AI response"""
-        # Pattern to match <action type="file" filePath="...">content</action>
-        file_action_pattern = r'<action\s+type="file"\s+filePath="([^"]+)">(.*?)</action>'
-        file_actions = re.findall(file_action_pattern, response, re.DOTALL)
-        
-        # Pattern to match <action type="route" path="..." component="..." icon="..." label="...">
-        route_action_pattern = r'<action\s+type="route"\s+path="([^"]+)"\s+component="([^"]+)"\s+icon="([^"]+)"\s+label="([^"]+)"(?:\s+group="([^"]+)")?\s*/>'
-        route_actions = re.findall(route_action_pattern, response, re.DOTALL)
-        
-        # Process file actions
-        for file_path, content in file_actions:
-            try:
-                # PROTECT CONFIG FILES AND INFRASTRUCTURE - DO NOT ALLOW MODIFICATIONS
-                protected_files = [
-                    'package.json', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json',
-                    'backend/app.py'
-                    # NOTE: App.tsx is now allowed for updates in update mode
-                    # NOTE: src/components/app-sidebar.tsx is protected in prompt but allowed for route system updates
-                ]
-                if any(file_path.endswith(protected) or file_path == protected for protected in protected_files):
-                    print(f"🚫 BLOCKED: Attempted to modify protected infrastructure file {file_path}")
-                    continue
-                
-                # Clean content - remove markdown backticks and language identifiers
-                cleaned_content = self._clean_file_content(content)
-                
-                # Write file content via API
-                success = self._write_file_via_api(file_path, cleaned_content)
-                if success:
-                    print(f"✅ Updated: {file_path}")
-                else:
-                    print(f"❌ Failed to update: {file_path}")
-                
-            except Exception as e:
-                print(f"❌ Error updating {file_path}: {e}")
-        
-        # Process route actions
-        for route_match in route_actions:
-            try:
-                path, component, icon, label = route_match[:4]
-                group = route_match[4] if len(route_match) > 4 and route_match[4] else None
-                self._add_route_to_app(path, component, icon, label, group)
-                group_info = f" (group: {group})" if group else ""
-                print(f"🛣️ Added route: {path} -> {component}{group_info}")
-            except Exception as e:
-                print(f"❌ Error adding route {path}: {e}")
-        
-        # Refresh file scan after changes
-        if file_actions or route_actions:
-            self._scan_project_files_via_api()
-            # Disabled to prevent package.json modifications
-            # self._check_and_install_dependencies()
-            print(f"📁 Project now has {len(self.project_files)} files")
-
-    def _add_route_to_app(self, path: str, component: str, icon: str, label: str, group: str = None):
-        """Automatically add a route to App.tsx and update sidebar"""
-        # Update App.tsx with the route
-        self._update_routes_in_app(path, component)
-        
-        # Update the sidebar with the new route
-        self._update_sidebar_routes(path, component, icon, label, group)
-
-    def _update_routes_in_app(self, path: str, component: str):
-        """Add route to App.tsx Routes section"""
-        content = self._read_file_via_api('frontend/src/App.tsx')
-        if not content:
-            return
-        
-        # Add import for the component if not already present
-        if f'import {component}' not in content:
-            # Add import after existing imports
-            import_section = content.split('\n')
-            last_import_line = -1
-            for i, line in enumerate(import_section):
-                if line.strip().startswith('import'):
-                    last_import_line = i
-            
-            if last_import_line >= 0:
-                import_section.insert(last_import_line + 1, f"import {component} from './pages/{component}'")
-                content = '\n'.join(import_section)
-        
-        # Add route to Routes section (only if it doesn't exist)
-        if f'path="{path}"' not in content:
-            # Find the last Route line and add after it with proper indentation
-            lines = content.split('\n')
-            last_route_index = -1
-            
-            for i, line in enumerate(lines):
-                if '<Route' in line and 'path=' in line:
-                    last_route_index = i
-            
-            if last_route_index != -1:
-                # Get indentation from the last route
-                last_route_line = lines[last_route_index]
-                indent = len(last_route_line) - len(last_route_line.lstrip())
-                new_route = ' ' * indent + f'<Route path="{path}" element={{<{component} />}} />'
-                
-                # Insert the new route after the last route
-                lines.insert(last_route_index + 1, new_route)
-                content = '\n'.join(lines)
-        
-        # Write updated content via API
-        self._write_file_via_api('frontend/src/App.tsx', content)
-
-    def _update_sidebar_routes(self, path: str, component: str, icon: str, label: str, group: str = None):
-        """Add route to AppSidebar component with group support"""
-        # Skip dynamic routes (containing :parameter) from sidebar
-        if ':' in path:
-            print(f"🚫 Skipping dynamic route {path} from sidebar (dynamic routes shouldn't appear in navigation)")
-            return
-        
-        content = self._read_file_via_api('frontend/src/components/app-sidebar.tsx')
-        if not content:
-            return
-        
-        # Check if route already exists
-        if f'url: "{path}"' in content:
-            print(f"🔄 Route {path} already exists in sidebar")
-            return
-        
-        # Add icon import if not present
-        if f'{icon}' not in content:
-            # Find the lucide-react import and add the icon
-            import_pattern = r"import \{\s*([^}]+)\s*\} from ['\"]lucide-react['\"]"
-            match = re.search(import_pattern, content)
-            if match:
-                current_imports = match.group(1).strip()
-                import_list = [imp.strip() for imp in current_imports.split(',')]
-                if icon not in import_list:
-                    import_list.append(icon)
-                    new_imports = ',\n  '.join(import_list)
-                    new_import_line = f"import {{ \n  {new_imports}\n}} from \"lucide-react\""
-                    content = content.replace(match.group(0), new_import_line)
-        
-        # Convert from baseRoutes to routeGroups structure if needed
-        if 'const baseRoutes' in content and 'const routeGroups' not in content:
-            print("🔄 Converting sidebar from baseRoutes to routeGroups structure")
-            
-            # Replace baseRoutes with routeGroups structure
-            base_routes_pattern = r'const baseRoutes = \[([\s\S]*?)\]'
-            base_match = re.search(base_routes_pattern, content)
-            
-            if base_match:
-                # Convert existing baseRoutes to routeGroups format
-                route_groups_replacement = f"""const routeGroups = [
-  {{
-    title: "Overview",
-    items: [
-      {{ title: "Home", url: "/", icon: Home }},
-    ]
-  }},
-]"""
-                content = re.sub(base_routes_pattern, route_groups_replacement, content)
-                
-                # Update the rendering part completely
-                # Find the SidebarContent section and replace it entirely
-                sidebar_content_pattern = r'<SidebarContent className="px-4">([\s\S]*?)</SidebarContent>'
-                new_sidebar_content = '''<SidebarContent className="px-4">
-        {routeGroups.map((group) => (
-          <SidebarGroup key={group.title}>
-            <SidebarGroupLabel>{group.title}</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {group.items.map((item) => (
-                  <SidebarMenuItem key={item.title}>
-                    <SidebarMenuButton 
-                      asChild
-                      className={cn(
-                        "w-full justify-start",
-                        location.pathname === item.url && "bg-accent text-accent-foreground"
-                      )}
-                    >
-                      <a href={item.url}>
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
-                      </a>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        ))}
-      </SidebarContent>'''
-                content = re.sub(sidebar_content_pattern, new_sidebar_content, content)
-                
-                # Add SidebarGroupLabel import
-                if 'SidebarGroupLabel' not in content:
-                    content = content.replace('SidebarGroupContent,', 'SidebarGroupContent,\n  SidebarGroupLabel,')
-        
-        # Always ensure SidebarGroupLabel import is present when using routeGroups
-        if 'const routeGroups' in content and 'SidebarGroupLabel' not in content:
-            content = content.replace('SidebarGroupContent,', 'SidebarGroupContent,\n  SidebarGroupLabel,')
-        
-        # Now try to find the target group and add the route
-        target_group = group or "Overview"
-        
-        # Look for the group and add the route item
-        group_pattern = rf'(\{{[\s\S]*?title:\s*"{re.escape(target_group)}"[\s\S]*?items:\s*\[)([\s\S]*?)(\][\s\S]*?\}})'
-        group_match = re.search(group_pattern, content)
-        
-        if group_match:
-            # Add to existing group
-            items_section = group_match.group(2)
-            new_item = f'      {{ title: "{label}", url: "{path}", icon: {icon} }},'
-            
-            # Add the new item at the end of the items array
-            if items_section.strip():
-                updated_items = f"{items_section}\n{new_item}"
-            else:
-                updated_items = f"\n{new_item}\n      "
-            
-            content = content.replace(group_match.group(2), updated_items)
-            
-        else:
-            # Create new group - find the routeGroups array end and add before it
-            route_groups_match = re.search(r'const routeGroups = \[([\s\S]*?)\]', content)
-            if route_groups_match:
-                existing_groups = route_groups_match.group(1)
-                new_group = f"""  {{
-    title: "{target_group}",
-    items: [
-      {{ title: "{label}", url: "{path}", icon: {icon} }},
-    ]
-  }},
-"""
-                # Add the new group before the closing bracket
-                updated_groups = f"{existing_groups}{new_group}"
-                content = content.replace(route_groups_match.group(1), updated_groups)
-                print(f"📝 Created new group: {target_group}")
-        
-        # Write updated content via API
-        self._write_file_via_api('frontend/src/components/app-sidebar.tsx', content)
 
     def _clean_file_content(self, content: str) -> str:
         """Clean file content by removing markdown formatting"""
@@ -2157,43 +1162,6 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"❌ Error setting up environment: {e}")
             return False
     
-    def start_preview_and_get_url(self) -> str:
-        """DEPRECATED: Start the project preview and return the URL"""
-        print("⚠️  WARNING: start_preview_and_get_url is deprecated. Use setup_project_environment() + action tags instead.")
-        try:
-            # Start the preview (still kept for backward compatibility)
-            response = requests.post(f"{self.api_base_url}/projects/{self.project_id}/start-preview")
-            if response.status_code == 200:
-                preview_data = response.json()
-                
-                # Handle both old and new API response formats
-                frontend_port = preview_data.get('frontend_port') or preview_data.get('port', 3001)
-                backend_port = preview_data.get('backend_port', 8001)
-                
-                # Return the actual VPS IP with the ports
-                frontend_url = f"http://localhost:{frontend_port}"
-                backend_url = f"http://localhost:{backend_port}"
-                
-                print(f"🚀 Preview started successfully!")
-                print(f"📱 Frontend: {frontend_url} (port {frontend_port})")
-                print(f"🔧 Backend:  {backend_url} (port {backend_port})")
-                print(f"🌐 Access your project at: {frontend_url}")
-                
-                # Store URLs for summary generation
-                self.preview_url = frontend_url
-                self.backend_url = backend_url
-
-                self._write_file_via_api('backend/.env', f'BACKEND_URL={self.backend_url}')
-                print('* Backend URL added to .env in backend *')
-                
-                return frontend_url
-            else:
-                print(f"❌ Error starting preview: {response.status_code} - {response.text}")
-                return None
-        except Exception as e:
-            print(f"❌ Error starting preview: {e}")
-            return None
-
     def generate_project_summary(self) -> str:
         """Generate comprehensive project summary using conversation history"""
         print(f"\n{'='*60}")
@@ -2242,93 +1210,11 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"❌ Error generating project summary: {e}")
             return None
 
-
-    def _check_and_install_dependencies(self):
-        """Scan project files and add missing dependencies to package.json"""
-        try:
-            # Read current package.json
-            package_json_path = self.project_dir / 'package.json'
-            if not package_json_path.exists():
-                return
-                
-            with open(package_json_path, 'r') as f:
-                package_data = json.load(f)
-            
-            current_deps = set(package_data.get('dependencies', {}).keys())
-            current_dev_deps = set(package_data.get('devDependencies', {}).keys())
-            all_current = current_deps | current_dev_deps
-            
-            # Scan all project files for imports
-            needed_packages = set()
-            
-            for file_info in self.project_files.values():
-                if file_info['path'].endswith(('.ts', '.tsx', '.js', '.jsx')):
-                    try:
-                        with open(file_info['full_path'], 'r') as f:
-                            content = f.read()
-                        
-                        # Find import statements
-                        import_pattern = r"import.*?from\s+['\"]([^'\"]+)['\"]"
-                        imports = re.findall(import_pattern, content)
-                        
-                        for import_name in imports:
-                            # Skip relative imports
-                            if import_name.startswith('.'):
-                                continue
-                            
-                            # Skip path aliases (like @/components, @/lib)
-                            if import_name.startswith('@/'):
-                                continue
-                            
-                            # Skip Node.js built-in modules
-                            builtin_modules = {'path', 'fs', 'url', 'util', 'crypto', 'os', 'http', 'https', 'stream'}
-                            if import_name in builtin_modules:
-                                continue
-                            
-                            # Extract package name (handle scoped packages)
-                            if import_name.startswith('@'):
-                                # Scoped package like @radix-ui/react-button
-                                parts = import_name.split('/')
-                                if len(parts) >= 2:
-                                    package_name = f"{parts[0]}/{parts[1]}"
-                                else:
-                                    package_name = import_name
-                            else:
-                                # Regular package - take first part
-                                package_name = import_name.split('/')[0]
-                            
-                            needed_packages.add(package_name)
-                    
-                    except Exception as e:
-                        print(f"⚠️ Error scanning {file_info['path']}: {e}")
-            
-            # Find missing packages
-            missing_packages = needed_packages - all_current
-            
-            if missing_packages:
-                print(f"📦 Adding missing dependencies to package.json: {', '.join(missing_packages)}")
-                
-                # Add missing packages to dependencies with latest version
-                # BUT preserve existing versions from boilerplate
-                if 'dependencies' not in package_data:
-                    package_data['dependencies'] = {}
-                
-                for pkg in missing_packages:
-                    # Only add if it's not already in the boilerplate
-                    # This prevents overwriting correct versions like tailwindcss v4
-                    if pkg not in package_data['dependencies']:
-                        package_data['dependencies'][pkg] = 'latest'
-                
-                # Write updated package.json
-                with open(package_json_path, 'w') as f:
-                    json.dump(package_data, f, indent=2)
-                
-                print(f"✅ Added {len(missing_packages)} packages to package.json")
-                print("💡 Run 'npm install' to install the new dependencies")
-            
-        except Exception as e:
-            print(f"⚠️ Error checking dependencies: {e}")
-
+    def _query_generation_usage(self, generation_id):
+        """Query usage statistics for a generation using OpenRouter API - placeholder"""
+        print(f"💰 CODER: Would query generation ID: {generation_id} for usage stats")
+        # This is a placeholder - the real implementation is in index_fixed.py
+        return None
 
     def _process_update_request_with_interrupts(self, user_message: str, mode: str = "update", step_info: dict = None):
         """Process request with interrupt-and-continue pattern - supports both update and step generation modes"""
@@ -2342,41 +1228,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         
         # Start with system prompt with runtime environment info
         system_prompt = self._load_system_prompt()
-        
-#         # Add runtime environment information if available
-#         if hasattr(self, 'backend_url') and self.backend_url:
-#             runtime_info = f"""
 
-# ## RUNTIME ENVIRONMENT (Current Session)
-
-# **IMPORTANT:** Your project is ALREADY running with these URLs:
-
-# - **Backend URL:** {self.backend_url}
-# - **Backend API URL:** {self.backend_url}
-# - **Frontend URL:** {getattr(self, 'preview_url', 'Not available')}
-
-# **For API Testing:** Use urllib with these actual URLs:
-# ```python
-# from urllib.request import urlopen
-# import json
-
-# # Health check
-# response = urlopen("{self.backend_url}/health")
-# print(json.loads(response.read()))
-
-# # POST request example
-# from urllib.request import Request
-# data = json.dumps({{"key": "value"}}).encode()
-# req = Request("{self.backend_url}/api/endpoint", data=data, headers={{"Content-Type": "application/json"}})
-# response = urlopen(req)
-# print(json.loads(response.read()))
-# ```
-
-# The backend is accessible at {self.backend_url} - use this for all API testing and internal requests.
-# DO NOT try to start the backend or frontend again - they are already running on these accessible URLs.
-# """
-#             system_prompt += runtime_info
-        
         messages = [
             {"role": "system", "content": system_prompt}
         ]
@@ -2421,7 +1273,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         
         # Add final response to conversation history and save in real-time
         if response_content:
-            # self.conversation_history.append({"role": "assistant", "content": response_content})
+            self.conversation_history.append({"role": "assistant", "content": response_content})
             self._save_conversation_history()  # Real-time save - triggers summarization if needed
         
         if mode == "step":
@@ -2497,6 +1349,71 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             traceback.print_exc()
             return None
 
+    def _handle_check_logs_interrupt(self, action: dict) -> dict:
+        """Handle check_logs action by calling the logs API"""
+        print(f"📋 CODER: Handling check_logs interrupt")
+        
+        try:
+            project_id = getattr(self, 'project_id', None)
+            if not project_id:
+                print("❌ CODER: No project_id found for log checking")
+                return None
+            
+            # Get parameters from action
+            service = action.get('service', 'backend')
+            new_only = action.get('new_only', True)
+            
+            print(f"📡 CODER: Calling logs API for project: {project_id}, service: {service}, new_only: {new_only}")
+            
+            # Import requests for API call
+            import requests
+            import json
+            
+            # Call the check_logs API we implemented
+            api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+            if api_base_url.endswith('/api'):
+                api_base_url = api_base_url[:-4]  # Remove '/api' suffix
+            
+            logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
+            params = {
+                'service': service,
+                'include_new_only': new_only
+            }
+            
+            print(f"📡 CODER: Calling {logs_url} with params: {params}")
+            
+            response = requests.get(logs_url, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ CODER: Logs retrieved successfully")
+                print(f"📊 CODER: Service status: {'Running' if result.get('service_running', False) else 'Stopped'}")
+                print(f"📈 CODER: Total lines: {result.get('total_lines', 0)}, New lines: {result.get('new_lines', 0)}")
+                
+                # Log summary of what was retrieved
+                if result.get('new_lines', 0) > 0:
+                    print(f"📋 CODER: Retrieved {result['new_lines']} new log lines")
+                else:
+                    print("📋 CODER: No new logs since last check")
+                    
+                return result
+            else:
+                print(f"❌ CODER: Logs API failed with status {response.status_code}")
+                print(f"❌ CODER: Response: {response.text}")
+                return None
+                
+        except requests.exceptions.ConnectionError:
+            print("❌ CODER: Connection error - is the API server running?")
+            return None
+        except requests.exceptions.Timeout:
+            print("❌ CODER: Logs request timed out")
+            return None
+        except Exception as e:
+            print(f"❌ CODER: Exception during log check: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _handle_read_file_interrupt(self, action: dict) -> str:
         """Handle read_file action during interrupt"""
         file_path = action.get('path')
@@ -2558,6 +1475,24 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         
         # Remove backticks if present
         file_content = self._remove_backticks_from_content(file_content)
+        
+        # Check if file content is empty after processing
+        if not file_content or file_content.strip() == '':
+            print(f"⚠️ Empty file content detected for update: {file_path}")
+            return f"""❌ File update blocked: Empty content detected for '{file_path}'
+
+Are you sure you want to update this file with empty content? If not, please add the actual content inside the action tag.
+
+Example of proper usage:
+<action type="update_file" path="{file_path}">
+# Your actual file content goes here
+print("Updated content!")
+
+def updated_function():
+    return "This is the new content"
+</action>
+
+If you really want to update the file to be empty, please confirm by responding with the action again and explicitly stating it should be empty."""
         
         print(f"💾 Updating file: {file_path}")
         print(f"📄 Content length: {len(file_content)} characters")
@@ -2671,12 +1606,35 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         file_path = match.group(1)
         file_content = match.group(2).strip()
         
-        if not file_path or not file_content:
-            print("❌ Missing file path or content in creation action")
+        if not file_path:
+            print("❌ Missing file path in creation action")
             return None
             
         # Remove backticks if present
         file_content = self._remove_backticks_from_content(file_content)
+        
+        # Check if file content is empty after processing
+        if not file_content or file_content.strip() == '':
+            print(f"⚠️ Empty file content detected for: {file_path}")
+            return {
+                'file_path': file_path,
+                'success': False,
+                'empty_file_warning': True,
+                'message': f"""❌ File creation blocked: Empty content detected for '{file_path}'
+
+Are you sure you want to create an empty file? If not, please add the actual content inside the action tag.
+
+Example of proper usage:
+<action type="file" path="{file_path}">
+# Your actual file content goes here
+print("Hello, World!")
+
+def example_function():
+    return "This is actual content"
+</action>
+
+If you really want to create an empty file, please confirm by responding with the action again and explicitly stating it should be empty."""
+            }
         
         print(f"🚀 Creating file in real-time: {file_path}")
         
@@ -2705,6 +1663,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"❌ File creation failed")
             return None
 
+    # if no action is triggered, process the remaining actions
     def _process_remaining_actions(self, content: str):
         """Process any remaining actions from the complete response"""
         parser = StreamingXMLParser()
@@ -2712,8 +1671,11 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
         
         file_actions = []
         route_actions = []
+        todo_actions = []
         
         # Extract all actions from the complete response
+        web_search_actions = []
+        
         while True:
             actions_found = list(parser.process_chunk(""))
             if not actions_found:
@@ -2726,14 +1688,29 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                     file_actions.append(action)
                 elif action.get('type') == 'route':
                     route_actions.append(action)
+                elif action.get('type') == 'web_search':
+                    web_search_actions.append(action)
+                elif action.get('type', '').startswith('todo_'):
+                    todo_actions.append(action)
         
         # Process file actions
         for action in file_actions:
             self._process_file_action(action)
+            
+        # Process web search actions
+        for action in web_search_actions:
+            if hasattr(self, '_handle_web_search_interrupt'):
+                search_result = self._handle_web_search_interrupt(action)
+                if search_result and search_result.get('success'):
+                    print(f"🔍 Processed web search: {search_result.get('query')}")
+                else:
+                    print(f"❌ Failed web search: {search_result.get('error') if search_result else 'Unknown error'}")
         
-        # Process route actions
-        for action in route_actions:
-            self._process_route_action(action)
+        # Process todo actions
+        for action in todo_actions:
+            if hasattr(self, '_handle_todo_actions'):
+                self._handle_todo_actions(action)
+                print(f"📋 Processed remaining todo action: {action.get('type')}")
 
     def _process_file_action(self, action: dict):
         """Process a single file action (create/update)"""
@@ -2750,22 +1727,6 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             print(f"✅ Updated: {file_path}")
         except Exception as e:
             print(f"❌ Error processing file {file_path}: {e}")
-
-    def _process_route_action(self, action: dict):
-        """Process a single route action"""
-        try:
-            path = action.get('path')
-            component = action.get('component')
-            icon = action.get('icon', 'Home')
-            label = action.get('label', component)
-            group = action.get('group')
-            
-            if path and component:
-                self._add_route_to_app(path, component, icon, label, group)
-                group_info = f" (group: {group})" if group else ""
-                print(f"🛣️ Added route: {path} -> {component}{group_info}")
-        except Exception as e:
-            print(f"❌ Error adding route: {e}")
     
     def _handle_start_backend_interrupt(self, action: dict) -> dict:
         """Handle start_backend action during interrupt"""
@@ -2787,14 +1748,16 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                 
                 self._write_file_via_api('backend/.env', f'BACKEND_URL={self.backend_url}')
                 
-                return result
+                return {"status": "success", "result": result}
             else:
-                print(f"❌ Failed to start backend: {response.status_code} {response.text}")
-                return None
+                error_details = f"HTTP {response.status_code}: {response.text}"
+                print(f"❌ Failed to start backend: {error_details}")
+                return {"status": "error", "error": error_details, "status_code": response.status_code}
                 
         except Exception as e:
-            print(f"❌ Error starting backend: {e}")
-            return None
+            error_details = f"Exception: {str(e)}"
+            print(f"❌ Error starting backend: {error_details}")
+            return {"status": "error", "error": error_details}
     
     def _handle_start_frontend_interrupt(self, action: dict) -> dict:
         """Handle start_frontend action during interrupt"""
@@ -2814,14 +1777,16 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                 # Update preview URL in state
                 self.preview_url = result.get('frontend_url')
                 
-                return result
+                return {"status": "success", "result": result}
             else:
-                print(f"❌ Failed to start frontend: {response.status_code} {response.text}")
-                return None
+                error_details = f"HTTP {response.status_code}: {response.text}"
+                print(f"❌ Failed to start frontend: {error_details}")
+                return {"status": "error", "error": error_details, "status_code": response.status_code}
                 
         except Exception as e:
-            print(f"❌ Error starting frontend: {e}")
-            return None
+            error_details = f"Exception: {str(e)}"
+            print(f"❌ Error starting frontend: {error_details}")
+            return {"status": "error", "error": error_details}
     
     def _handle_restart_backend_interrupt(self, action: dict) -> dict:
         """Handle restart_backend action during interrupt"""
@@ -2841,14 +1806,16 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                 # Update backend URL in state
                 self.backend_url = result.get('backend_url')
                 
-                return result
+                return {"status": "success", "result": result}
             else:
-                print(f"❌ Failed to restart backend: {response.status_code} {response.text}")
-                return None
+                error_details = f"HTTP {response.status_code}: {response.text}"
+                print(f"❌ Failed to restart backend: {error_details}")
+                return {"status": "error", "error": error_details, "status_code": response.status_code}
                 
         except Exception as e:
-            print(f"❌ Error restarting backend: {e}")
-            return None
+            error_details = f"Exception: {str(e)}"
+            print(f"❌ Error restarting backend: {error_details}")
+            return {"status": "error", "error": error_details}
     
     def _handle_restart_frontend_interrupt(self, action: dict) -> dict:
         """Handle restart_frontend action during interrupt"""
@@ -2868,18 +1835,306 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                 # Update preview URL in state
                 self.preview_url = result.get('frontend_url')
                 
-                return result
+                return {"status": "success", "result": result}
             else:
-                print(f"❌ Failed to restart frontend: {response.status_code} {response.text}")
-                return None
+                error_details = f"HTTP {response.status_code}: {response.text}"
+                print(f"❌ Failed to restart frontend: {error_details}")
+                return {"status": "error", "error": error_details, "status_code": response.status_code}
                 
         except Exception as e:
-            print(f"❌ Error restarting frontend: {e}")
-            return None
+            error_details = f"Exception: {str(e)}"
+            print(f"❌ Error restarting frontend: {error_details}")
+            return {"status": "error", "error": error_details}
+    
+    def _handle_web_search_interrupt(self, action: dict) -> dict:
+        """Handle web search action with Exa AI API"""
+        try:
+            from openai import OpenAI
+            
+            # Extract query from action
+            query = action.get('query') or action.get('content', '')
+            if not query:
+                return {
+                    'success': False,
+                    'error': 'No search query provided',
+                    'query': '',
+                    'results': ''
+                }
+            
+            print(f"🔍 Searching web for: {query}")
+            
+            # Initialize Exa AI client
+            client = OpenAI(
+                base_url="https://api.exa.ai",
+                api_key="16fe8779-7264-44c1-a911-e8187cb629c6"
+            )
+            
+            # Make the search request
+            completion = client.chat.completions.create(
+                model="exa",
+                messages=[{"role": "user", "content": query}]
+            )
+            
+            # Extract the response
+            search_results = completion.choices[0].message.content if completion.choices else "No results found"
+            
+            print(f"✅ Web search completed successfully")
+            print(f"📊 Results length: {len(search_results)} characters")
+            
+            return {
+                'success': True,
+                'query': query,
+                'results': search_results,
+                'source': 'exa_ai'
+            }
+            
+        except ImportError:
+            print("❌ OpenAI package not available for web search")
+            return {
+                'success': False,
+                'error': 'OpenAI package not installed',
+                'query': query if 'query' in locals() else '',
+                'results': ''
+            }
+        except Exception as e:
+            print(f"❌ Web search failed: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Search failed: {str(e)}",
+                'query': query if 'query' in locals() else '',
+                'results': ''
+            }
+
+    def _handle_ast_analyze_interrupt(self, action: dict) -> dict:
+        """Handle AST analysis action during interrupt by calling the API"""
+        print(f"🧠 Running AST analysis via API...")
+        
+        try:
+            target = action.get('target', 'backend')  # backend or frontend
+            focus = action.get('focus', 'all')  # routes, imports, env, database, structure, all
+            
+            print(f"🎯 Target: {target}, Focus: {focus}")
+            
+            # Call the AST analysis API endpoint instead of accessing files directly
+            import requests
+            
+            api_url = f"{self.api_base_url}/projects/{self.project_id}/ast-analyze"
+            params = {
+                'target': target,
+                'focus': focus
+            }
+            
+            print(f"📝 Calling AST API: {api_url}")
+            print(f"📝 Parameters: {params}")
+            
+            response = requests.post(
+                api_url,
+                params=params,
+                timeout=35  # Slightly longer than the API timeout
+            )
+            
+            if response.status_code == 200:
+                analysis_result = response.json()
+                if analysis_result.get('success', False):
+                    print(f"✅ AST analysis completed successfully via API")
+                    files_analyzed = analysis_result.get('summary', {}).get('files_analyzed', 0)
+                    print(f"📊 Analyzed {files_analyzed} files")
+                    return analysis_result
+                else:
+                    print(f"❌ AST analysis API returned error: {analysis_result.get('error', 'Unknown error')}")
+                    return analysis_result
+            else:
+                print(f"❌ AST analysis API failed with status {response.status_code}")
+                try:
+                    error_data = response.json()
+                    return {
+                        "success": False,
+                        "error": f"API error {response.status_code}: {error_data.get('detail', 'Unknown error')}",
+                        "status_code": response.status_code
+                    }
+                except:
+                    return {
+                        "success": False,
+                        "error": f"API error {response.status_code}: {response.text[:200]}",
+                        "status_code": response.status_code
+                    }
+                
+        except requests.Timeout:
+            print(f"❌ AST analysis API timed out")
+            return {
+                "success": False,
+                "error": "AST analysis API timed out after 35 seconds"
+            }
+        except requests.RequestException as e:
+            print(f"❌ AST analysis API request failed: {e}")
+            return {
+                "success": False,
+                "error": f"API request failed: {str(e)}"
+            }
+        except Exception as e:
+            print(f"❌ Error calling AST analysis API: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "success": False,
+                "error": f"AST analysis error: {str(e)}"
+            }
+    
+    def _get_todo_file_path(self):
+        """Get the path for todo storage file"""
+        todos_dir = f"projects/{self.project_id}"
+        os.makedirs(todos_dir, exist_ok=True)
+        return os.path.join(todos_dir, "todos.md")
+    
+    def _load_todos(self):
+        """Load todos from markdown file"""
+        todo_file = self._get_todo_file_path()
+        if not os.path.exists(todo_file):
+            return []
+        
+        todos = []
+        try:
+            with open(todo_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            # Parse markdown format todos
+            lines = content.split('\n')
+            current_todo = None
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('- [ ]') or line.startswith('- [x]') or line.startswith('- [🔄]') or line.startswith('- [⏳]') or line.startswith('- [🚫]'):
+                    # Parse todo line
+                    if line.startswith('- [x]'):
+                        status = 'completed'
+                    elif line.startswith('- [🔄]'):
+                        status = 'in_progress'
+                    elif line.startswith('- [⏳]'):
+                        status = 'pending'
+                    elif line.startswith('- [🚫]'):
+                        status = 'blocked'
+                    else:
+                        status = 'pending'
+                    
+                    # Extract content and ID
+                    todo_text = line[5:].strip()  # Remove checkbox part
+                    todo_id = None
+                    description = todo_text
+                    priority = 'medium'
+                    integration = False
+                    
+                    # Look for ID in format (id: todo_123)
+                    if '(id:' in todo_text:
+                        id_start = todo_text.find('(id:')
+                        id_end = todo_text.find(')', id_start)
+                        if id_end > id_start:
+                            todo_id = todo_text[id_start+4:id_end].strip()
+                            description = todo_text[:id_start].strip()
+                    
+                    # Look for priority in format [priority: high]
+                    if '[priority:' in description:
+                        prio_start = description.find('[priority:')
+                        prio_end = description.find(']', prio_start)
+                        if prio_end > prio_start:
+                            priority = description[prio_start+10:prio_end].strip()
+                            description = description[:prio_start].strip()
+                    
+                    # Look for integration flag [integration: true]
+                    if '[integration:' in description:
+                        int_start = description.find('[integration:')
+                        int_end = description.find(']', int_start)
+                        if int_end > int_start:
+                            integration = description[int_start+13:int_end].strip() == 'true'
+                            description = description[:int_start].strip()
+                    
+                    if not todo_id:
+                        todo_id = f"todo_{uuid.uuid4().hex[:8]}"
+                    
+                    current_todo = {
+                        'id': todo_id,
+                        'description': description,
+                        'priority': priority,
+                        'integration': integration,
+                        'status': status,
+                        'created_at': datetime.now().isoformat()
+                    }
+                    todos.append(current_todo)
+                    
+        except Exception as e:
+            print(f"Error loading todos: {e}")
+            return []
+        
+        return todos
+    
+    def _save_todos(self, todos):
+        """Save todos to markdown file"""
+        todo_file = self._get_todo_file_path()
+        
+        try:
+            with open(todo_file, 'w', encoding='utf-8') as f:
+                f.write("# Todo List\n\n")
+                
+                # Group by status
+                pending = [t for t in todos if t['status'] == 'pending']
+                in_progress = [t for t in todos if t['status'] == 'in_progress']
+                completed = [t for t in todos if t['status'] == 'completed']
+                blocked = [t for t in todos if t['status'] == 'blocked']
+                
+                # Write pending todos
+                if pending:
+                    f.write("## Pending\n\n")
+                    for todo in pending:
+                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
+                        if todo.get('integration'):
+                            metadata += " [integration: true]"
+                        f.write(f"- [⏳] {todo['description']}{metadata} (id: {todo['id']})\n")
+                    f.write("\n")
+                
+                # Write in progress todos
+                if in_progress:
+                    f.write("## In Progress\n\n")
+                    for todo in in_progress:
+                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
+                        if todo.get('integration'):
+                            metadata += " [integration: true]"
+                        f.write(f"- [🔄] {todo['description']}{metadata} (id: {todo['id']})\n")
+                    f.write("\n")
+                
+                # Write blocked todos
+                if blocked:
+                    f.write("## Blocked\n\n")
+                    for todo in blocked:
+                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
+                        if todo.get('integration'):
+                            metadata += " [integration: true]"
+                        f.write(f"- [🚫] {todo['description']}{metadata} (id: {todo['id']})\n")
+                    f.write("\n")
+                
+                # Write completed todos
+                if completed:
+                    f.write("## Completed\n\n")
+                    for todo in completed:
+                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
+                        if todo.get('integration'):
+                            metadata += " [integration: true]"
+                        if todo.get('integration_tested'):
+                            metadata += " [integration_tested: true]"
+                        f.write(f"- [x] {todo['description']}{metadata} (id: {todo['id']})\n")
+                    f.write("\n")
+                        
+        except Exception as e:
+            print(f"Error saving todos: {e}")
+    
+    def _ensure_todos_loaded(self):
+        """Ensure todos are loaded from persistent storage"""
+        self.todos = self._load_todos()
     
     def _handle_todo_actions(self, action: dict):
         """Handle todo-related actions"""
         action_type = action.get('type')
+        
+        # Ensure todos are loaded from file
+        self._ensure_todos_loaded()
         
         if action_type == 'todo_create':
             # Get attributes from raw_attrs if available
@@ -2893,6 +2148,7 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
                 'created_at': datetime.now().isoformat()
             }
             self.todos.append(todo)
+            self._save_todos(self.todos)
             print(f"📋 Created todo: {todo['id']} - {todo['description']}")
             
         elif action_type == 'todo_update':
@@ -2900,10 +2156,11 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             todo_id = attrs.get('id') or action.get('id')
             new_status = attrs.get('status') or action.get('status')
             
-            for todo in self.todos:
+            for i, todo in enumerate(self.todos):
                 if todo['id'] == todo_id:
                     old_status = todo['status']
-                    todo['status'] = new_status
+                    self.todos[i]['status'] = new_status
+                    self._save_todos(self.todos)
                     print(f"🔄 Updated todo {todo_id}: {old_status} → {new_status}")
                     
                     # If todo moved to in_progress, provide work guidance
@@ -2919,11 +2176,12 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
             todo_id = attrs.get('id') or action.get('id')
             integration_tested = attrs.get('integration_tested', 'false') == 'true'
             
-            for todo in self.todos:
+            for i, todo in enumerate(self.todos):
                 if todo['id'] == todo_id:
-                    todo['status'] = 'completed'
-                    todo['integration_tested'] = integration_tested
-                    todo['completed_at'] = datetime.now().isoformat()
+                    self.todos[i]['status'] = 'completed'
+                    self.todos[i]['integration_tested'] = integration_tested
+                    self.todos[i]['completed_at'] = datetime.now().isoformat()
+                    self._save_todos(self.todos)
                     
                     if integration_tested:
                         print(f"✅ Completed todo: {todo_id}")
@@ -2935,6 +2193,9 @@ Remember: If backend URL is provided, you MUST only use that. Dont assume anythi
 
     def _display_todos(self):
         """Display current todo status and return structured todo list"""
+        # Ensure todos are loaded from file
+        self._ensure_todos_loaded()
+        
         if not self.todos:
             todo_tree = "📋 todos/\n└── (no todos created yet)"
             print("📋 No todos created yet")

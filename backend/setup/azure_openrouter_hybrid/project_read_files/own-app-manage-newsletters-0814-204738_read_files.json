@@ -1,0 +1,33 @@
+{
+  "project_id": "own-app-manage-newsletters-0814-204738",
+  "created_at": "2025-08-14T20:57:15.842612",
+  "last_updated": "2025-08-14T20:57:15.842622",
+  "read_files": [
+    "frontend/src/types/newsletterTypes.ts",
+    "backend/services/newsletter_service.py",
+    "backend/database/contact.py",
+    "frontend/src/pages/NewslettersPage.tsx",
+    "backend/database/tag.py",
+    "frontend/src/pages/SubscribePage.tsx",
+    "frontend/src/api/newsletterApi.ts",
+    "frontend/src/theme.ts",
+    "frontend/src/stores/contactStore.ts",
+    "backend/services/auth_service.py",
+    "frontend/src/components/DashboardLayout.tsx",
+    "frontend/src/stores/tagStore.ts",
+    "backend/services/__init__.py",
+    "backend/services/tag_service.py",
+    "frontend/src/stores/newsletterStore.ts",
+    "backend/test_setup.py",
+    "frontend/src/pages/ContactsPage.tsx",
+    "backend/services/subscription_service.py",
+    "frontend/src/pages/ArchivePage.tsx",
+    "frontend/src/pages/TagsPage.tsx",
+    "backend/models/newsletter_models.py",
+    "backend/database/newsletter.py",
+    "backend/database/subscription.py",
+    "frontend/src/App.tsx",
+    "backend/services/contact_service.py"
+  ],
+  "total_files_read": 25
+}

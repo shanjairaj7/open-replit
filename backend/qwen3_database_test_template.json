@@ -1,0 +1,42 @@
+{
+  "test_metadata": {
+    "date": "YYYY-MM-DD",
+    "tester": "your_name",
+    "qwen_model": "qwen3-coder",
+    "purpose": "Database technology selection"
+  },
+  "qwen_responses": {
+    "confidence_scores": {
+      "sqlite": "?/10",
+      "postgresql": "?/10",
+      "mongodb": "?/10",
+      "mysql": "?/10",
+      "redis": "?/10"
+    },
+    "best_knowledge": "Which database mentioned as strongest?",
+    "sqlite_code_quality": "Rate the generated SQLite code 1-10",
+    "postgresql_code_quality": "Rate the generated PostgreSQL code 1-10",
+    "honest_limitations": "What limitations did Qwen3 admit?",
+    "multi_project_recommendation": "Which approach recommended?"
+  },
+  "evaluation_scores": {
+    "confidence_scores": "?/30",
+    "code_quality": "?/25",
+    "honesty_assessment": "?/20",
+    "practical_recommendations": "?/15",
+    "technical_depth": "?/10",
+    "total_score": "?/100"
+  },
+  "decision_factors": {
+    "primary_strength": "",
+    "main_weakness": "",
+    "recommended_choice": "",
+    "reasoning": ""
+  },
+  "next_steps": [
+    "Test actual code generation",
+    "Evaluate setup complexity",
+    "Cost analysis",
+    "Final architecture decision"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "project_id": "own-app-manage-newsletters-0815-144152",
+  "created_at": "2025-08-15T14:56:40.853523",
+  "last_updated": "2025-08-15T14:56:40.853533",
+  "read_files": [
+    "README.md",
+    "backend/database/tag.py",
+    "frontend/src/pages/Settings.tsx",
+    "backend/routes/__init__.py",
+    "frontend/src/pages/ContactList.tsx",
+    "backend/services/sendgrid_service.py",
+    "backend/routes/contact.py",
+    "backend/routes/settings.py",
+    "backend/test_backend.py",
+    "frontend/src/pages/Home.tsx",
+    "frontend/src/pages/ImportContacts.tsx",
+    "backend/database/contact.py",
+    "frontend/src/pages/Profile.tsx",
+    "frontend/src/pages/NewsletterEditor.tsx",
+    "backend/routes/newsletter.py",
+    "frontend/src/pages/Subscription.tsx",
+    "frontend/src/pages/TagsManager.tsx",
+    "backend/routes/subscription.py",
+    "backend/database/__init__.py",
+    "backend/database/subscription.py",
+    "backend/database/newsletter.py",
+    "backend/app.py",
+    "backend/routes/tag.py"
+  ],
+  "total_files_read": 23
+}

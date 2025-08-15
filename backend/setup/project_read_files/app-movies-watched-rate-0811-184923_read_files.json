@@ -1,0 +1,16 @@
+{
+  "project_id": "app-movies-watched-rate-0811-184923",
+  "created_at": "2025-08-11T18:52:20.679073",
+  "last_updated": "2025-08-11T18:52:20.679098",
+  "read_files": [
+    "backend/models/movie.py",
+    "backend/models/user.py",
+    "backend/debug_test.py",
+    "backend/app.py",
+    "backend/services/__init__.py",
+    "backend/services/movie_service.py",
+    "backend/requirements.txt",
+    "backend/database.py"
+  ],
+  "total_files_read": 8
+}
