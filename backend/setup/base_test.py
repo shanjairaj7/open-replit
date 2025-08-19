@@ -1469,7 +1469,29 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return f"Command failed: {error}"
 
     def _handle_update_file_interrupt(self, action: dict) -> str:
-        """Handle update_file action during interrupt - update file immediately"""
+        """Handle update_file action - supports both diff blocks and legacy format"""
+        try:
+            # Lazy import and initialize the update file handler
+            if not hasattr(self, '_update_handler'):
+                from update_file_handler import UpdateFileHandler
+                
+                # Initialize handler with our callback methods
+                self._update_handler = UpdateFileHandler(
+                    read_file_callback=self._read_file_via_api,
+                    update_file_callback=self._update_file_via_api
+                )
+                print("✅ Update file handler initialized with diff support")
+            
+            # Use the handler to process the update
+            return self._update_handler.handle_update_file(action)
+            
+        except Exception as e:
+            print(f"❌ Error initializing update handler: {e}")
+            print("🔄 Falling back to legacy update method")
+            return self._handle_legacy_update_file(action)
+    
+    def _handle_legacy_update_file(self, action: dict) -> str:
+        """Fallback legacy update file method"""
         file_path = action.get('path') or action.get('filePath')
         file_content = action.get('content', '')
         
@@ -1479,22 +1501,9 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # Check if file content is empty after processing
         if not file_content or file_content.strip() == '':
             print(f"⚠️ Empty file content detected for update: {file_path}")
-            return f"""❌ File update blocked: Empty content detected for '{file_path}'
-
-Are you sure you want to update this file with empty content? If not, please add the actual content inside the action tag.
-
-Example of proper usage:
-<action type="update_file" path="{file_path}">
-# Your actual file content goes here
-print("Updated content!")
-
-def updated_function():
-    return "This is the new content"
-</action>
-
-If you really want to update the file to be empty, please confirm by responding with the action again and explicitly stating it should be empty."""
+            return f"❌ File update blocked: Empty content detected for '{file_path}'"
         
-        print(f"💾 Updating file: {file_path}")
+        print(f"💾 Updating file (legacy): {file_path}")
         print(f"📄 Content length: {len(file_content)} characters")
         
         # Update file via API
@@ -1502,30 +1511,13 @@ If you really want to update the file to be empty, please confirm by responding 
         
         if update_result and update_result.get('status') == 'updated':
             print(f"✅ File updated successfully: {file_path}")
-            
-            # Check for validation errors
-            python_errors = update_result.get('python_errors', '')
-            typescript_errors = update_result.get('typescript_errors', '')
-            
-            error_messages = []
-            if python_errors:
-                print(f"⚠️ Python validation errors found")
-                error_messages.append(f"Python errors:\n{python_errors}")
-                
-            if typescript_errors:
-                print(f"⚠️ TypeScript validation errors found")
-                error_messages.append(f"TypeScript errors:\n{typescript_errors}")
-            
-            if error_messages:
-                success_msg = f"File '{file_path}' updated successfully.\n\n{'\n\n'.join(error_messages)}"
-            else:
-                success_msg = f"File '{file_path}' updated successfully"
-            
-            return success_msg
+            return f"File '{file_path}' updated successfully (legacy mode)"
         else:
-            error = update_result.get('error', 'Unknown error') if update_result else 'Failed to update file'
-            print(f"❌ File update failed: {error}")
-            return None
+            error_msg = f"Failed to update file '{file_path}'"
+            if update_result:
+                error_msg += f": {update_result.get('error', 'Unknown error')}"
+            print(f"❌ {error_msg}")
+            return error_msg
 
     def _handle_rename_file_interrupt(self, action: dict) -> str:
         """Handle rename_file action during interrupt - rename file immediately"""
@@ -2178,6 +2170,7 @@ If you really want to create an empty file, please confirm by responding with th
             
             for i, todo in enumerate(self.todos):
                 if todo['id'] == todo_id:
+                    old_description = self.todos[i]['description']
                     self.todos[i]['status'] = 'completed'
                     self.todos[i]['integration_tested'] = integration_tested
                     self.todos[i]['completed_at'] = datetime.now().isoformat()
@@ -2189,6 +2182,15 @@ If you really want to create an empty file, please confirm by responding with th
                     else:
                         print(f"✅ Completed todo: {todo_id}")
                         print(f"   🔗 Integration tested: No")
+                    
+                    # Return completion message for the model
+                    return {
+                        'type': 'todo_complete',
+                        'todo_id': todo_id,
+                        'description': old_description,
+                        'integration_tested': integration_tested,
+                        'message': f"✅ Successfully completed todo '{todo_id}': {old_description}"
+                    }
                     break
 
     def _display_todos(self):

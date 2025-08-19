@@ -2,6 +2,13 @@
 
 ## Completed
 
+- [x] Update `frontend/src/pages/HomePage.tsx` to function as a dashboard, displaying key CRM details (e.g., counts of contacts, newsletters, blog posts) and recent activity. This will require integration with backend data. [priority: high] [integration_tested: true] (id: frontend_homepage_dashboard)
+- [x] Update `frontend/src/pages/HomePage.tsx` to function as a dashboard, displaying key CRM details (e.g., counts of contacts, newsletters, blog posts) and recent activity. This will require integration with backend data. [priority: high] (id: frontend_homepage_dashboard)
+- [x] Enhance the styling of `frontend/src/components/Sidebar.tsx` to be more visually appealing and ensure the user account section is always positioned at the bottom. [priority: high] (id: frontend_sidebar_styling)
+- [x] Create `frontend/src/components/Sidebar.tsx` component with basic Chakra UI layout and navigation links. [priority: high] (id: frontend_sidebar_component)
+- [x] Verify visibility and positioning of "Add Blog Post" and "Create Newsletter" buttons after sidebar implementation. [priority: high] (id: frontend_button_visibility_check)
+- [x] Enhance `ReactQuill` editor styling in `BlogPostEditorPage.tsx` and `NewsletterEditorPage.tsx` for a Notion/Medium-like look. (id: frontend_editor_styling)
+- [x] Refactor `frontend/src/App.tsx` to integrate `Sidebar.tsx` and adjust main content layout. Remove `Navbar.tsx`. [priority: high] (id: frontend_app_layout_refactor)
 - [x] Create a public subscription form page. [integration_tested: true] [integration_tested: true] (id: frontend_subscription_form)
 - [x] Create `frontend/src/pages/NewslettersPage.tsx` to list, create, and send newsletters, with tag selection. [priority: high] (id: frontend_newsletters_page)
 - [x] Implement send newsletter functionality in `NewslettersPage.tsx`, including tag selection for recipients. [priority: high] (id: frontend_newsletters_send_functionality)

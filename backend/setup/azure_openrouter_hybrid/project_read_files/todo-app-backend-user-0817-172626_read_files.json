@@ -1,0 +1,31 @@
+{
+  "project_id": "todo-app-backend-user-0817-172626",
+  "created_at": "2025-08-17T17:48:32.464998",
+  "last_updated": "2025-08-17T17:48:32.465011",
+  "read_files": [
+    "backend/config.py",
+    "backend/routes/todo_routes.py",
+    "frontend/src/pages/SignupPage.tsx",
+    "backend/routes/__init__.py",
+    "backend/database/session.py",
+    "backend/db_config.py",
+    "backend/models/todo_models.py",
+    "frontend/src/main.tsx",
+    "frontend/src/pages/LoginPage.tsx",
+    "frontend/src/pages/TodoPage.tsx",
+    "backend/app.py",
+    "backend/models/user_models.py",
+    "frontend/src/App.tsx",
+    "backend/test_todo.py",
+    "backend/services/todo_service.py",
+    "backend/database/base.py",
+    "backend/services/auth_service.py",
+    "backend/database/models.py",
+    "backend/requirements.txt",
+    "backend/routes/auth_routes.py",
+    "frontend/src/stores/auth-store.ts",
+    "backend/test_auth.py",
+    "frontend/src/api/todoApi.ts"
+  ],
+  "total_files_read": 23
+}

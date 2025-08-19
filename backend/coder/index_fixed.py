@@ -107,7 +107,7 @@ def _handle_rename_file_interrupt(self: GroqAgentState, interrupt_action: dict) 
         
         import requests
         payload = {"new_path": new_path}
-        response = requests.post(rename_url, json=payload, timeout=10)
+        response = requests.patch(rename_url, json=payload, timeout=10)
         
         if response.status_code == 200:
             result = response.json()
@@ -439,7 +439,14 @@ Please use the correct action tags to perform actions based on your plan and the
                             print(f"\n📋 CODER: Processing todo action inline: {action_type}")
                             # Process todo actions inline without interrupting
                             if hasattr(self, '_handle_todo_actions'):
-                                self._handle_todo_actions(action)
+                                todo_result = self._handle_todo_actions(action)
+                                # If todo_complete returned a result, store it for adding to conversation
+                                if todo_result and todo_result.get('type') == 'todo_complete':
+                                    print(f"📋 CODER: Todo completion result captured: {todo_result['message']}")
+                                    # Store the completion message to be added to the conversation
+                                    if not hasattr(self, '_todo_completion_messages'):
+                                        self._todo_completion_messages = []
+                                    self._todo_completion_messages.append(todo_result)
                             else:
                                 print(f"📋 CODER: Todo action {action_type} - system doesn't support todos")
                             # Don't set should_interrupt for todo actions
@@ -454,6 +461,18 @@ Please use the correct action tags to perform actions based on your plan and the
             
             full_response += accumulated_content
             print(f"📈 CODER: New full_response length: {len(full_response)} chars")
+            
+            # Add any pending todo completion messages to the response
+            if hasattr(self, '_todo_completion_messages') and self._todo_completion_messages:
+                print(f"📋 CODER: Adding {len(self._todo_completion_messages)} todo completion messages to response")
+                for todo_completion in self._todo_completion_messages:
+                    completion_text = f"\n\n✅ **Todo Completed**: {todo_completion['message']}"
+                    if todo_completion.get('integration_tested'):
+                        completion_text += " ✓ Integration tested"
+                    full_response += completion_text
+                    print(f"📋 CODER: Added todo completion: {todo_completion['todo_id']}")
+                # Clear the messages after adding them
+                self._todo_completion_messages = []
             
             # Query usage statistics using generation ID (works even after early breaks)
             if generation_id:
@@ -1737,7 +1756,7 @@ Note: Continue with the highest priority todo.
             logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
             params = {
                 'service': service,
-                'include_new_only': True  # Only check new logs since last checkpoint
+                'include_new_only': False  # Check all logs to detect any errors
             }
             
             response = requests.get(logs_url, params=params, timeout=5)
@@ -1910,14 +1929,67 @@ Note: Continue with the highest priority todo.
             print(f"⚠️ CODER: Error parsing frontend errors: {e}")
             return []
     
+    def _get_error_snippet(service):
+        """Extract a concise error snippet for critical error alerts"""
+        try:
+            project_id = getattr(self, 'project_id', None)
+            if not project_id:
+                return ""
+                
+            import requests
+            
+            # Call the check_logs API to get recent errors
+            api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
+            if api_base_url.endswith('/api'):
+                api_base_url = api_base_url[:-4]
+            
+            logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
+            params = {
+                'service': service,
+                'include_new_only': False
+            }
+            
+            response = requests.get(logs_url, params=params, timeout=5)
+            if response.status_code == 200:
+                logs_data = response.json()
+                logs_content = logs_data.get('logs', '')
+                
+                if not logs_content.strip():
+                    return ""
+                
+                # Look for the most recent error line
+                lines = logs_content.strip().split('\n')
+                error_line = None
+                
+                # Search from bottom up for the most recent error
+                for line in reversed(lines):
+                    line_lower = line.lower()
+                    if any(pattern in line_lower for pattern in ['error:', 'exception:', 'syntaxerror:', 'typeerror:', 'failed:', 'uncaught']):
+                        # Clean up the error line and truncate if too long
+                        error_line = line.strip()
+                        if len(error_line) > 100:
+                            error_line = error_line[:97] + "..."
+                        break
+                
+                if error_line:
+                    return f" (Error: {error_line})"
+            
+            return ""
+        except Exception:
+            return ""
+
     # Check for errors in both services (regardless of whether they're running)
     # This is important because crashed services won't have URLs but may have errors in logs
     backend_has_errors = _check_service_has_errors('backend')
     frontend_has_errors = _check_service_has_errors('frontend')
     
-    # Create error indicators with critical urgency
-    backend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"backend\"/> to see errors and FIX IMMEDIATELY" if backend_has_errors else ""
-    frontend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"frontend\"/> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
+    # Get error snippets when critical errors are detected
+    backend_error_snippet = _get_error_snippet('backend') if backend_has_errors else ""
+    frontend_error_snippet = _get_error_snippet('frontend') if frontend_has_errors else ""
+    
+    # Create error indicators with critical urgency and error snippets
+    backend_error_indicator = f" 🚨 CRITICAL ERRORS - SERVICE BROKEN!{backend_error_snippet} Use <action type=\"check_logs\" service=\"backend\" new_only=\"true\" /> to see errors and FIX IMMEDIATELY" if backend_has_errors else ""
+    frontend_error_indicator = f" 🚨 CRITICAL ERRORS - SERVICE BROKEN!{frontend_error_snippet} Use <action type=\"check_logs\" service=\"frontend\" new_only=\"true\" /> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
     
     # Add service status to full_user_msg
     full_user_msg += f"""
@@ -1928,6 +2000,7 @@ Frontend: {f"🟢 Running ・ Available at {frontend_url}" if frontend_url else 
 {"" if backend_url else "Backend is not running. Use <action type=\"start_backend\"/> to start or <action type=\"restart_backend\"/> to restart it."}
     - Remember to load_dotenv() in your backend code to use the environment variables.
 {"" if frontend_url else "Frontend is not running. Use <action type=\"start_frontend\"/> to start or <action type=\"restart_frontend\"/> to restart it."}
+    - Use <action type=\"check_logs\" new_only=\"true\" /> to open the frontend in your browser. Emphasis on the `new_only` to be false as there can be errors in the logs that are not new, but still need to be fixed.
 </service_status>
 """
     print(f"🔍 CODER: Backend status: {backend_status}")
@@ -2122,8 +2195,8 @@ def _detect_invalid_xml_tags(content):
     
     # Valid action tag patterns that we expect
     valid_action_patterns = [
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
         r'<artifact\s+[^>]*>',
         r'<thinking>'
     ]

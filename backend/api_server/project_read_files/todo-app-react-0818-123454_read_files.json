@@ -1,0 +1,13 @@
+{
+  "project_id": "todo-app-react-0818-123454",
+  "created_at": "2025-08-18T12:35:17.185276",
+  "last_updated": "2025-08-18T12:35:17.185284",
+  "read_files": [
+    "backend/models/complete_schemas.py",
+    "backend/app.py",
+    "backend/services/complete_apis.py",
+    "backend/database/complete_models.py",
+    "backend/services/__init__.py"
+  ],
+  "total_files_read": 5
+}

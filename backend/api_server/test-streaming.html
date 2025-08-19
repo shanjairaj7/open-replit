@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming API Test</title>
+    <style>
+        body {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            background: #0d1117;
+            color: #f0f6fc;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.4;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: #161b22;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid #30363d;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input {
+            flex: 1;
+            padding: 12px;
+            background: #0d1117;
+            color: #f0f6fc;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        button {
+            padding: 12px 20px;
+            background: #238636;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        button:hover {
+            background: #2ea043;
+        }
+        button:disabled {
+            background: #484f58;
+            cursor: not-allowed;
+        }
+        .output {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            height: 600px;
+            overflow-y: auto;
+            font-size: 13px;
+        }
+        .chunk {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+            background: #161b22;
+            border-left: 3px solid #238636;
+        }
+        .chunk.error {
+            border-left-color: #da3633;
+            background: #261c22;
+        }
+        .chunk.action {
+            border-left-color: #f85149;
+            background: #1c1e25;
+        }
+        .timestamp {
+            color: #7d8590;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status.connected {
+            background: #0f2419;
+            color: #3fb950;
+            border: 1px solid #238636;
+        }
+        .status.disconnected {
+            background: #2d1519;
+            color: #f85149;
+            border: 1px solid #da3633;
+        }
+        .status.connecting {
+            background: #1f1a0d;
+            color: #d29922;
+            border: 1px solid #bb8009;
+        }
+        .clear-btn {
+            background: #6e7681;
+            margin-left: 10px;
+        }
+        .clear-btn:hover {
+            background: #7d8590;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 FastAPI Streaming Test</h1>
+            <p>Real-time streaming conversation API with model actions and responses</p>
+        </div>
+        
+        <div class="controls">
+            <input 
+                type="text" 
+                id="messageInput" 
+                placeholder="Enter your message (e.g., 'build me a todo app with React')" 
+                value="create a simple calculator component"
+            />
+            <button onclick="startStream()" id="sendBtn">Send Stream</button>
+            <button onclick="clearOutput()" class="clear-btn">Clear</button>
+        </div>
+        
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="output" id="output">
+            <div style="color: #7d8590; text-align: center; padding: 40px;">
+                Click "Send Stream" to start a streaming conversation...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chunkCount = 0;
+        
+        function updateStatus(status, message) {
+            const statusEl = document.getElementById('status');
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = message;
+        }
+        
+        function addChunk(data, type = 'text') {
+            const output = document.getElementById('output');
+            chunkCount++;
+            
+            // Clear initial message on first chunk
+            if (chunkCount === 1) {
+                output.innerHTML = '';
+            }
+            
+            const chunk = document.createElement('div');
+            chunk.className = `chunk ${type}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            chunk.innerHTML = `
+                <div class="timestamp">#${chunkCount} - ${timestamp}</div>
+                <div>${escapeHtml(JSON.stringify(data, null, 2))}</div>
+            `;
+            
+            output.appendChild(chunk);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function clearOutput() {
+            document.getElementById('output').innerHTML = `
+                <div style="color: #7d8590; text-align: center; padding: 40px;">
+                    Output cleared. Click "Send Stream" to start a new conversation...
+                </div>
+            `;
+            chunkCount = 0;
+        }
+        
+        async function startStream() {
+            const message = document.getElementById('messageInput').value.trim();
+            const sendBtn = document.getElementById('sendBtn');
+            
+            if (!message) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            // Disable send button
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Streaming...';
+            
+            updateStatus('connecting', 'Connecting to streaming API...');
+            
+            try {
+                const response = await fetch('http://localhost:8080/chat/stream', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        conversation_id: null,
+                        project_id: null
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                updateStatus('connected', 'Connected - Streaming live data...');
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        updateStatus('disconnected', 'Stream completed');
+                        break;
+                    }
+                    
+                    const chunk = decoder.decode(value);
+                    console.log('Raw chunk:', chunk);
+                    
+                    // Process each line in the chunk
+                    const lines = chunk.split('\\n');
+                    for (const line of lines) {
+                        if (line.trim().startsWith('data: ')) {
+                            try {
+                                const jsonData = line.replace('data: ', '');
+                                const data = JSON.parse(jsonData);
+                                
+                                const chunkType = data.type === 'error' ? 'error' : 
+                                                data.type.startsWith('action') ? 'action' : 'text';
+                                
+                                addChunk(data, chunkType);
+                            } catch (e) {
+                                console.error('Error parsing JSON:', e, 'Line:', line);
+                                addChunk({ raw: line, error: 'JSON parse error' }, 'error');
+                            }
+                        } else if (line.trim()) {
+                            addChunk({ raw: line, note: 'Non-SSE data' }, 'text');
+                        }
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Stream error:', error);
+                updateStatus('disconnected', `Error: ${error.message}`);
+                addChunk({ error: error.message, timestamp: new Date().toISOString() }, 'error');
+            } finally {
+                // Re-enable send button
+                sendBtn.disabled = false;
+                sendBtn.textContent = 'Send Stream';
+            }
+        }
+        
+        // Allow Enter key to trigger stream
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                startStream();
+            }
+        });
+        
+        console.log('🚀 Streaming test page loaded. Ready to test FastAPI streaming API!');
+    </script>
+</body>
+</html>

@@ -48,7 +48,7 @@ openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='sk-or-v
 # Check for Azure mode from environment variable
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "false").lower() == "true"
 
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, atlas_gpt4_prompt, atlas_gpt4_ultra_prompt, atlas_gpt4_short_prompt
+from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, atlas_gpt4_prompt, atlas_gpt4_ultra_prompt, atlas_gpt4_short_prompt, prompt
 
 # Import the appropriate coder based on mode
 if USE_AZURE_MODE:
@@ -202,7 +202,7 @@ class BoilerplatePersistentGroq:
         """Load system prompt from file with project context"""
 
         # base_prompt = senior_engineer_prompt
-        base_prompt = atlas_prompt
+        base_prompt = prompt
         
         # any additions to system prompt based on project context, can be added here
         
@@ -1530,7 +1530,33 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return f"Command failed: {error}"
 
     def _handle_update_file_interrupt(self, action: dict) -> str:
-        """Handle update_file action during interrupt - update file immediately"""
+        """Handle update_file action - supports both diff blocks and legacy format"""
+        try:
+            # Lazy import and initialize the update file handler
+            if not hasattr(self, '_update_handler'):
+                import sys
+                import os
+                
+                # Import from local directory
+                from update_file_handler import UpdateFileHandler
+                
+                # Initialize handler with our callback methods
+                self._update_handler = UpdateFileHandler(
+                    read_file_callback=self._read_file_via_api,
+                    update_file_callback=self._update_file_via_api
+                )
+                print("✅ Update file handler initialized with diff support")
+            
+            # Use the handler to process the update
+            return self._update_handler.handle_update_file(action)
+            
+        except Exception as e:
+            print(f"❌ Error initializing update handler: {e}")
+            print("🔄 Falling back to legacy update method")
+            return self._handle_legacy_update_file(action)
+    
+    def _handle_legacy_update_file(self, action: dict) -> str:
+        """Fallback legacy update file method"""
         file_path = action.get('path') or action.get('filePath')
         file_content = action.get('content', '')
         
@@ -1540,22 +1566,9 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # Check if file content is empty after processing
         if not file_content or file_content.strip() == '':
             print(f"⚠️ Empty file content detected for update: {file_path}")
-            return f"""❌ File update blocked: Empty content detected for '{file_path}'
-
-Are you sure you want to update this file with empty content? If not, please add the actual content inside the action tag.
-
-Example of proper usage:
-<action type="update_file" path="{file_path}">
-# Your actual file content goes here
-print("Updated content!")
-
-def updated_function():
-    return "This is the new content"
-</action>
-
-If you really want to update the file to be empty, please confirm by responding with the action again and explicitly stating it should be empty."""
+            return f"❌ File update blocked: Empty content detected for '{file_path}'"
         
-        print(f"💾 Updating file: {file_path}")
+        print(f"💾 Updating file (legacy): {file_path}")
         print(f"📄 Content length: {len(file_content)} characters")
         
         # Update file via API
@@ -1563,30 +1576,11 @@ If you really want to update the file to be empty, please confirm by responding 
         
         if update_result and update_result.get('status') == 'updated':
             print(f"✅ File updated successfully: {file_path}")
-            
-            # Check for validation errors
-            python_errors = update_result.get('python_errors', '')
-            typescript_errors = update_result.get('typescript_errors', '')
-            
-            error_messages = []
-            if python_errors:
-                print(f"⚠️ Python validation errors found")
-                error_messages.append(f"Python errors:\n{python_errors}")
-                
-            if typescript_errors:
-                print(f"⚠️ TypeScript validation errors found")
-                error_messages.append(f"TypeScript errors:\n{typescript_errors}")
-            
-            if error_messages:
-                success_msg = f"File '{file_path}' updated successfully.\n\n{'\n\n'.join(error_messages)}"
-            else:
-                success_msg = f"File '{file_path}' updated successfully"
-            
-            return success_msg
+            return f"File '{file_path}' updated successfully (legacy mode)"
         else:
             error = update_result.get('error', 'Unknown error') if update_result else 'Failed to update file'
             print(f"❌ File update failed: {error}")
-            return None
+            return f"Failed to update file '{file_path}': {error}"
 
     def _handle_rename_file_interrupt(self, action: dict) -> str:
         """Handle rename_file action during interrupt - rename file immediately"""

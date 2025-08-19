@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clean AI Code Assistant</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .chat-container {
+            width: 90%;
+            max-width: 1000px;
+            height: 90vh;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .chat-header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .project-status {
+            background: #f8f9fa;
+            padding: 12px 20px;
+            border-bottom: 1px solid #e9ecef;
+            font-size: 14px;
+            color: #495057;
+        }
+
+        .project-status.active {
+            background: #d4edda;
+            color: #155724;
+            border-color: #c3e6cb;
+        }
+
+        .messages-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 16px;
+            max-width: 80%;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            margin-left: auto;
+        }
+
+        .message.assistant {
+            margin-right: auto;
+        }
+
+        .message.action {
+            margin: 16px auto;
+            max-width: 90%;
+        }
+
+        .message-bubble {
+            padding: 12px 16px;
+            border-radius: 18px;
+            font-size: 15px;
+            line-height: 1.4;
+            position: relative;
+        }
+
+        .message.user .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            margin-left: auto;
+        }
+
+        .message.assistant .message-bubble {
+            background: white;
+            border: 1px solid #e9ecef;
+            color: #495057;
+        }
+
+        .action-card {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 8px 0;
+        }
+
+        .action-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .action-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        .action-icon.file {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .action-icon.todo {
+            background: #fff3e0;
+            color: #f57c00;
+        }
+
+        .action-icon.service {
+            background: #e8f5e8;
+            color: #388e3c;
+        }
+
+        .action-content {
+            font-size: 13px;
+            color: #666;
+            background: #f8f9fa;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin: 8px 0;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .action-result {
+            display: flex;
+            align-items: center;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+
+        .action-result.success {
+            color: #28a745;
+        }
+
+        .action-result.error {
+            color: #dc3545;
+        }
+
+        .action-result.warning {
+            color: #ffc107;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-dot.success {
+            background: #28a745;
+        }
+
+        .status-dot.error {
+            background: #dc3545;
+        }
+
+        .status-dot.warning {
+            background: #ffc107;
+        }
+
+        .input-area {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-field {
+            flex: 1;
+            min-height: 44px;
+            max-height: 120px;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 22px;
+            font-size: 15px;
+            resize: none;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .input-field:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .input-field:disabled {
+            background: #f8f9fa;
+            color: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .send-button {
+            width: 44px;
+            height: 44px;
+            border: none;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.2s ease;
+        }
+
+        .send-button:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .send-button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 18px;
+            margin-bottom: 16px;
+            max-width: 80px;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #6c757d;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                opacity: 0.3;
+            }
+            30% {
+                opacity: 1;
+            }
+        }
+
+        .clear-button {
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+
+        .clear-button:hover {
+            background: #5a6268;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #6c757d;
+            padding: 40px 20px;
+        }
+
+        .empty-state h3 {
+            margin-bottom: 8px;
+            color: #495057;
+        }
+
+        .example-prompts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 16px;
+        }
+
+        .example-prompt {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 16px;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .example-prompt:hover {
+            border-color: #667eea;
+            color: #667eea;
+        }
+
+        @media (max-width: 768px) {
+            .chat-container {
+                width: 100%;
+                height: 100vh;
+                border-radius: 0;
+            }
+
+            .message {
+                max-width: 90%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>🤖 AI Code Assistant</h1>
+            <p>Create and modify projects with natural language</p>
+        </div>
+        
+        <div class="project-status" id="projectStatus">
+            <span>💡 Ready to create a new project</span>
+        </div>
+        
+        <div class="messages-area" id="messagesArea">
+            <div class="empty-state">
+                <h3>Welcome to AI Code Assistant</h3>
+                <p>Ask me to create any project or modify existing ones!</p>
+                
+                <div class="example-prompts">
+                    <div class="example-prompt" onclick="fillPrompt('Build me a todo app with React and TypeScript')">
+                        📝 Todo App
+                    </div>
+                    <div class="example-prompt" onclick="fillPrompt('Create a simple calculator with dark mode')">
+                        🔢 Calculator
+                    </div>
+                    <div class="example-prompt" onclick="fillPrompt('Build a blog with user authentication')">
+                        📰 Blog
+                    </div>
+                    <div class="example-prompt" onclick="fillPrompt('Create a weather app with API integration')">
+                        🌤️ Weather App
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="input-area">
+            <div class="input-container">
+                <textarea 
+                    id="messageInput" 
+                    class="input-field"
+                    placeholder="Describe what you want to build or modify..."
+                    rows="1"
+                ></textarea>
+                <button id="sendButton" class="send-button">
+                    <span>→</span>
+                </button>
+                <button id="clearButton" class="clear-button">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class CleanChatInterface {
+            constructor() {
+                this.messages = [];
+                this.isStreaming = false;
+                this.currentConversationId = null;
+                this.currentProjectId = null;
+                this.currentActions = new Map(); // Track ongoing actions
+                
+                this.initializeElements();
+                this.attachEventListeners();
+            }
+            
+            initializeElements() {
+                this.messagesArea = document.getElementById('messagesArea');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.clearButton = document.getElementById('clearButton');
+                this.projectStatus = document.getElementById('projectStatus');
+            }
+            
+            attachEventListeners() {
+                this.sendButton.addEventListener('click', () => this.sendMessage());
+                this.clearButton.addEventListener('click', () => this.clearChat());
+                
+                this.messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+                
+                this.messageInput.addEventListener('input', this.autoResize.bind(this));
+            }
+            
+            autoResize() {
+                this.messageInput.style.height = 'auto';
+                this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 120) + 'px';
+            }
+            
+            fillPrompt(text) {
+                this.messageInput.value = text;
+                this.autoResize();
+                this.messageInput.focus();
+            }
+            
+            async sendMessage() {
+                const message = this.messageInput.value.trim();
+                if (!message || this.isStreaming) return;
+                
+                // Add user message
+                this.addMessage({
+                    id: `user_${Date.now()}`,
+                    type: 'user',
+                    content: message,
+                    timestamp: new Date().toISOString()
+                });
+                
+                // Clear input
+                this.messageInput.value = '';
+                this.autoResize();
+                
+                // Show typing indicator
+                this.showTypingIndicator();
+                this.setStreaming(true);
+                
+                try {
+                    const response = await fetch('http://localhost:8081/chat/stream', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            message,
+                            conversation_id: this.currentConversationId,
+                            project_id: this.currentProjectId
+                        })
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    // Extract conversation ID from headers
+                    const conversationId = response.headers.get('X-Conversation-ID');
+                    if (conversationId && !this.currentConversationId) {
+                        this.currentConversationId = conversationId;
+                    }
+                    
+                    await this.processStream(response);
+                    
+                } catch (error) {
+                    console.error('Stream error:', error);
+                    this.addMessage({
+                        id: `error_${Date.now()}`,
+                        type: 'error',
+                        content: `Connection error: ${error.message}`,
+                        timestamp: new Date().toISOString()
+                    });
+                } finally {
+                    this.hideTypingIndicator();
+                    this.setStreaming(false);
+                }
+            }
+            
+            async processStream(response) {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\\n');
+                    
+                    for (const line of lines) {
+                        if (line.trim().startsWith('data: ')) {
+                            try {
+                                const jsonData = line.replace('data: ', '');
+                                const streamChunk = JSON.parse(jsonData);
+                                this.handleStreamChunk(streamChunk);
+                            } catch (e) {
+                                console.error('Error parsing JSON:', e);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            handleStreamChunk(chunk) {
+                const { type, data, conversation_id, timestamp, action_id } = chunk;
+                
+                switch (type) {
+                    case 'assistant_message':
+                        this.addMessage({
+                            id: `assistant_${Date.now()}`,
+                            type: 'assistant',
+                            content: data.content,
+                            timestamp: timestamp
+                        });
+                        break;
+                        
+                    case 'action_start':
+                        const actionMessage = {
+                            id: action_id || `action_${Date.now()}`,
+                            type: 'action',
+                            content: data.content,
+                            actionType: data.action_type,
+                            actionDetails: data.action_details,
+                            status: 'in_progress',
+                            timestamp: timestamp
+                        };
+                        this.currentActions.set(action_id, actionMessage);
+                        this.addMessage(actionMessage);
+                        break;
+                        
+                    case 'action_result':
+                        const existingAction = this.currentActions.get(action_id);
+                        if (existingAction) {
+                            existingAction.result = data.result;
+                            existingAction.status = data.status || 'completed';
+                            this.updateActionMessage(existingAction);
+                            this.currentActions.delete(action_id);
+                        }
+                        break;
+                        
+                    case 'error':
+                        this.addMessage({
+                            id: `error_${Date.now()}`,
+                            type: 'error',
+                            content: data.error,
+                            timestamp: timestamp
+                        });
+                        break;
+                        
+                    case 'text':
+                        // Handle final result
+                        if (data.final_result && data.final_result.project_id) {
+                            this.updateProjectStatus(data.final_result.project_id);
+                        }
+                        break;
+                }
+            }
+            
+            addMessage(message) {
+                this.messages.push(message);
+                this.renderMessage(message);
+                this.scrollToBottom();
+            }
+            
+            renderMessage(message) {
+                // Remove empty state if it exists
+                const emptyState = this.messagesArea.querySelector('.empty-state');
+                if (emptyState) {
+                    emptyState.remove();
+                }
+                
+                const messageElement = this.createMessageElement(message);
+                this.messagesArea.appendChild(messageElement);
+            }
+            
+            createMessageElement(message) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${message.type}`;
+                messageDiv.id = message.id;
+                
+                if (message.type === 'user' || message.type === 'assistant') {
+                    const bubble = document.createElement('div');
+                    bubble.className = 'message-bubble';
+                    bubble.textContent = message.content;
+                    messageDiv.appendChild(bubble);
+                } else if (message.type === 'action') {
+                    messageDiv.appendChild(this.createActionCard(message));
+                } else if (message.type === 'error') {
+                    const bubble = document.createElement('div');
+                    bubble.className = 'message-bubble';
+                    bubble.style.background = '#f8d7da';
+                    bubble.style.border = '1px solid #f5c6cb';
+                    bubble.style.color = '#721c24';
+                    bubble.textContent = message.content;
+                    messageDiv.appendChild(bubble);
+                }
+                
+                return messageDiv;
+            }
+            
+            createActionCard(action) {
+                const card = document.createElement('div');
+                card.className = 'action-card';
+                
+                // Action header
+                const header = document.createElement('div');
+                header.className = 'action-header';
+                
+                const icon = document.createElement('div');
+                icon.className = `action-icon ${this.getActionIconType(action.actionType)}`;
+                icon.textContent = this.getActionIcon(action.actionType);
+                
+                const title = document.createElement('span');
+                title.textContent = action.content;
+                
+                header.appendChild(icon);
+                header.appendChild(title);
+                card.appendChild(header);
+                
+                // Action details
+                if (action.actionDetails) {
+                    const details = document.createElement('div');
+                    details.className = 'action-content';
+                    details.textContent = JSON.stringify(action.actionDetails, null, 2);
+                    card.appendChild(details);
+                }
+                
+                // Action result
+                if (action.result) {
+                    const result = document.createElement('div');
+                    result.className = `action-result ${action.status}`;
+                    
+                    const dot = document.createElement('div');
+                    dot.className = `status-dot ${action.status}`;
+                    
+                    const text = document.createElement('span');
+                    text.textContent = action.result;
+                    
+                    result.appendChild(dot);
+                    result.appendChild(text);
+                    card.appendChild(result);
+                }
+                
+                return card;
+            }
+            
+            getActionIconType(actionType) {
+                if (actionType === 'create_file' || actionType === 'update_file') return 'file';
+                if (actionType === 'create_todo' || actionType === 'complete_todo') return 'todo';
+                return 'service';
+            }
+            
+            getActionIcon(actionType) {
+                switch (actionType) {
+                    case 'create_file':
+                    case 'update_file':
+                        return '📄';
+                    case 'create_todo':
+                        return '📝';
+                    case 'complete_todo':
+                        return '✅';
+                    case 'setup_environment':
+                        return '🔧';
+                    default:
+                        return '⚡';
+                }
+            }
+            
+            updateActionMessage(action) {
+                const element = document.getElementById(action.id);
+                if (element) {
+                    const newElement = this.createMessageElement(action);
+                    element.replaceWith(newElement);
+                }
+            }
+            
+            updateProjectStatus(projectId) {
+                this.currentProjectId = projectId;
+                this.projectStatus.innerHTML = `<span>🚀 Active Project: ${projectId}</span>`;
+                this.projectStatus.classList.add('active');
+            }
+            
+            showTypingIndicator() {
+                const indicator = document.createElement('div');
+                indicator.className = 'typing-indicator';
+                indicator.id = 'typingIndicator';
+                
+                const dots = document.createElement('div');
+                dots.className = 'typing-dots';
+                
+                for (let i = 0; i < 3; i++) {
+                    const dot = document.createElement('div');
+                    dot.className = 'typing-dot';
+                    dots.appendChild(dot);
+                }
+                
+                indicator.appendChild(dots);
+                this.messagesArea.appendChild(indicator);
+                this.scrollToBottom();
+            }
+            
+            hideTypingIndicator() {
+                const indicator = document.getElementById('typingIndicator');
+                if (indicator) {
+                    indicator.remove();
+                }
+            }
+            
+            setStreaming(streaming) {
+                this.isStreaming = streaming;
+                this.sendButton.disabled = streaming;
+                this.messageInput.disabled = streaming;
+                
+                if (streaming) {
+                    this.sendButton.innerHTML = '<span>⏳</span>';
+                } else {
+                    this.sendButton.innerHTML = '<span>→</span>';
+                }
+            }
+            
+            clearChat() {
+                this.messages = [];
+                this.currentConversationId = null;
+                this.currentProjectId = null;
+                this.currentActions.clear();
+                
+                this.messagesArea.innerHTML = `
+                    <div class="empty-state">
+                        <h3>Welcome to AI Code Assistant</h3>
+                        <p>Ask me to create any project or modify existing ones!</p>
+                        
+                        <div class="example-prompts">
+                            <div class="example-prompt" onclick="fillPrompt('Build me a todo app with React and TypeScript')">
+                                📝 Todo App
+                            </div>
+                            <div class="example-prompt" onclick="fillPrompt('Create a simple calculator with dark mode')">
+                                🔢 Calculator
+                            </div>
+                            <div class="example-prompt" onclick="fillPrompt('Build a blog with user authentication')">
+                                📰 Blog
+                            </div>
+                            <div class="example-prompt" onclick="fillPrompt('Create a weather app with API integration')">
+                                🌤️ Weather App
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                this.projectStatus.innerHTML = '<span>💡 Ready to create a new project</span>';
+                this.projectStatus.classList.remove('active');
+            }
+            
+            scrollToBottom() {
+                this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+            }
+        }
+        
+        // Global function for example prompts
+        function fillPrompt(text) {
+            window.chatInterface.fillPrompt(text);
+        }
+        
+        // Initialize the chat interface
+        window.chatInterface = new CleanChatInterface();
+        
+        console.log('🚀 Clean AI Code Assistant loaded and ready!');
+    </script>
+</body>
+</html>

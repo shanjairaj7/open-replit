@@ -2128,8 +2128,8 @@ def _detect_invalid_xml_tags(content):
     
     # Valid action tag patterns that we expect
     valid_action_patterns = [
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
         r'<artifact\s+[^>]*>',
         r'<thinking>'
     ]
