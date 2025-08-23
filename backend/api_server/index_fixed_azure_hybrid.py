@@ -96,16 +96,92 @@ def _create_error_fingerprint(log_line: str) -> str:
     return hashlib.md5(cleaned.lower().strip().encode()).hexdigest()[:8]
 
 def _handle_attempt_completion_interrupt(self: GroqAgentState, action: dict, accumulated_content: str) -> dict:
-    """Handle attempt_completion action - ends the session with completion message"""
+    """Handle attempt_completion action - ends the session with completion message
+    
+    Handles multiple formats:
+    1. <action type="attempt_completion">content</action>
+    2. Plain text "attempt_completion" 
+    3. Other variations in action structure
+    """
     print(f"🎯 Processing attempt completion...")
     
     try:
-        # Extract completion message from action content
-        completion_message = action.get('content', '').strip()
+        completion_message = ""
+        
+        # Method 1: Extract from action content directly
+        if action.get('content'):
+            completion_message = action.get('content', '').strip()
+            print(f"📄 Method 1 - Found content in action: {len(completion_message)} chars")
+        
+        # Method 2: Extract from action text (for different parser results)
+        if not completion_message and action.get('text'):
+            completion_message = action.get('text', '').strip()
+            print(f"📄 Method 2 - Found text in action: {len(completion_message)} chars")
+            
+        # Method 3: Extract from raw XML action tag in accumulated content
+        if not completion_message and accumulated_content:
+            import re
+            # Look for <action type="attempt_completion">content</action>
+            action_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', accumulated_content, re.DOTALL | re.IGNORECASE)
+            if action_match:
+                completion_message = action_match.group(1).strip()
+                print(f"📄 Method 3 - Extracted from XML action tag: {len(completion_message)} chars")
+                
+            # Look for other attempt_completion patterns in content
+            elif 'attempt_completion' in accumulated_content.lower():
+                # Try to extract content after attempt_completion markers
+                lines = accumulated_content.split('\n')
+                capture_content = False
+                captured_lines = []
+                
+                for line in lines:
+                    line_lower = line.lower()
+                    if 'attempt_completion' in line_lower:
+                        capture_content = True
+                        # Skip the line with the marker itself unless it has substantial content
+                        if len(line.strip()) > len('attempt_completion') + 20:  # Has more than just the marker
+                            captured_lines.append(line.strip())
+                    elif capture_content:
+                        # Stop capturing if we hit another action or XML tag
+                        if line.strip().startswith('<') or 'type=' in line:
+                            break
+                        if line.strip():  # Non-empty line
+                            captured_lines.append(line.strip())
+                
+                if captured_lines:
+                    completion_message = '\n'.join(captured_lines).strip()
+                    print(f"📄 Method 4 - Extracted from content patterns: {len(completion_message)} chars")
+        
+        # Method 5: Extract from different action formats that parsers might create
+        if not completion_message:
+            # Check for nested content in action details
+            details = action.get('action_details', {}) or action.get('actionDetails', {})
+            if details and isinstance(details, dict):
+                completion_message = details.get('content', '') or details.get('message', '')
+                if completion_message:
+                    print(f"📄 Method 5 - Found in action details: {len(completion_message)} chars")
+        
+        # Method 6: Look for completion message in action raw attributes
+        if not completion_message:
+            raw_attrs = action.get('raw_attrs', {})
+            if raw_attrs and isinstance(raw_attrs, dict):
+                completion_message = raw_attrs.get('content', '') or raw_attrs.get('message', '')
+                if completion_message:
+                    print(f"📄 Method 6 - Found in raw attributes: {len(completion_message)} chars")
+        
+        # Clean up the completion message
+        if completion_message:
+            # Remove XML tags if they're still present
+            completion_message = re.sub(r'<[^>]+>', '', completion_message)
+            # Clean up extra whitespace
+            completion_message = re.sub(r'\s+', ' ', completion_message).strip()
+        
+        # Fallback to default message
         if not completion_message:
             completion_message = "Task completed successfully."
+            print(f"📄 Using fallback completion message")
         
-        print(f"📝 Completion message: {completion_message[:100]}...")
+        print(f"📝 Final completion message ({len(completion_message)} chars): {completion_message[:100]}...")
         
         # Create completion result
         result = {
@@ -434,7 +510,7 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
                                     _emit_stream("assistant_message", buffered_filtered)
                                 buffered_content_streamed = True
                             elif assistant_chunks_processed > assistant_buffer_delay:
-                                # We're past the buffer delay - stream current chunk normally
+                                # We're past the buffer delay - stream all content immediately
                                 filtered_content = xml_filter.process_chunk(content)
                                 if filtered_content:
                                     _emit_stream("assistant_message", filtered_content)
@@ -812,22 +888,76 @@ Please use the correct action tags to perform actions based on your plan and the
                 final_filtered = buffer_xml_filter.process_chunk(assistant_buffer)
                 if final_filtered:
                     _emit_stream("assistant_message", final_filtered)
+            
             elif has_action_tags:
                 # Check if this is an attempt_completion action - if so, extract and send as assistant message
                 if 'type="attempt_completion"' in assistant_buffer:
                     print(f"🎯 CODER: Found attempt_completion in assistant buffer - extracting completion message")
                     
-                    # Extract the completion message from between the action tags
+                    # Extract the completion message using multiple patterns to handle malformed XML
                     import re
+                    completion_message = ""
+                    
+                    # Pattern 1: Standard closing tag </action>
                     completion_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', assistant_buffer, re.DOTALL)
                     if completion_match:
                         completion_message = completion_match.group(1).strip()
-                        print(f"📝 CODER: Extracted completion message ({len(completion_message)} chars) - sending as assistant message")
+                        print(f"📝 CODER: Pattern 1 - Extracted with </action> closing tag ({len(completion_message)} chars)")
+                    
+                    # Pattern 2: Malformed closing tag </action_completion>
+                    if not completion_message:
+                        completion_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action_completion>', assistant_buffer, re.DOTALL)
+                        if completion_match:
+                            completion_message = completion_match.group(1).strip()
+                            print(f"📝 CODER: Pattern 2 - Extracted with </action_completion> closing tag ({len(completion_message)} chars)")
+                    
+                    # Pattern 3: Extract everything after the opening tag until end of buffer or next tag
+                    if not completion_message:
+                        opening_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*)', assistant_buffer, re.DOTALL)
+                        if opening_match:
+                            raw_content = opening_match.group(1)
+                            # Stop at any closing action tag or end of content
+                            end_match = re.search(r'^(.*?)(?:</action|</action_completion|$)', raw_content, re.DOTALL)
+                            if end_match:
+                                completion_message = end_match.group(1).strip()
+                                print(f"📝 CODER: Pattern 3 - Extracted raw content after opening tag ({len(completion_message)} chars)")
+                    
+                    # Pattern 4: Fallback - find content between attempt_completion markers
+                    if not completion_message:
+                        lines = assistant_buffer.split('\n')
+                        capture_content = False
+                        captured_lines = []
                         
-                        # Send as regular assistant message
+                        for line in lines:
+                            if 'attempt_completion' in line.lower():
+                                capture_content = True
+                                # Check if this line has content beyond the tag
+                                clean_line = re.sub(r'<[^>]*>', '', line).strip()
+                                if clean_line:
+                                    captured_lines.append(clean_line)
+                            elif capture_content:
+                                # Stop at closing tags or new action tags
+                                if re.match(r'^\s*</', line) or '<action' in line:
+                                    break
+                                if line.strip():
+                                    captured_lines.append(line.strip())
+                        
+                        if captured_lines:
+                            completion_message = '\n'.join(captured_lines).strip()
+                            print(f"📝 CODER: Pattern 4 - Extracted from line-by-line parsing ({len(completion_message)} chars)")
+                    
+                    # Clean up the message
+                    if completion_message:
+                        # Remove any remaining XML tags
+                        completion_message = re.sub(r'<[^>]*>', '', completion_message)
+                        # Normalize whitespace
+                        completion_message = re.sub(r'\s+', ' ', completion_message).strip()
+                        
+                        print(f"📝 CODER: Final cleaned completion message ({len(completion_message)} chars): {completion_message[:100]}...")
                         _emit_stream("assistant_message", completion_message)
                     else:
                         print(f"⚠️ CODER: Could not extract completion message from attempt_completion action")
+                        print(f"🐛 DEBUG: assistant_buffer preview: {assistant_buffer[:500]}...")
                         _emit_stream("assistant_message", "Task completed successfully.")
                 else:
                     print(f"🚫 CODER: Discarded {len(assistant_buffer)} chars of assistant content containing action tags")
@@ -866,7 +996,8 @@ Please use the correct action tags to perform actions based on your plan and the
                             "action_type": "read_file",
                             "file_path": file_path,
                             "status": "success",
-                            "result": f"Read {len(file_content)} characters"
+                            "result": f"Read {len(file_content)} characters",
+                            "content": file_content  # ✅ Include actual file content
                         })
                         # Add the read file content to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
@@ -969,7 +1100,8 @@ File content for {interrupt_action.get('path')}:
                             "action_type": "create_file",
                             "file_path": file_path,
                             "status": "success",
-                            "result": f"File '{file_path}' created successfully"
+                            "result": f"File '{file_path}' created successfully",
+                            "content": create_result.get('file_content', '')  # ✅ Include actual file content
                         })
                         
                         # Mark file as read since we just created it
@@ -1099,6 +1231,30 @@ Please continue with your next steps..
                 elif interrupt_action.get('type') == 'update_file':
                     update_result = self._handle_update_file_interrupt(interrupt_action)
                     if update_result is not None:
+                        file_path = interrupt_action.get('path')
+                        
+                        # Read the updated file content to include in the stream
+                        updated_content = None
+                        if "successfully" in str(update_result).lower():
+                            try:
+                                updated_content = self._read_file_via_api(file_path)
+                                print(f"📖 Read updated file content: {len(updated_content) if updated_content else 0} characters")
+                            except Exception as e:
+                                print(f"⚠️ Could not read updated file content: {e}")
+                        
+                        # Emit streaming event for update_file result
+                        emit_data = {
+                            "action_type": "update_file",
+                            "file_path": file_path,
+                            "status": "success" if "successfully" in str(update_result).lower() else "error",
+                            "result": str(update_result)
+                        }
+                        
+                        # Include updated content if available
+                        if updated_content is not None:
+                            emit_data["content"] = updated_content
+                            
+                        _emit_stream("action_result", f"Updated file: {file_path}", emit_data)
                         # Check if this is an empty file warning
                         if isinstance(update_result, str) and "File update blocked" in update_result:
                             print(f"⚠️ File update blocked due to empty content")
@@ -1782,6 +1938,67 @@ Great! You've completed a todo. Please continue with the next highest priority t
                  # No interruption, process any remaining actions and finish
                 print("🎬 CODER: No interrupt detected, processing remaining actions...")
                 print(f"📝 CODER: Processing remaining actions with {len(accumulated_content)} chars of content")
+                
+                # CRITICAL: Check if attempt_completion was encountered in this iteration
+                # Enhanced detection for multiple attempt_completion formats
+                attempt_completion_detected = False
+                detected_completion_message = ""
+                
+                # Method 1: Direct text search (existing)
+                if 'attempt_completion' in accumulated_content.lower():
+                    attempt_completion_detected = True
+                    print("🎯 CODER: Method 1 - attempt_completion detected in content text")
+                
+                # Method 2: XML action tag detection
+                if not attempt_completion_detected:
+                    import re
+                    action_pattern = r'<action[^>]*type="attempt_completion"[^>]*>'
+                    if re.search(action_pattern, accumulated_content, re.IGNORECASE):
+                        attempt_completion_detected = True
+                        print("🎯 CODER: Method 2 - attempt_completion detected in XML action tag")
+                        
+                        # Extract completion message from XML tag
+                        full_action_pattern = r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>'
+                        action_match = re.search(full_action_pattern, accumulated_content, re.DOTALL | re.IGNORECASE)
+                        if action_match:
+                            detected_completion_message = action_match.group(1).strip()
+                            print(f"📝 CODER: Extracted completion message from XML: {len(detected_completion_message)} chars")
+                
+                # Method 3: Check for completion-related patterns
+                if not attempt_completion_detected:
+                    completion_patterns = [
+                        r'task\s+complete', r'completed\s+successfully', r'implementation\s+complete',
+                        r'project\s+complete', r'work\s+complete', r'finished\s+implementing'
+                    ]
+                    
+                    for pattern in completion_patterns:
+                        if re.search(pattern, accumulated_content, re.IGNORECASE):
+                            # Additional context clues that suggest this is a completion
+                            completion_indicators = ['summary', 'accomplished', 'delivered', 'built', 'created']
+                            if any(indicator in accumulated_content.lower() for indicator in completion_indicators):
+                                print(f"🎯 CODER: Method 3 - Potential completion detected with pattern: {pattern}")
+                                # Note: Don't auto-trigger on this method, just log for debugging
+                                break
+                
+                if attempt_completion_detected:
+                    print("🎯 CODER: attempt_completion detected in content - ENDING SESSION IMMEDIATELY")
+                    print("🏁 CODER: Session terminated by attempt_completion action")
+                    
+                    # If we extracted a specific completion message, add it to the response
+                    if detected_completion_message:
+                        print(f"📝 CODER: Including extracted completion message in final response")
+                        # Clean up the completion message  
+                        detected_completion_message = re.sub(r'<[^>]+>', '', detected_completion_message)
+                        detected_completion_message = re.sub(r'\s+', ' ', detected_completion_message).strip()
+                        
+                        # Ensure the completion message is visible in the response
+                        final_response = full_response + accumulated_content
+                        if detected_completion_message not in final_response:
+                            final_response += f"\n\n{detected_completion_message}"
+                        return final_response
+                    
+                    return full_response + accumulated_content
+                
                 self._process_remaining_actions(accumulated_content)
                 
                 # Check if we have an incomplete action (opened but not closed)
@@ -1960,6 +2177,12 @@ Please continue working on the next highest priority todo. Remember to:
         except Exception as e:
             print(f"❌ CODER: Exception during generation in iteration {iteration}: {e}")
             print(f"🔍 CODER: Exception type: {type(e).__name__}")
+            
+            # If this is a FrontendCommandInterrupt, re-raise it to bubble up to streaming API
+            if e.__class__.__name__ == 'FrontendCommandInterrupt':
+                print("🚨 CODER: FrontendCommandInterrupt detected - re-raising to streaming API...")
+                raise e
+            
             import traceback
             print("📚 CODER: Full traceback:")
             traceback.print_exc()

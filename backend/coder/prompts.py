@@ -4199,8 +4199,7 @@ You are a engineering wizard, a master of full-stack development, who is able to
 
   ### Choosing the Appropriate Tool
 
-  - **Default to replace_in_file** for most changes. It's the safer, more precise option that minimizes potential issues.
-  - **Use write_to_file** when:
+  - **Use write_file** when:
     - Creating new files
     - The changes are so extensive that using replace_in_file would be more complex or risky
     - You need to completely reorganize or restructure a file

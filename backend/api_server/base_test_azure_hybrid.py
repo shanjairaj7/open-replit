@@ -18,6 +18,7 @@ import argparse
 import uuid
 from datetime import datetime
 from pathlib import Path
+from cloud_storage import AzureBlobStorage
 import sys
 
 # Add the parent directory to sys.path to enable imports
@@ -69,6 +70,16 @@ openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='sk-or-v
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"
 
 from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, atlas_gpt4_prompt, atlas_gpt4_ultra_prompt, atlas_gpt4_short_prompt, prompt
+
+# Custom exception for frontend command interrupts
+class FrontendCommandInterrupt(Exception):
+    """Exception raised when frontend terminal command should interrupt the stream"""
+    def __init__(self, command: str, cwd: str, action: dict, project_id: str):
+        self.command = command
+        self.cwd = cwd
+        self.action = action
+        self.project_id = project_id
+        super().__init__(f"Frontend command interrupt: {command} in {cwd}")
 
 # Import the appropriate coder based on mode
 if USE_AZURE_MODE:
@@ -133,9 +144,20 @@ class BoilerplatePersistentGroq:
         self.project_id = project_id
         print(f"🐛 DEBUG: Initial project_id set to: {self.project_id}")
         
+        # Initialize cloud storage
+        try:
+            self.cloud_storage = AzureBlobStorage()
+            print("☁️ Cloud storage initialized successfully")
+        except Exception as e:
+            print(f"⚠️ Warning: Cloud storage initialization failed: {e}")
+            self.cloud_storage = None
+        
         # Track files that have been read - project-specific persistence
         self.read_files_tracker = set()  # Files read in current session
         self.read_files_persistent = set()  # Files read across all sessions for THIS project
+        
+        # Initialize available files list for cloud-first architecture
+        self.available_files = []  # Files available in cloud storage (no content loaded)
         
         self.todos = []
         # Initialize persistent todo storage
@@ -163,8 +185,9 @@ class BoilerplatePersistentGroq:
             self.project_files = {}
             
             # Only call API if this looks like a real project (not a test)
-            if not self.project_id.startswith('test-'):
-                self._scan_project_files_via_api()
+            # Skip scanning for simple unit tests but allow cloud scanning tests
+            if not self.project_id.startswith('test-project-'):  # Only skip very basic test projects
+                self._scan_project_files_via_cloud_storage()
                 
                 # Load project summary and conversation history
                 self._load_project_context()
@@ -187,14 +210,18 @@ class BoilerplatePersistentGroq:
             # Create new project
             if project_name:
                 self.project_name = project_name
-                self.project_id = self.create_project_via_api(project_name)
+                self.project_id = self.create_project_via_cloud_storage(project_name)
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.project_name = f"project_{timestamp}"
-                self.project_id = self.create_project_via_api(self.project_name)
+                self.project_id = self.create_project_via_cloud_storage(self.project_name)
                 
             self.project_files = {}
-            self._scan_project_files_via_api()
+            # Use cloud storage scanning for existing projects
+            if self.cloud_storage:
+                self._scan_project_files_via_cloud_storage()
+            else:
+                self._scan_project_files_via_api()
             
             # Load system prompt from file (after project setup)
             self.system_prompt = self._load_system_prompt()
@@ -242,32 +269,73 @@ class BoilerplatePersistentGroq:
             self.project_summary = "No project summary available."
             print(f"⚠️  No project summary found at: {summary_file}")
         
-        # Load conversation history
-        conversations_dir = self.backend_dir / "project_conversations"
-        conversations_dir.mkdir(exist_ok=True)
+        # Load conversation history - CLOUD FIRST, LOCAL FALLBACK
+        conversation_loaded = False
         
-        conversation_file = conversations_dir / f"{self.project_id}_messages.json"
-        
-        if conversation_file.exists():
-            with open(conversation_file, 'r', encoding='utf-8') as f:
-                conversation_data = json.load(f)
-                self.conversation_history = conversation_data.get('messages', [])
+        # Try loading from cloud storage first
+        if self.cloud_storage and self.project_id:
+            try:
+                print(f"☁️ Attempting to load conversation history from cloud storage for project: {self.project_id}")
+                cloud_conversation_history = self.cloud_storage.load_conversation_history(self.project_id)
                 
-                # Load token usage from conversation data
-                if 'token_usage' in conversation_data:
-                    # Ensure backwards compatibility with old token format
-                    old_usage = conversation_data['token_usage']
-                    self.token_usage = {
-                        'total_tokens': old_usage.get('total_tokens', 0),
-                        'prompt_tokens': old_usage.get('total_prompt_tokens', 0),
-                        'completion_tokens': old_usage.get('total_completion_tokens', 0)
-                    }
-            print(f"💬 Loaded conversation history from: {conversation_file}")
-            print(f"📚 Loaded read files tracker: {len(self.read_files_persistent)} files previously read")
-            if 'token_usage' in conversation_data:
-                print(f"💰 Total tokens used: {self.token_usage['total_tokens']:,}")
+                if cloud_conversation_history and len(cloud_conversation_history) > 0:
+                    self.conversation_history = cloud_conversation_history
+                    conversation_loaded = True
+                    print(f"☁️ ✅ Loaded conversation history from cloud storage: {len(self.conversation_history)} messages")
+                    
+                    # Try to load token usage from cloud metadata
+                    project_metadata = self.cloud_storage.load_project_metadata(self.project_id)
+                    if project_metadata and 'token_usage' in project_metadata:
+                        self.token_usage = project_metadata['token_usage']
+                        print(f"💰 Loaded token usage from cloud metadata: {self.token_usage['total_tokens']:,} total tokens")
+                else:
+                    print(f"☁️ No conversation history found in cloud storage")
+                    
+            except Exception as e:
+                print(f"⚠️ Failed to load conversation history from cloud: {str(e)}")
+        
+        # Fallback to local file if cloud failed or not available
+        if not conversation_loaded:
+            print(f"💾 Falling back to local conversation history file")
+            conversations_dir = self.backend_dir / "project_conversations"
+            conversations_dir.mkdir(exist_ok=True)
+            
+            conversation_file = conversations_dir / f"{self.project_id}_messages.json"
+            
+            if conversation_file.exists():
+                try:
+                    with open(conversation_file, 'r', encoding='utf-8') as f:
+                        conversation_data = json.load(f)
+                        self.conversation_history = conversation_data.get('messages', [])
+                        
+                        # Load token usage from conversation data
+                        if 'token_usage' in conversation_data:
+                            # Ensure backwards compatibility with old token format
+                            old_usage = conversation_data['token_usage']
+                            self.token_usage = {
+                                'total_tokens': old_usage.get('total_tokens', 0),
+                                'prompt_tokens': old_usage.get('total_prompt_tokens', 0),
+                                'completion_tokens': old_usage.get('total_completion_tokens', 0)
+                            }
+                        
+                    print(f"💾 ✅ Loaded conversation history from local file: {conversation_file}")
+                    print(f"💬 Messages loaded: {len(self.conversation_history)}")
+                    if 'token_usage' in conversation_data:
+                        print(f"💰 Total tokens used: {self.token_usage['total_tokens']:,}")
+                    conversation_loaded = True
+                    
+                except Exception as e:
+                    print(f"❌ Failed to load local conversation file: {str(e)}")
+            else:
+                print(f"📄 No local conversation history found at: {conversation_file}")
+        
+        # Final status
+        if conversation_loaded:
+            print(f"✅ Conversation history loaded successfully: {len(self.conversation_history)} messages")
+            print(f"📚 Read files tracker: {len(self.read_files_persistent)} files previously read")
         else:
-            print(f"⚠️  No conversation history found at: {conversation_file}")
+            print(f"⚠️ No conversation history found in cloud or local storage - starting fresh")
+            self.conversation_history = []  # Ensure it's initialized
 
     def _save_conversation_history(self):
         """Save current conversation history to JSON file"""
@@ -304,10 +372,38 @@ class BoilerplatePersistentGroq:
             }
         }
         
-        with open(conversation_file, 'w', encoding='utf-8') as f:
-            json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+        # Ensure local file path exists for fallback
+        conversations_dir = self.backend_dir / "project_conversations"
+        conversations_dir.mkdir(exist_ok=True)
+        conversation_file = conversations_dir / f"{self.project_id}_messages.json"
         
-        print(f"💾 Saved conversation history to: {conversation_file}")
+        # Save to cloud storage if available, fallback to local file
+        if self.cloud_storage and self.project_id:
+            # Save conversation history
+            success = self.cloud_storage.save_conversation_history(self.project_id, self.conversation_history)
+            
+            # Also save project metadata with token usage
+            metadata_success = self.cloud_storage.save_project_metadata(self.project_id, {
+                "token_usage": self.token_usage,
+                "project_state": conversation_data["project_state"],
+                "last_conversation_update": datetime.now().isoformat()
+            })
+            
+            if success and metadata_success:
+                print(f"☁️ Saved conversation history and metadata to cloud storage")
+            elif success:
+                print(f"☁️ Saved conversation history to cloud storage (metadata save failed)")
+            else:
+                print(f"⚠️ Failed to save conversation to cloud, falling back to local file")
+                # Fallback to local file
+                with open(conversation_file, 'w', encoding='utf-8') as f:
+                    json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+                print(f"💾 Saved conversation history to: {conversation_file}")
+        else:
+            # Fallback to local file if cloud storage not available
+            with open(conversation_file, 'w', encoding='utf-8') as f:
+                json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+            print(f"💾 Saved conversation history to: {conversation_file}")
 
     def _check_and_summarize_conversation(self, is_mid_task=False):
         """Check if conversation needs summarization and create detailed summary"""
@@ -653,11 +749,23 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
     def _generate_realtime_file_tree(self) -> str:
         """Generate real-time file tree for current project state"""
         try:
-            # Refresh project files from VPS
-            self._scan_project_files_via_api()
+            print(f"🐛 FILETREE DEBUG: hasattr available_files: {hasattr(self, 'available_files')}")
+            print(f"🐛 FILETREE DEBUG: available_files length: {len(getattr(self, 'available_files', []))}")
+            print(f"🐛 FILETREE DEBUG: project_files length: {len(self.project_files)}")
+            print(f"🐛 FILETREE DEBUG: cloud_storage available: {self.cloud_storage is not None}")
             
-            if not self.project_files:
-                return "No files found in project"
+            # Use cloud-first approach - check available_files first
+            if hasattr(self, 'available_files') and self.available_files:
+                files_to_process = self.available_files
+                print(f"📁 Using available_files from cloud storage: {len(files_to_process)} files")
+            else:
+                print(f"🐛 FILETREE DEBUG: available_files is empty or missing, falling back to local scan")
+                # Fallback to local scanning if cloud files not available
+                self._scan_project_files_via_api()
+                if not self.project_files:
+                    return "No files found in project"
+                files_to_process = list(self.project_files.keys())
+                print(f"📁 Using project_files from local scan: {len(files_to_process)} files")
             
             # Define files/folders to exclude - comprehensive list
             exclude_patterns = [
@@ -697,7 +805,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             ]
             
             # Sort files by path for consistent tree structure
-            sorted_files = sorted(self.project_files.keys())
+            sorted_files = sorted(files_to_process)
             
             # Track filtering for debugging
             total_files = len(sorted_files)
@@ -772,7 +880,19 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return f"Error loading file tree: {e}"
 
     def _load_read_files_tracking(self):
-        """Load project-specific read files tracking from JSON file"""
+        """Load project-specific read files tracking from cloud storage"""
+        # Load from cloud storage if available, fallback to local file
+        if self.cloud_storage and self.project_id:
+            read_files_set = self.cloud_storage.load_read_files_tracking(self.project_id)
+            if read_files_set:
+                self.read_files_persistent = read_files_set
+                print(f"☁️ Loaded read files tracking from cloud storage")
+                print(f"📖 Previously read files: {len(self.read_files_persistent)} files")
+                return
+            else:
+                print(f"📄 No read files tracking found in cloud storage, checking local file")
+        
+        # Fallback to local file
         read_files_dir = self.backend_dir / "project_read_files"
         read_files_dir.mkdir(exist_ok=True)
         
@@ -782,13 +902,27 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             with open(read_files_file, 'r', encoding='utf-8') as f:
                 read_files_data = json.load(f)
                 self.read_files_persistent = set(read_files_data.get('read_files', []))
-            print(f"📚 Loaded read files tracking from: {read_files_file}")
+            print(f"📚 Loaded read files tracking from local file: {read_files_file}")
             print(f"📖 Previously read files: {len(self.read_files_persistent)} files")
         else:
-            print(f"⚠️  No read files tracking found at: {read_files_file}")
+            print(f"⚠️ No read files tracking found locally or in cloud")
     
     def _save_read_files_tracking(self):
-        """Save project-specific read files tracking to JSON file"""
+        """Save project-specific read files tracking to cloud storage"""
+        # Save to cloud storage if available, fallback to local file
+        if self.cloud_storage and self.project_id:
+            success = self.cloud_storage.save_read_files_tracking(self.project_id, self.read_files_persistent)
+            if success:
+                print(f"☁️ Saved read files tracking to cloud storage")
+            else:
+                print(f"⚠️ Failed to save read files tracking to cloud, falling back to local file")
+                self._save_read_files_tracking_local()
+        else:
+            # Fallback to local file if cloud storage not available
+            self._save_read_files_tracking_local()
+    
+    def _save_read_files_tracking_local(self):
+        """Save read files tracking to local JSON file (fallback)"""
         read_files_dir = self.backend_dir / "project_read_files"
         read_files_dir.mkdir(exist_ok=True)
         
@@ -808,8 +942,67 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         print(f"📚 Saved read files tracking to: {read_files_file}")
 
 
+    def create_project_via_cloud_storage(self, project_name: str) -> str:
+        """Create project using cloud storage and GitHub repositories"""
+        try:
+            if not self.cloud_storage:
+                print("⚠️ Cloud storage not available, falling back to API method")
+                return self.create_project_via_api(project_name)
+            
+            project_id = project_name
+            
+            # Check if project already exists in cloud storage
+            existing_metadata = self.cloud_storage.load_project_metadata(project_id)
+            if existing_metadata:
+                print(f"☁️ Using existing cloud project: {project_name} (ID: {project_id})")
+                return project_id
+            
+            print(f"🚀 Creating new project in cloud storage: {project_name}")
+            
+            # Clone GitHub repositories to cloud storage
+            frontend_repo = "https://github.com/shanjairaj7/frontend-boilerplate.git"
+            backend_repo = "https://github.com/shanjairaj7/backend-boilerplate.git"
+            
+            print(f"📡 Cloning frontend boilerplate from GitHub...")
+            frontend_success = self.cloud_storage.clone_from_github(project_id, frontend_repo, "frontend")
+            
+            print(f"📡 Cloning backend boilerplate from GitHub...")
+            backend_success = self.cloud_storage.clone_from_github(project_id, backend_repo, "backend")
+            
+            if frontend_success and backend_success:
+                # Create project metadata
+                metadata = {
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "created_at": datetime.now().isoformat(),
+                    "frontend_repo": frontend_repo,
+                    "backend_repo": backend_repo,
+                    "creation_method": "cloud_storage_github",
+                    "status": "initialized"
+                }
+                
+                # Save project metadata
+                metadata_success = self.cloud_storage.save_project_metadata(project_id, metadata)
+                
+                if metadata_success:
+                    print(f"✅ Project created successfully in cloud storage")
+                    print(f"📁 Frontend: Cloned from {frontend_repo}")
+                    print(f"📁 Backend: Cloned from {backend_repo}")
+                    return project_id
+                else:
+                    print(f"⚠️ Project files created but metadata save failed")
+                    return project_id
+            else:
+                print(f"❌ Failed to clone repositories, falling back to API method")
+                return self.create_project_via_api(project_name)
+                
+        except Exception as e:
+            print(f"❌ Error creating project in cloud storage: {e}")
+            print(f"🔄 Falling back to API method")
+            return self.create_project_via_api(project_name)
+    
     def create_project_via_api(self, project_name: str) -> str:
-        """Create project via API"""
+        """Create project via API (fallback method)"""
         try:
             # Check if project already exists
             projects_response = requests.get(f"http://localhost:8000/api/projects")
@@ -898,9 +1091,34 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return ""
 
     def _read_file_via_api(self, file_path: str, start_line: str = None, end_line: str = None) -> str:
-        """Read file content from project via VPS API"""
+        """Read file content from Azure Blob Storage"""
         try:
-            # Call VPS API to read file
+            # Use cloud storage if available, fallback to API
+            if self.cloud_storage and self.project_id:
+                content = self.cloud_storage.download_file(self.project_id, file_path)
+                
+                if content is not None:
+                    # Handle line ranges if specified
+                    if start_line or end_line:
+                        lines = content.split('\n')
+                        start_idx = int(start_line) - 1 if start_line else 0
+                        end_idx = int(end_line) if end_line else len(lines)
+                        
+                        # Ensure valid range
+                        start_idx = max(0, start_idx)
+                        end_idx = min(len(lines), end_idx)
+                        
+                        if start_idx < end_idx:
+                            content = '\n'.join(lines[start_idx:end_idx])
+                        else:
+                            content = ""
+                    
+                    return content
+                else:
+                    print(f"📄 File not found in cloud storage: {file_path}")
+                    return None
+            
+            # Fallback to VPS API if cloud storage not available
             response = requests.get(f"{self.api_base_url}/projects/{self.project_id}/files/{file_path}")
             
             if response.status_code == 200:
@@ -932,9 +1150,26 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return None
 
     def _write_file_via_api(self, file_path: str, content: str) -> dict:
-        """Write file content via API and return result with Python errors if any"""
+        """Write file content to Azure Blob Storage and return result with Python errors if any"""
         try:
-            # VPS API uses PUT with file path in URL
+            # Use cloud storage if available, fallback to API
+            if self.cloud_storage and self.project_id:
+                success = self.cloud_storage.upload_file(self.project_id, file_path, content)
+                
+                if success:
+                    print(f"☁️ Successfully wrote to cloud storage: {file_path}")
+                    return {
+                        "success": True,
+                        "python_errors": "",
+                        "python_check_status": {"executed": False, "success": True},
+                        "typescript_errors": "", 
+                        "typescript_check_status": {"executed": False, "success": True}
+                    }
+                else:
+                    print(f"❌ Failed to write to cloud storage: {file_path}")
+                    return {"success": False, "error": "Failed to upload to cloud storage"}
+            
+            # Fallback to VPS API if cloud storage not available
             payload = {"content": content}
             response = requests.put(f"{self.api_base_url}/projects/{self.project_id}/files/{file_path}", json=payload)
             
@@ -989,8 +1224,26 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return {"success": False, "error": error_msg}
 
     def _update_file_via_api(self, file_path: str, content: str) -> dict:
-        """Update file via API"""
+        """Update file via Azure Blob Storage with API fallback"""
         try:
+            # Use cloud storage if available, fallback to API
+            if self.cloud_storage and self.project_id:
+                success = self.cloud_storage.upload_file(self.project_id, file_path, content)
+                
+                if success:
+                    print(f"☁️ Successfully updated via cloud storage: {file_path}")
+                    return {
+                        "status": "updated",
+                        "file": file_path,
+                        "python_errors": "",
+                        "python_check_status": {"executed": False, "success": True},
+                        "typescript_errors": "", 
+                        "typescript_check_status": {"executed": False, "success": True}
+                    }
+                else:
+                    print(f"⚠️ Cloud storage update failed, trying API fallback")
+            
+            # Fallback to API if cloud storage not available or failed
             payload = {
                 "content": content
             }
@@ -998,6 +1251,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             
             if response.status_code == 200:
                 data = response.json()
+                print(f"📡 Successfully updated via API fallback: {file_path}")
                 return {
                     "status": "updated",
                     "file": data.get('file', file_path)
@@ -1008,12 +1262,39 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 return {"status": "error", "error": error_msg}
         except Exception as e:
             error_msg = f"Exception: {str(e)}"
-            print(f"⚠️ Error updating file via API: {error_msg}")
+            print(f"⚠️ Error updating file: {error_msg}")
             return {"status": "error", "error": error_msg}
 
     def _rename_file_via_api(self, old_path: str, new_name: str) -> dict:
-        """Rename file via API"""
+        """Rename file via Azure Blob Storage with API fallback"""
         try:
+            # Use cloud storage if available
+            if self.cloud_storage and self.project_id:
+                # Read the current file content
+                content = self.cloud_storage.download_file(self.project_id, old_path)
+                if content is not None:
+                    # Create the new file path
+                    path_parts = old_path.split('/')
+                    path_parts[-1] = new_name  # Replace filename with new name
+                    new_path = '/'.join(path_parts)
+                    
+                    # Upload to new location and delete old file
+                    upload_success = self.cloud_storage.upload_file(self.project_id, new_path, content)
+                    delete_success = self.cloud_storage.delete_file(self.project_id, old_path)
+                    
+                    if upload_success and delete_success:
+                        print(f"☁️ Successfully renamed via cloud storage: {old_path} -> {new_path}")
+                        return {
+                            "status": "renamed",
+                            "old_path": old_path,
+                            "new_path": new_path
+                        }
+                    else:
+                        print(f"⚠️ Cloud storage rename failed, trying API fallback")
+                else:
+                    print(f"⚠️ Could not read file for rename, trying API fallback")
+            
+            # Fallback to API if cloud storage not available or failed
             payload = {
                 "new_name": new_name
             }
@@ -1021,6 +1302,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             
             if response.status_code == 200:
                 data = response.json()
+                print(f"📡 Successfully renamed via API fallback: {old_path}")
                 return {
                     "status": "renamed",
                     "old_path": old_path,
@@ -1032,16 +1314,31 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 return {"status": "error", "error": error_msg}
         except Exception as e:
             error_msg = f"Exception: {str(e)}"
-            print(f"⚠️ Error renaming file via API: {error_msg}")
+            print(f"⚠️ Error renaming file: {error_msg}")
             return {"status": "error", "error": error_msg}
 
     def _delete_file_via_api(self, file_path: str) -> dict:
-        """Delete file via API"""
+        """Delete file via Azure Blob Storage with API fallback"""
         try:
+            # Use cloud storage if available
+            if self.cloud_storage and self.project_id:
+                success = self.cloud_storage.delete_file(self.project_id, file_path)
+                
+                if success:
+                    print(f"☁️ Successfully deleted via cloud storage: {file_path}")
+                    return {
+                        "status": "deleted", 
+                        "file": file_path
+                    }
+                else:
+                    print(f"⚠️ Cloud storage deletion failed, trying API fallback")
+            
+            # Fallback to API if cloud storage not available or failed
             response = requests.delete(f"{self.api_base_url}/projects/{self.project_id}/files/{file_path}")
             
             if response.status_code == 200:
                 data = response.json()
+                print(f"📡 Successfully deleted via API fallback: {file_path}")
                 return {
                     "status": "deleted", 
                     "file": data.get('file', file_path)
@@ -1061,9 +1358,68 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 return {"status": "error", "error": error_msg}
         except Exception as e:
             error_msg = f"Exception: {str(e)}"
-            print(f"⚠️ Error deleting file via API: {error_msg}")
+            print(f"⚠️ Error deleting file: {error_msg}")
             return {"status": "error", "error": error_msg}
 
+    
+    def _scan_project_files_via_cloud_storage(self):
+        """Scan project files from Azure Blob Storage - get file list only, NO content download"""
+        self.project_files = {}  # Keep empty - files accessed directly from cloud when needed
+        
+        print(f"🔍 DEBUG: cloud_storage available: {self.cloud_storage is not None}")
+        print(f"🔍 DEBUG: project_id: {self.project_id}")
+        
+        if not self.cloud_storage:
+            print("⚠️ Cloud storage not available, falling back to API scanning")
+            self._scan_project_files_via_api()
+            return
+        
+        print(f"☁️ Scanning project file structure in cloud storage: {self.project_id}")
+        
+        try:
+            # Get file list from cloud storage (metadata only, no content)
+            all_files = self.cloud_storage.list_files(self.project_id)
+            
+            if not all_files:
+                print(f"📂 No files found in cloud storage for project: {self.project_id}")
+                return
+            
+            # Filter and organize files (same filtering as before)
+            exclude_patterns = [
+                'node_modules/', '__pycache__/', '.git/', '.vscode/', '.idea/',
+                'dist/', 'build/', '.next/', '.vite/', 'coverage/', '.mypy_cache/',
+                '.pytest_cache/', '.tox/', 'venv/', '.env', 'test_env/', 
+                '.DS_Store', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'
+            ]
+            
+            filtered_files = []
+            for file_path in all_files:
+                # Skip system/config files that shouldn't be in project tree
+                should_skip = False
+                file_lower = file_path.lower()
+                
+                for pattern in exclude_patterns:
+                    if pattern.endswith('/') and pattern in f"/{file_lower}/":
+                        should_skip = True
+                        break
+                    elif not pattern.endswith('/') and pattern in file_lower:
+                        should_skip = True
+                        break
+                
+                if not should_skip and not file_path.startswith('.'):
+                    filtered_files.append(file_path)
+            
+            # Store file list for reference, but NO CONTENT DOWNLOAD
+            self.available_files = filtered_files  # Track available files without loading content
+            
+            print(f"📁 Found {len(filtered_files)} available files (filtered from {len(all_files)} total)")
+            print(f"☁️ Files will be loaded from cloud storage only when accessed via _read_file_via_api")
+            print(f"🎯 Cloud-first architecture: No local file caching, direct cloud access only")
+            
+        except Exception as e:
+            print(f"❌ Error scanning cloud storage: {e}")
+            print("🔄 Falling back to API scanning method")
+            self._scan_project_files_via_api()
     
     def _scan_project_files_via_api(self):
         """Scan LOCAL project directory and build file tree"""
@@ -1334,7 +1690,14 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                     print(f"  ✅ Kept assistant message")
         
         # Add current user message with real-time file tree
+        print(f"🐛 DEBUG: About to generate file tree...")
+        print(f"🐛 DEBUG: available_files count: {len(getattr(self, 'available_files', []))}")
+        print(f"🐛 DEBUG: project_files count: {len(self.project_files)}")
+        
         file_tree = self._generate_realtime_file_tree()
+        print(f"🐛 DEBUG: Generated file_tree length: {len(file_tree)} characters")
+        print(f"🐛 DEBUG: File tree preview: {file_tree[:200]}...")
+        
         enhanced_user_message = f"{user_message}\n\n<project_files>\n{file_tree}\n</project_files>"
         messages.append({"role": "user", "content": enhanced_user_message})
         
@@ -1525,29 +1888,319 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return None
 
     def _handle_run_command_interrupt(self, action: dict) -> str:
-        """Handle run_command action during interrupt"""
+        """Handle run_command action with cloud storage integration and frontend interrupt flow"""
         command = action.get('command')
         cwd = action.get('cwd')
         
-        print(f"💻 Running command: {command}")
+        print(f"💻 Processing terminal command: {command}")
         if cwd:
             print(f"   Working directory: {cwd}")
 
+        # Normalize cwd: treat '.', '', or None as 'frontend' (project root)
+        if cwd in ['.', '', None]:
+            cwd = 'frontend'
+        
         if cwd not in ['frontend', 'backend']:
             return f"`cwd` must be 'frontend' or 'backend'. It cannot be {cwd}. Do you want to run the test for the frontend or backend?"
         
-        # Execute command via API
-        command_output = self._execute_command_via_api(command, cwd)
+        # Phase 6: ALL Terminal Commands (Interrupt Flow)
+        # Both frontend and backend commands should interrupt for user control
+        if cwd == 'frontend':
+            return self._handle_frontend_command_interrupt(command, cwd, action)
+        elif cwd == 'backend':
+            return self._handle_backend_command_interrupt(command, cwd, action)
         
-        if command_output and command_output.get('success'):
-            output = command_output.get('output', '')
-            print(f"✅ Command completed successfully")
-            print(f"📄 Output length: {len(output)} characters")
-            return output
+        return "Invalid working directory. Use 'frontend' or 'backend'."
+    
+    def _handle_frontend_command_interrupt(self, command: str, cwd: str, action: dict) -> str:
+        """Handle frontend commands with ACTUAL interrupt and cloud storage flow"""
+        print(f"🌐 FRONTEND COMMAND DETECTED: {command}")
+        print(f"📤 INTERRUPTING STREAM - Frontend will execute this command...")
+        
+        # Save current conversation state to cloud storage before interrupt
+        if self.cloud_storage and self.project_id:
+            try:
+                print(f"☁️ Saving conversation state to cloud storage before frontend interrupt...")
+                save_success = self.cloud_storage.save_conversation_history(
+                    self.project_id, 
+                    self.conversation_history
+                )
+                if save_success:
+                    print(f"✅ Conversation state saved to cloud storage")
+                else:
+                    print(f"⚠️ Warning: Failed to save conversation state to cloud")
+            except Exception as e:
+                print(f"⚠️ Error saving conversation state: {e}")
+        
+        # CRITICAL: Raise special exception to interrupt the stream
+        # This will break out of the coder iteration loop and end streaming
+        # Frontend will receive this command via the stream and execute it
+        # Then frontend will send action_result back via chatstream API
+        raise FrontendCommandInterrupt(command, cwd, action, self.project_id)
+    
+    def _handle_backend_command_interrupt(self, command: str, cwd: str, action: dict) -> str:
+        """Handle backend commands with ACTUAL interrupt (same as frontend)"""
+        print(f"🔧 BACKEND COMMAND DETECTED: {command}")
+        print(f"📤 INTERRUPTING STREAM - User will execute this backend command...")
+        
+        # Save current conversation state to cloud storage before interrupt
+        if self.cloud_storage and self.project_id:
+            try:
+                print(f"☁️ Saving conversation state to cloud storage before backend interrupt...")
+                save_success = self.cloud_storage.save_conversation_history(
+                    self.project_id, 
+                    self.conversation_history
+                )
+                if save_success:
+                    print(f"✅ Conversation state saved to cloud storage")
+                else:
+                    print(f"⚠️ Warning: Failed to save conversation state to cloud")
+            except Exception as e:
+                print(f"⚠️ Error saving conversation state: {e}")
+        
+        # CRITICAL: Raise special exception to interrupt the stream
+        # This will break out of the coder iteration loop and end streaming
+        # Frontend will receive this command via the stream and execute it
+        # Then frontend will send action_result back via chatstream API
+        raise FrontendCommandInterrupt(command, cwd, action, self.project_id)
+    
+    def _handle_backend_command_placeholder(self, command: str, cwd: str, action: dict) -> str:
+        """Handle backend commands with realistic placeholder responses"""
+        import time
+        
+        print(f"⚙️ BACKEND COMMAND: {command}")
+        print(f"🔧 Generating realistic placeholder response...")
+        
+        # Add 2-second delay as specified in requirements
+        print(f"⏱️ Simulating backend command execution (2s delay)...")
+        time.sleep(2.0)
+        
+        # Generate realistic placeholder based on command type
+        placeholder_response = self._generate_backend_command_placeholder(command)
+        
+        print(f"📋 Generated backend command placeholder response")
+        print(f"📄 Response length: {len(placeholder_response)} characters")
+        
+        # TODO: Phase 6 Implementation - Backend Command Integration
+        # In the complete implementation, this should:
+        # 1. Send command to VPS backend service
+        # 2. Execute command in proper backend container/environment
+        # 3. Return real command output
+        # 4. Handle errors and edge cases properly
+        # Currently using placeholder responses to prepare for VPS integration
+        
+        return placeholder_response
+    
+    def _generate_frontend_command_placeholder(self, command: str) -> str:
+        """Generate realistic frontend command placeholder responses"""
+        command_lower = command.lower().strip()
+        
+        # npm/yarn commands
+        if 'npm install' in command_lower or 'npm i' in command_lower:
+            return """npm WARN deprecated some-package@1.0.0: Package deprecated
+npm WARN deprecated another-package@2.0.0: Use new-package instead
+
+added 1234 packages, and audited 1235 packages in 12s
+
+156 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities"""
+        
+        elif 'npm run dev' in command_lower or 'npm start' in command_lower:
+            return """
+> vite
+
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+
+🎯 Frontend development server started successfully!
+⚡ Hot reload enabled - your changes will appear instantly
+📝 Edit src/App.tsx to see live updates"""
+        
+        elif 'npm run build' in command_lower:
+            return """> build
+> tsc && vite build
+
+vite v5.1.0 building for production...
+✓ 34 modules transformed.
+dist/index.html                   0.46 kB │ gzip:  0.30 kB
+dist/assets/index-DiwrgTda.css    1.23 kB │ gzip:  0.65 kB  
+dist/assets/index-BNzLxOAB.js    143.21 kB │ gzip: 46.13 kB
+✓ built in 1.45s
+
+✅ Frontend build completed successfully!
+📦 Production files ready in /dist folder"""
+        
+        elif 'npm test' in command_lower:
+            return """> test
+> vitest run
+
+ RUN  v1.2.0
+ ✓ src/App.test.tsx (3)
+   ✓ renders calculator component
+   ✓ performs basic calculations
+   ✓ handles edge cases
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  10:30:15 AM
+   Duration  892ms
+
+✅ All tests passed!"""
+        
+        elif 'yarn' in command_lower and 'install' in command_lower:
+            return """yarn install v1.22.19
+info No lockfile found.
+[1/4] Resolving packages...
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+[4/4] Building fresh packages...
+success Saved lockfile.
+Done in 8.45s."""
+        
+        elif any(cmd in command_lower for cmd in ['ls', 'dir']):
+            return """node_modules/
+public/
+src/
+  components/
+  pages/
+  stores/
+  App.css
+  App.tsx
+  index.css
+  main.tsx
+.gitignore
+eslint.config.js
+index.html
+package.json
+tsconfig.json
+vite.config.ts"""
+        
+        # Default frontend command response
         else:
-            error = command_output.get('error', 'Unknown error') if command_output else 'Failed to execute command'
-            print(f"❌ Command failed: {error}")
-            return f"Command failed: {error}"
+            return f"""Command executed in frontend environment
+Working directory: frontend/
+Command: {command}
+Exit code: 0
+
+✅ Frontend command completed successfully"""
+    
+    def _generate_backend_command_placeholder(self, command: str) -> str:
+        """Generate realistic backend command placeholder responses"""
+        command_lower = command.lower().strip()
+        
+        # Python/pip commands
+        if 'pip install' in command_lower:
+            if '-r requirements.txt' in command_lower:
+                return """Collecting fastapi==0.104.1
+  Using cached fastapi-0.104.1-py3-none-any.whl (92 kB)
+Collecting uvicorn[standard]==0.24.0
+  Using cached uvicorn-0.24.0-py3-none-any.whl (59 kB)
+Collecting sqlalchemy==2.0.23
+  Using cached SQLAlchemy-2.0.23-py3-none-any.whl (3.1 MB)
+Collecting pydantic==2.5.0
+  Using cached pydantic-2.5.0-py3-none-any.whl (381 kB)
+Installing collected packages: fastapi, uvicorn, sqlalchemy, pydantic
+Successfully installed fastapi-0.104.1 pydantic-2.5.0 sqlalchemy-2.0.23 uvicorn-0.24.0
+
+✅ Backend dependencies installed successfully!"""
+            else:
+                package = command_lower.split('pip install')[-1].strip()
+                return f"""Collecting {package}
+  Using cached {package}-1.0.0-py3-none-any.whl
+Installing collected packages: {package}
+Successfully installed {package}-1.0.0
+
+✅ Package {package} installed successfully!"""
+        
+        elif 'python app.py' in command_lower or 'python -m uvicorn' in command_lower:
+            return """INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [12345] using WatchFiles
+INFO:     Started server process [12346]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+
+🚀 Backend server started successfully!
+📡 API endpoints available at http://localhost:8000
+📚 API documentation at http://localhost:8000/docs
+🔧 Admin interface at http://localhost:8000/redoc"""
+        
+        elif 'python -c' in command_lower:
+            return """Python 3.10.12 (main, Nov 20 2023, 15:14:05) [GCC 11.4.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+
+✅ Python environment ready"""
+        
+        elif any(cmd in command_lower for cmd in ['pytest', 'python -m pytest']):
+            return """========================= test session starts ==========================
+platform linux -- Python 3.10.12, pytest-7.4.3
+rootdir: /app/backend
+collected 8 items
+
+test_auth_api.py ........                                           [100%]
+
+========================== 8 passed in 2.34s ==========================
+
+✅ All backend tests passed!"""
+        
+        elif 'curl' in command_lower and 'health' in command_lower:
+            return """{
+  "status": "healthy",
+  "timestamp": "2025-08-19T19:00:00Z",
+  "version": "1.0.0",
+  "database": "connected",
+  "services": {
+    "auth": "operational",
+    "api": "operational"
+  }
+}
+
+✅ Backend health check passed!"""
+        
+        elif any(cmd in command_lower for cmd in ['ls', 'dir']):
+            return """app.py
+requirements.txt
+database/
+  __init__.py
+  user.py
+models/
+  __init__.py
+  auth_models.py
+routes/
+  __init__.py
+  calculator.py
+services/
+  __init__.py
+  auth_service.py
+  health_service.py
+utils/
+  __init__.py
+  auth.py
+docs/
+  DATABASE_GUIDE.md
+AUTH_README.md
+PROJECT_STRUCTURE.md
+README.md
+test_auth_api.py"""
+        
+        elif 'docker' in command_lower and 'ps' in command_lower:
+            return """CONTAINER ID   IMAGE          COMMAND                  CREATED       STATUS       PORTS                    NAMES
+abc123def456   backend:latest "python app.py"         2 hours ago   Up 2 hours   0.0.0.0:8000->8000/tcp   backend-container
+def789abc012   postgres:13    "docker-entrypoint.s…"  2 hours ago   Up 2 hours   0.0.0.0:5432->5432/tcp   postgres-db
+
+✅ Backend containers running successfully"""
+        
+        # Default backend command response  
+        else:
+            return f"""Command executed in backend environment
+Working directory: backend/
+Command: {command}
+Exit code: 0
+
+✅ Backend command completed successfully"""
 
     def _handle_update_file_interrupt(self, action: dict) -> str:
         """Handle update_file action - supports both diff blocks and legacy format"""
@@ -1732,7 +2385,8 @@ If you really want to create an empty file, please confirm by responding with th
                 'file_path': file_path, 
                 'success': True,
                 'python_errors': result["python_errors"],
-                'typescript_errors': result.get("typescript_errors", "")
+                'typescript_errors': result.get("typescript_errors", ""),
+                'file_content': file_content  # ✅ Include actual file content
             }
         else:
             print(f"❌ File creation failed")
@@ -1981,16 +2635,92 @@ If you really want to create an empty file, please confirm by responding with th
             }
 
     def _handle_attempt_completion_interrupt(self, action: dict, accumulated_content: str) -> dict:
-        """Handle attempt_completion action - ends the session with completion message"""
+        """Handle attempt_completion action - ends the session with completion message
+        
+        Handles multiple formats:
+        1. <action type="attempt_completion">content</action>
+        2. Plain text "attempt_completion" 
+        3. Other variations in action structure
+        """
         print(f"🎯 Processing attempt completion...")
         
         try:
-            # Extract completion message from action content
-            completion_message = action.get('content', '').strip()
+            completion_message = ""
+            
+            # Method 1: Extract from action content directly
+            if action.get('content'):
+                completion_message = action.get('content', '').strip()
+                print(f"📄 Method 1 - Found content in action: {len(completion_message)} chars")
+            
+            # Method 2: Extract from action text (for different parser results)
+            if not completion_message and action.get('text'):
+                completion_message = action.get('text', '').strip()
+                print(f"📄 Method 2 - Found text in action: {len(completion_message)} chars")
+                
+            # Method 3: Extract from raw XML action tag in accumulated content
+            if not completion_message and accumulated_content:
+                import re
+                # Look for <action type="attempt_completion">content</action>
+                action_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', accumulated_content, re.DOTALL | re.IGNORECASE)
+                if action_match:
+                    completion_message = action_match.group(1).strip()
+                    print(f"📄 Method 3 - Extracted from XML action tag: {len(completion_message)} chars")
+                    
+                # Look for other attempt_completion patterns in content
+                elif 'attempt_completion' in accumulated_content.lower():
+                    # Try to extract content after attempt_completion markers
+                    lines = accumulated_content.split('\n')
+                    capture_content = False
+                    captured_lines = []
+                    
+                    for line in lines:
+                        line_lower = line.lower()
+                        if 'attempt_completion' in line_lower:
+                            capture_content = True
+                            # Skip the line with the marker itself unless it has substantial content
+                            if len(line.strip()) > len('attempt_completion') + 20:  # Has more than just the marker
+                                captured_lines.append(line.strip())
+                        elif capture_content:
+                            # Stop capturing if we hit another action or XML tag
+                            if line.strip().startswith('<') or 'type=' in line:
+                                break
+                            if line.strip():  # Non-empty line
+                                captured_lines.append(line.strip())
+                    
+                    if captured_lines:
+                        completion_message = '\n'.join(captured_lines).strip()
+                        print(f"📄 Method 4 - Extracted from content patterns: {len(completion_message)} chars")
+            
+            # Method 5: Extract from different action formats that parsers might create
+            if not completion_message:
+                # Check for nested content in action details
+                details = action.get('action_details', {}) or action.get('actionDetails', {})
+                if details and isinstance(details, dict):
+                    completion_message = details.get('content', '') or details.get('message', '')
+                    if completion_message:
+                        print(f"📄 Method 5 - Found in action details: {len(completion_message)} chars")
+            
+            # Method 6: Look for completion message in action raw attributes
+            if not completion_message:
+                raw_attrs = action.get('raw_attrs', {})
+                if raw_attrs and isinstance(raw_attrs, dict):
+                    completion_message = raw_attrs.get('content', '') or raw_attrs.get('message', '')
+                    if completion_message:
+                        print(f"📄 Method 6 - Found in raw attributes: {len(completion_message)} chars")
+            
+            # Clean up the completion message
+            if completion_message:
+                # Remove XML tags if they're still present
+                completion_message = re.sub(r'<[^>]+>', '', completion_message)
+                # Clean up extra whitespace
+                completion_message = re.sub(r'\s+', ' ', completion_message).strip()
+            
+            # Fallback to default message
             if not completion_message:
                 completion_message = "Task completed successfully."
+                print(f"📄 Using fallback completion message")
             
-            print(f"📝 Completion message: {completion_message[:100]}...")
+            print(f"📝 Final completion message ({len(completion_message)} chars): {completion_message[:100]}...")
             
             # Create completion result
             result = {
@@ -2236,6 +2966,64 @@ If you really want to create an empty file, please confirm by responding with th
         """Ensure todos are loaded from persistent storage"""
         self.todos = self._load_todos()
     
+    def _clean_duplicate_todos(self):
+        """Clean up duplicate todos by content and ID"""
+        if not self.todos:
+            return
+            
+        print("🧹 Cleaning duplicate todos...")
+        original_count = len(self.todos)
+        
+        # Track seen todos by normalized content
+        seen_content = {}
+        seen_ids = set()
+        cleaned_todos = []
+        
+        for todo in self.todos:
+            todo_id = todo.get('id', '')
+            description = todo.get('description', '').strip()
+            
+            # Normalize description for comparison (remove extra whitespace, case insensitive)
+            normalized_desc = ' '.join(description.lower().split())
+            
+            # Check for duplicate ID
+            if todo_id in seen_ids:
+                print(f"📋 Removing duplicate ID: {todo_id}")
+                continue
+                
+            # Check for duplicate content
+            if normalized_desc in seen_content:
+                existing_todo = seen_content[normalized_desc]
+                # Keep the one with higher priority or more recent
+                if todo.get('status') == 'completed' and existing_todo.get('status') != 'completed':
+                    # Keep completed version, remove the existing incomplete one
+                    cleaned_todos = [t for t in cleaned_todos if t['id'] != existing_todo['id']]
+                    cleaned_todos.append(todo)
+                    seen_content[normalized_desc] = todo
+                    seen_ids.add(todo_id)
+                    print(f"📋 Replaced incomplete with completed: {todo_id}")
+                elif existing_todo.get('status') == 'completed' and todo.get('status') != 'completed':
+                    # Keep existing completed version, skip this one
+                    print(f"📋 Skipping incomplete duplicate: {todo_id}")
+                    continue
+                else:
+                    # Keep the first one encountered
+                    print(f"📋 Removing content duplicate: {todo_id}")
+                    continue
+            else:
+                # New unique todo
+                cleaned_todos.append(todo)
+                seen_content[normalized_desc] = todo
+                seen_ids.add(todo_id)
+        
+        self.todos = cleaned_todos
+        
+        if original_count != len(self.todos):
+            print(f"🧹 Cleaned {original_count - len(self.todos)} duplicate todos ({original_count} → {len(self.todos)})")
+            self._save_todos(self.todos)
+        else:
+            print("🧹 No duplicates found")
+
     def _handle_todo_actions(self, action: dict):
         """Handle todo-related actions"""
         action_type = action.get('type')
@@ -2243,12 +3031,37 @@ If you really want to create an empty file, please confirm by responding with th
         # Ensure todos are loaded from file
         self._ensure_todos_loaded()
         
+        # Clean duplicates before processing new actions
+        self._clean_duplicate_todos()
+        
         if action_type == 'todo_create':
             # Get attributes from raw_attrs if available
             attrs = action.get('raw_attrs', {})
+            todo_id = attrs.get('id') or action.get('id')
+            todo_description = action.get('content', '').strip()
+            
+            # Normalize description for comparison
+            normalized_desc = ' '.join(todo_description.lower().split())
+            
+            # Check for duplicates by ID or normalized content
+            existing_todo = None
+            for existing in self.todos:
+                if existing['id'] == todo_id:
+                    existing_todo = existing
+                    print(f"📋 Duplicate todo by ID detected: {todo_id}")
+                    break
+                elif ' '.join(existing['description'].lower().split()) == normalized_desc:
+                    existing_todo = existing
+                    print(f"📋 Duplicate todo by content detected: {todo_description[:50]}...")
+                    break
+            
+            if existing_todo:
+                print(f"📋 Skipping duplicate todo creation: {todo_id}")
+                return
+            
             todo = {
-                'id': attrs.get('id') or action.get('id'),
-                'description': action.get('content', ''),
+                'id': todo_id,
+                'description': todo_description,
                 'priority': attrs.get('priority', 'medium'),
                 'integration': attrs.get('integration', 'false') == 'true',
                 'status': 'pending',
@@ -2302,6 +3115,9 @@ If you really want to create an empty file, please confirm by responding with th
         """Display current todo status and return structured todo list"""
         # Ensure todos are loaded from file
         self._ensure_todos_loaded()
+        
+        # Clean duplicates every time we display todos
+        self._clean_duplicate_todos()
         
         if not self.todos:
             todo_tree = "📋 todos/\n└── (no todos created yet)"
