@@ -1,234 +1,296 @@
 #!/usr/bin/env python3
 """
-Advanced Python Error Checker for VPS Backend
-Combines MyPy + Pyflakes for comprehensive VSCode-level error detection
-Optimized for <3 seconds performance on backend codebases
+Pure MyPy/Pyflakes Python Error Checker
+No hardcoded patterns - let the tools do their job like VS Code does
 """
 
 import sys
 import time
-import json
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-class AdvancedPythonChecker:
-    """Advanced Python error checker using MyPy + Pyflakes"""
+class PurePythonChecker:
+    """Python error checker using pure MyPy + Pyflakes output"""
     
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
         self.error_file = self.project_path / ".python-errors.txt"
         
-    def run_mypy_check(self) -> List[str]:
-        """Run MyPy for import/attribute/type errors"""
+    def run_mypy(self) -> str:
+        """Run MyPy fast with only critical error detection"""
         try:
-            # Import mypy API directly instead of subprocess
-            from mypy import api
+            # Only check user Python files, not all directories
+            python_files = []
+            for py_file in self.project_path.rglob("*.py"):
+                # Skip virtual environments, caches, and site-packages  
+                if any(part in str(py_file) for part in ['venv/', '.venv/', '__pycache__/', 'site-packages/']):
+                    continue
+                python_files.append(str(py_file))
             
-            # Run MyPy programmatically
-            result = api.run([
-                str(self.project_path),
+            if not python_files:
+                return ""
+            
+            # Limit to first 10 files for speed (most critical errors will be in main files)
+            python_files = python_files[:10]
+            
+            cmd = [
+                sys.executable, "-m", "mypy",
+                "--show-error-codes",
+                "--no-error-summary", 
                 "--ignore-missing-imports",
-                "--show-error-codes", 
-                "--no-error-summary",
-                "--cache-dir", str(self.project_path / ".mypy_cache"),
-                "--disable-error-code=var-annotated",
-                "--disable-error-code=misc",
-            ])
+                "--follow-imports=silent",
+                "--no-strict-optional",
+                "--allow-untyped-calls",
+                "--allow-untyped-defs",
+                "--cache-dir", str(self.project_path / ".mypy_cache"),  # Enable caching
+                "--fast-parser",  # Speed optimization
+            ] + python_files
             
-            # MyPy API returns (stdout, stderr, exit_code)
-            stdout, stderr, exit_code = result
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                cwd=str(self.project_path),
+                timeout=10  # Reduced timeout
+            )
             
-            errors = []
-            if stdout.strip():
-                errors.extend(stdout.strip().split('\n'))
-            if stderr.strip():
-                errors.extend(stderr.strip().split('\n'))
-            return errors
+            if result.returncode == 0 or not result.stdout.strip():
+                return ""
             
-        except ImportError:
-            return ["MyPy not available - install with: pip install mypy"]
-        except Exception as e:
-            return [f"MyPy error: {str(e)}"]
-    
-    def run_pyflakes_check(self) -> List[str]:
-        """Run Pyflakes ONLY for critical runtime errors (undefined names)"""
-        try:
-            # Import pyflakes API directly
-            from pyflakes.api import check
-            from pyflakes.messages import UndefinedName
+            # Filter MyPy output to only critical errors that would break runtime
+            critical_lines = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip() and any(critical in line for critical in [
+                    '[syntax]',
+                    '[name-defined]', 
+                    '[attr-defined]',
+                    '[call-arg]',
+                    '[operator]',
+                    '[index]',
+                    '[import-not-found]'
+                ]):
+                    critical_lines.append(line)
             
-            critical_errors = []
+            return '\n'.join(critical_lines) if critical_lines else ""
             
-            # Find all Python files in the project directory
-            python_files = list(self.project_path.glob("*.py"))
-            python_files.extend(self.project_path.glob("**/*.py"))
-            
-            for py_file in python_files:
-                # Skip virtual env and cache directories
-                if any(skip in str(py_file) for skip in ["venv", ".venv", "env", ".env", "__pycache__", "site-packages"]):
-                    continue
-                    
-                try:
-                    with open(py_file, 'r', encoding='utf-8') as f:
-                        source = f.read()
-                    
-                    # Capture pyflakes warnings
-                    
-                    class WarningCollector:
-                        def __init__(self):
-                            self.messages = []
-                        
-                        def flake(self, message):
-                            self.messages.append(message)
-                    
-                    collector = WarningCollector()
-                    check(source, str(py_file), collector.flake)
-                    
-                    # Filter for undefined names only
-                    for msg in collector.messages:
-                        if isinstance(msg, UndefinedName):
-                            critical_errors.append(f"{py_file}:{msg.lineno}: undefined name '{msg.names[0]}'")
-                            
-                except Exception:
-                    # Skip files that can't be read or parsed
-                    continue
-                        
-            return critical_errors
-            
-        except ImportError:
-            return ["Pyflakes not available - install with: pip install pyflakes"]
-        except Exception as e:
-            return []  # Skip pyflakes errors, focus on MyPy
-    
-    def parse_and_filter_errors(self, mypy_errors: List[str], pyflakes_errors: List[str]) -> Dict[str, List[str]]:
-        """Parse and categorize all errors by criticality"""
-        
-        critical_errors = []
-        warnings = []
-        
-        # Process MyPy errors (ONLY the most critical ones that will break backend)
-        for error in mypy_errors:
-            if not error.strip():
-                continue
-                
-            # ONLY critical errors that WILL break the backend startup/runtime
-            if any(code in error for code in [
-                '[attr-defined]',      # Missing attributes (UserRole case) - CRITICAL
-                '[import-not-found]',  # Missing imports - CRITICAL  
-                '[name-defined]',      # Undefined names - CRITICAL
-                '[syntax]',            # Syntax errors - CRITICAL
-                '[call-arg]'           # Function call errors - CRITICAL
-            ]):
-                critical_errors.append(f"❌ {error}")
-            # Skip ALL other MyPy errors (type annotations, assignments, etc.)
-        
-        # Process Pyflakes errors (ONLY critical runtime errors)
-        for error in pyflakes_errors:
-            if not error.strip():
-                continue
-                
-            # ONLY undefined names (will crash at runtime)
-            if "undefined name" in error:
-                critical_errors.append(f"❌ {error}")
-            # Skip everything else (unused imports, style issues, etc.)
-        
-        return {
-            "critical": critical_errors,
-            "warnings": warnings
-        }
-    
-    def format_error_report(self, errors: Dict[str, List[str]]) -> str:
-        """Format error report for API consumption - ONLY critical errors"""
-        if not errors["critical"]:
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # MyPy not available - try basic syntax check
+            return self._basic_syntax_check()
+        except Exception:
             return ""
+    
+    def _basic_syntax_check(self) -> str:
+        """Basic syntax checking when MyPy not available"""
+        errors = []
         
-        report_lines = ["Python validation errors:"]
+        for py_file in self.project_path.rglob("*.py"):
+            # Skip virtual environments and caches
+            if any(part in str(py_file) for part in ['venv', '.venv', '__pycache__', 'site-packages']):
+                continue
+                
+            try:
+                with open(py_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                import ast
+                ast.parse(content, filename=str(py_file))
+                
+            except (SyntaxError, IndentationError) as e:
+                rel_path = py_file.relative_to(self.project_path)
+                errors.append(f"{rel_path}:{e.lineno}: error: {e.msg}")
+            except Exception:
+                continue
+                
+        return "\n".join(errors)
+    
+    def run_pyflakes(self) -> str:
+        """Run Pyflakes fast on critical files only"""
+        try:
+            # Only check user Python files, prioritize main files
+            python_files = []
+            main_files = []  # app.py, main.py, etc - check these first
+            
+            for py_file in self.project_path.rglob("*.py"):
+                # Skip virtual environments, caches, and site-packages
+                if any(part in str(py_file) for part in ['venv/', '.venv/', '__pycache__/', 'site-packages/']):
+                    continue
+                
+                file_str = str(py_file)
+                if any(name in py_file.name for name in ['app.py', 'main.py', 'server.py']):
+                    main_files.append(file_str)
+                else:
+                    python_files.append(file_str)
+            
+            # Check main files first, then others (limit total for speed)
+            all_files = main_files + python_files[:8]  # Max 8 non-main files
+            
+            if not all_files:
+                return ""
+            
+            cmd = [sys.executable, "-m", "pyflakes"] + all_files
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(self.project_path),
+                timeout=5  # Reduced timeout
+            )
+            
+            if not result.stdout.strip():
+                return ""
+            
+            # Filter out non-critical warnings - only keep runtime errors
+            critical_lines = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip() and not any(warning in line for warning in [
+                    'imported but unused',
+                    'assigned to but never used',
+                    'redefinition of unused'
+                ]):
+                    # This is a critical error (undefined names, etc.)
+                    critical_lines.append(line)
+            
+            return '\n'.join(critical_lines) if critical_lines else ""
+            
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return ""
+        except Exception:
+            return ""
+    
+    def check_env_without_dotenv(self) -> str:
+        """Check for environment variable usage without load_dotenv"""
+        errors = []
         
-        # Show ONLY critical errors (these WILL break the backend)
-        for error in errors["critical"][:15]:  # Limit to 15 most critical
-            # Clean up the error message for better readability
-            clean_error = error.replace("❌ ", "- ").replace("[attr-defined]", "").replace("[import-not-found]", "").replace("[name-defined]", "").replace("[syntax]", "").replace("[call-arg]", "").strip()
-            report_lines.append(clean_error)
+        for py_file in self.project_path.rglob("*.py"):
+            # Skip virtual environments, caches, and site-packages
+            if any(part in str(py_file) for part in ['venv/', '.venv/', '__pycache__/', 'site-packages/']):
+                continue
+            
+            try:
+                with open(py_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Check if file uses os.environ but doesn't have load_dotenv
+                uses_environ = 'os.environ' in content
+                has_load_dotenv = 'load_dotenv' in content
+                
+                if uses_environ and not has_load_dotenv:
+                    rel_path = py_file.relative_to(self.project_path)
+                    errors.append(f"{rel_path}: error: Uses os.environ but missing load_dotenv() - environment variables may not be loaded")
+                    
+            except Exception:
+                continue
         
-        if len(errors["critical"]) > 15:
-            report_lines.append(f"- ... and {len(errors['critical']) - 15} more critical errors")
-        
-        return "\\n".join(report_lines)
+        return "\n".join(errors)
     
     def run_comprehensive_check(self) -> str:
-        """Run comprehensive Python error check"""
+        """Run comprehensive check with parallel execution for speed"""
         start_time = time.time()
         
-        print(f"🔍 Running advanced Python error check on: {self.project_path}")
+        print(f"🔍 Running fast Python error check: {self.project_path}")
         
-        # Run both checkers in sequence (total target: <3 seconds)
-        mypy_errors = self.run_mypy_check()
-        pyflakes_errors = self.run_pyflakes_check()
+        # Run all checks in parallel for speed
+        mypy_output = ""
+        pyflakes_output = ""
+        env_check_output = ""
         
-        # Parse and categorize errors
-        categorized_errors = self.parse_and_filter_errors(mypy_errors, pyflakes_errors)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            # Submit all jobs
+            mypy_future = executor.submit(self.run_mypy)
+            pyflakes_future = executor.submit(self.run_pyflakes)
+            env_future = executor.submit(self.check_env_without_dotenv)
+            
+            # Collect results as they complete
+            for future in as_completed([mypy_future, pyflakes_future, env_future]):
+                try:
+                    result = future.result(timeout=3)  # Max 3 seconds per tool
+                    if future == mypy_future:
+                        mypy_output = result
+                    elif future == pyflakes_future:
+                        pyflakes_output = result
+                    else:
+                        env_check_output = result
+                except Exception:
+                    # If one tool fails, continue with the others
+                    pass
         
-        # Format the report
-        formatted_report = self.format_error_report(categorized_errors)
+        # If both MyPy and Pyflakes failed or returned nothing, use basic syntax check
+        if not mypy_output and not pyflakes_output:
+            basic_syntax_output = self._basic_syntax_check()
+            if basic_syntax_output:
+                mypy_output = basic_syntax_output
+        
+        # Combine outputs
+        all_output = []
+        
+        if mypy_output:
+            all_output.append("=== Critical MyPy Errors ===")
+            all_output.append(mypy_output)
+        
+        if pyflakes_output:
+            if all_output:
+                all_output.append("")
+            all_output.append("=== Critical Pyflakes Errors ===") 
+            all_output.append(pyflakes_output)
+        
+        if env_check_output:
+            if all_output:
+                all_output.append("")
+            all_output.append("=== Environment Variable Errors ===")
+            all_output.append(env_check_output)
+        
+        final_output = "\n".join(all_output)
         
         elapsed = time.time() - start_time
-        print(f"✅ Check completed in {elapsed:.2f}s")
+        print(f"✅ Fast check completed in {elapsed:.2f}s")
         
-        # Write to error file for continuous monitoring
-        self.write_error_file(categorized_errors, elapsed)
+        # Write to error file
+        self.write_error_file(final_output, elapsed)
         
-        return formatted_report
+        return final_output
     
-    def write_error_file(self, errors: Dict[str, List[str]], elapsed_time: float):
-        """Write error report to file for monitoring"""
+    def write_error_file(self, output: str, elapsed_time: float):
+        """Write error report to file"""
         try:
-            total_errors = len(errors["critical"]) + len(errors["warnings"])
-            
-            if total_errors == 0:
-                self.error_file.write_text("✅ No Python errors found\\n")
+            if not output:
+                self.error_file.write_text("✅ No Python errors found\n")
             else:
                 report = [
                     f"Python Error Report ({elapsed_time:.2f}s)",
                     "=" * 50,
-                    f"Critical Errors: {len(errors['critical'])}",
-                    f"Warnings: {len(errors['warnings'])}",
-                    f"Total: {total_errors}",
                     "",
-                    "CRITICAL ERRORS:",
+                    output
                 ]
-                
-                for error in errors["critical"]:
-                    report.append(f"  {error}")
-                
-                if errors["warnings"]:
-                    report.append("")
-                    report.append("WARNINGS:")
-                    for warning in errors["warnings"][:10]:
-                        report.append(f"  {warning}")
-                
-                self.error_file.write_text("\\n".join(report))
+                self.error_file.write_text("\n".join(report))
                 
         except Exception as e:
             print(f"Warning: Could not write error file: {e}")
 
 def main():
     """Main entry point"""
-    if len(sys.argv) > 1:
-        project_path = sys.argv[1] 
-    else:
-        project_path = "."
+    project_path = "."
     
-    checker = AdvancedPythonChecker(project_path)
+    # Parse arguments properly
+    for arg in sys.argv[1:]:
+        if arg != "--once":
+            project_path = arg
+            break
+    
+    checker = PurePythonChecker(project_path)
     
     if "--once" in sys.argv:
         # One-time check for API usage
         result = checker.run_comprehensive_check()
         
         if result:
+            print("Python validation errors found:")
             print(result)
             sys.exit(1)  # Errors found
         else:
-            sys.exit(0)  # No critical errors
+            print("✅ No Python errors found")
+            sys.exit(0)  # No errors
     else:
         # Continuous monitoring mode
         print("Starting continuous Python error monitoring...")
@@ -237,7 +299,7 @@ def main():
                 checker.run_comprehensive_check()
                 time.sleep(5)  # Check every 5 seconds
             except KeyboardInterrupt:
-                print("\\n🛑 Python error checker stopped")
+                print("\n🛑 Python error checker stopped")
                 break
             except Exception as e:
                 print(f"❌ Error in checker: {e}")

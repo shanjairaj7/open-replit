@@ -1,1 +1,1 @@
-# Pydantic models for the backend API
+# Pydantic models for API request/response validation

@@ -89,3 +89,50 @@ python vps-app.py
 git pull origin main  # On VPS
 git push origin main  # Local
 ```
+
+## Cloud Storage Migration Project
+
+**Current Implementation:** Local file storage in `/opt/codebase-platform/projects/`
+
+**New Architecture:**
+- **Boilerplates**: GitHub repositories (public)
+- **File Storage**: Azure Blob Storage
+- **Conversation History**: Stored in cloud storage
+- **Frontend**: Webcontainer receives files via streaming/API sync
+- **Backend**: Direct cloud storage integration
+
+**Key Changes:**
+1. Move boilerplates to GitHub repos, clone per project
+2. All files (frontend/backend) stored persistently in Azure
+3. Conversation history migrated to cloud storage
+4. Terminal commands: frontend interrupts → webcontainer execution → action_result → continue conversation
+5. Backend terminal commands: placeholder responses (VPS prep)
+
+## Prompt Engineering Principles
+
+### Identity-Based Instructions > Technical Instructions
+
+**Key Discovery:** AI models respond much better to identity/personality-based rules than detailed technical checklists.
+
+**Effective Pattern (Identity-Based):**
+```
+"You are a programming wizard"
+"Stay true to yourself - your reputation is at stake"
+"You have built countless production-grade applications"
+"Feature completion means integration - this is who you are"
+```
+
+**Less Effective Pattern (Technical Instructions):**
+```
+"Create API client functions for login/signup/logout"
+"Implement token storage and management"
+"Add authentication headers to all API calls"
+```
+
+**Why This Works:**
+- **Identity** = Internal motivation and standards
+- **Technical steps** = Just checklist items to complete
+- Models internalize identity much more deeply than procedural steps
+- Creates a "master developer persona" that naturally wants fully integrated apps
+
+**Application:** When fixing behavior issues, redefine what success means to the model's identity rather than adding more technical instructions.

@@ -1,42 +1,51 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
-import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
-import { AppSidebar } from '@/components/app-sidebar'
-import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from '@/components/ui/breadcrumb'
-import { Separator } from '@/components/ui/separator'
+import { Navigate, Route, BrowserRouter as Router, Routes } from 'react-router-dom'
+import { ProtectedRoute } from './components/protected-route'
 import HomePage from './pages/HomePage'
-import SettingsPage from './pages/SettingsPage'
+import LoginPage from './pages/LoginPage'
 import ProfilePage from './pages/ProfilePage'
+import SettingsPage from './pages/SettingsPage'
+import SignupPage from './pages/SignupPage'
 
+/**
+ * CHAKRA UI BOILERPLATE APP COMPONENT WITH AUTHENTICATION
+ * 
+ * This is a sample React application with protected routes and authentication.
+ * Features included:
+ * - Chakra UI component library for styling
+ * - Zustand store for state management
+ * - Protected routes with authentication
+ * - Login/Signup pages
+ * - Sample protected pages (Home, Profile, Settings)
+ * - Persistent auth state with localStorage
+ */
 function App() {
   return (
     <Router>
-      <SidebarProvider>
-        <div className="flex min-h-screen w-full">
-          <AppSidebar />
-          <main className="flex-1">
-            <header className="flex h-16 shrink-0 items-center gap-2 border-b px-4">
-              <SidebarTrigger className="-ml-1" />
-              <Separator orientation="vertical" className="mr-2 h-4" />
-              <Breadcrumb>
-                <BreadcrumbList>
-                  <BreadcrumbItem>
-                    <BreadcrumbPage>Application</BreadcrumbPage>
-                  </BreadcrumbItem>
-                </BreadcrumbList>
-              </Breadcrumb>
-            </header>
-            <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
-              <div className="min-h-[100vh] flex-1 rounded-xl bg-muted/50 md:min-h-min p-6">
-                <Routes>
-                  <Route path="/" element={<HomePage />} />
-                  <Route path="/settings" element={<SettingsPage />} />
-                  <Route path="/profile" element={<ProfilePage />} />
-                </Routes>
-              </div>
-            </div>
-          </main>
-        </div>
-      </SidebarProvider>
+      <Routes>
+        {/* Public routes */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
+
+        {/* Protected routes */}
+        <Route path="/" element={
+          <ProtectedRoute>
+            <HomePage />
+          </ProtectedRoute>
+        } />
+        <Route path="/settings" element={
+          <ProtectedRoute>
+            <SettingsPage />
+          </ProtectedRoute>
+        } />
+        <Route path="/profile" element={
+          <ProtectedRoute>
+            <ProfilePage />
+          </ProtectedRoute>
+        } />
+
+        {/* Redirect any unknown routes to home */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </Router>
   )
 }

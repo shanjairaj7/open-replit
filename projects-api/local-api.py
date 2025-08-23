@@ -6,7 +6,7 @@ Runs projects locally using subprocess instead of Docker containers
 
 from fastapi import FastAPI, HTTPException, Depends, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict
 import os
 import shutil
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Local Configuration - NO DOCKER
 LOCAL_BASE_PATH = Path.home() / "local-projects"
 LOCAL_PROJECTS_PATH = LOCAL_BASE_PATH / "projects"
-LOCAL_FRONTEND_BOILERPLATE_PATH = Path(__file__).parent / "boilerplate" / "shadcn-boilerplate"
+LOCAL_FRONTEND_BOILERPLATE_PATH = Path(__file__).parent / "boilerplate" / "shadcn-boilerplate"  # React boilerplate with custom CSS (not shadcn components)
 LOCAL_BACKEND_BOILERPLATE_PATH = Path(__file__).parent / "boilerplate" / "backend-boilerplate"
 
 # Ensure directories exist
@@ -47,6 +47,11 @@ class LocalProjectManager:
         # Initialize used_ports by scanning actual local processes
         self.used_ports = self._scan_used_ports()
         logger.info(f"Initialized with {len(self.used_ports)} ports already in use: {sorted(self.used_ports)}")
+        
+        # Log capture system
+        self.logs_base_path = LOCAL_BASE_PATH / "logs"
+        self.logs_base_path.mkdir(exist_ok=True)
+        self.log_checkpoints: Dict[str, Dict[str, int]] = {}  # {project_id: {service: last_line_seen}}
     
     def _scan_used_ports(self) -> set:
         """Scan local processes to find which ports are actually in use"""
@@ -182,6 +187,59 @@ class LocalProjectManager:
     def _release_port(self, port: int):
         """Release port back to pool"""
         self.used_ports.discard(port)
+
+    async def _detect_backend_url(self, project_id: str) -> str:
+        """Detect if backend is running and return its URL, otherwise return default"""
+        process_info = self.processes.get(project_id, {})
+        
+        # First, check if we have a backend process and port recorded
+        backend_port = process_info.get('backend_port')
+        backend_process = process_info.get('backend_process')
+        
+        if backend_port and backend_process:
+            # Check if the recorded backend process is still running
+            if backend_process.poll() is None:
+                # Process is running, verify it's actually responding
+                backend_url = f"http://localhost:{backend_port}"
+                try:
+                    # Try to ping the backend health endpoint
+                    import aiohttp
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                        async with session.get(f"{backend_url}/health") as response:
+                            if response.status == 200:
+                                logger.info(f"✅ Backend detected and responding at {backend_url}")
+                                return backend_url
+                            else:
+                                logger.warning(f"⚠️ Backend at {backend_url} not responding properly (status: {response.status})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Backend at {backend_url} not responding: {e}")
+            else:
+                logger.warning(f"⚠️ Backend process for {project_id} has exited")
+        
+        # If we couldn't detect a running backend, check for any backend on common ports
+        common_backend_ports = [8001, 8000, 8002, 8003, 8004]
+        
+        for port in common_backend_ports:
+            backend_url = f"http://localhost:{port}"
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
+                    async with session.get(f"{backend_url}/health") as response:
+                        if response.status == 200:
+                            logger.info(f"✅ Found responsive backend at {backend_url}")
+                            # Update our records with the found backend
+                            if project_id not in self.processes:
+                                self.processes[project_id] = {}
+                            self.processes[project_id]['backend_port'] = port
+                            return backend_url
+            except:
+                continue  # Try next port
+        
+        # No responsive backend found, return default
+        default_url = "http://localhost:8001"
+        logger.warning(f"⚠️ No responsive backend detected, using default: {default_url}")
+        logger.warning(f"💡 Tip: Start the backend first with start_backend action for proper integration")
+        return default_url
     
     async def create_project(self, project_id: str, files: Dict[str, str]) -> Dict:
         """Create new monorepo project with frontend/ and backend/ folders - LOCAL VERSION"""
@@ -208,6 +266,129 @@ class LocalProjectManager:
             ignore=shutil.ignore_patterns('node_modules', 'dist', 'build', '.next', '.vite', '__pycache__', '.mypy_cache', '.git')
         )
         logger.info(f"Copied frontend boilerplate to {frontend_path} (excluding node_modules and build files)")
+        
+        # Schedule index.html update via HTTP API call after project creation
+        async def update_index_html_via_api():
+            try:
+                import aiohttp
+                
+                # First, read the current index.html content via API
+                async with aiohttp.ClientSession() as session:
+                    # Read current file content
+                    async with session.get(f'http://localhost:8000/api/projects/{project_id}/files/frontend/index.html') as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            html_content = data['content']
+                        else:
+                            logger.error(f"Failed to read index.html via API: {response.status}")
+                            return
+                    
+                    # Inject meta tag with project ID after charset meta tag
+                    html_content = html_content.replace(
+                        '<meta charset="UTF-8" />',
+                        f'<meta charset="UTF-8" />\n    <meta name="project-id" content="{project_id}" />'
+                    )
+                    
+                    # Update console capture script to use API approach
+                    html_content = html_content.replace(
+                        '''        // Get project ID from URL or generate one
+        const getProjectId = () => {
+          const urlParams = new URLSearchParams(window.location.search);
+          return urlParams.get('project_id') || 
+                 document.title.toLowerCase().replace(/[^a-z0-9]/g, '-') || 
+                 'frontend-project';
+        };''',
+                        '''        // Get project ID from meta tag (injected by local-api.py)
+        const getProjectId = () => {
+          const metaTag = document.querySelector('meta[name="project-id"]');
+          return metaTag ? metaTag.content : 'frontend-project';
+        };'''
+                    )
+                    
+                    # Replace localStorage with API approach
+                    html_content = html_content.replace(
+                        '''        // Write logs to local logs.md file
+        const writeLogsToFile = async (logs, immediate = false) => {
+          try {
+            const logText = logs.map(log => 
+              `[${log.timestamp}] [${log.level}] ${log.message}`
+            ).join('\\n') + '\\n';
+            
+            // Store in localStorage as a simple approach
+            const existingLogs = localStorage.getItem('frontend-console-logs') || '';
+            const newLogs = existingLogs + logText;
+            localStorage.setItem('frontend-console-logs', newLogs);
+            
+            // Also expose globally for debugging
+            window.__frontendLogsText = newLogs;
+            
+          } catch (error) {
+            // Failsafe: don't create infinite loops
+            if (error.message !== 'Failed to write logs to storage') {
+              console.warn('Error writing logs to storage:', error);
+            }
+          }
+        };''',
+                        '''        // Send logs to backend API
+        const sendLogsToBackend = async (logs, immediate = false) => {
+          try {
+            const response = await fetch('http://localhost:8000/api/frontend-logs', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                project_id: projectId,
+                logs: logs,
+                immediate: immediate
+              })
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+          } catch (error) {
+            // Failsafe: don't create infinite loops
+            if (!error.message.includes('Failed to send logs')) {
+              console.error('❌ Error sending logs to backend:', error);
+            }
+          }
+        };'''
+                    )
+                    
+                    # Replace all writeLogsToFile calls with sendLogsToBackend
+                    replacements = [
+                        ('writeLogsToFile([logEntry], true);', 'sendLogsToBackend([logEntry], true);'),
+                        ('writeLogsToFile(logsToWrite, false);', 'sendLogsToBackend(logsToSend, false);'),
+                        ('writeLogsToFile(logsToWrite, true);', 'sendLogsToBackend(logsToSend, true);'),
+                        ('writeLogs: () => writeLogsToFile([...logBuffer], true),', 'sendLogs: () => sendLogsToBackend([...logBuffer], true),'),
+                        ('getStoredLogs: () => localStorage.getItem(\'frontend-console-logs\')', 'getAllLogs: () => logBuffer'),
+                        ('// Write to logs immediately for critical errors', '// Send logs to backend immediately for critical errors'),
+                        ('// Batch write logs every 5 seconds', '// Batch send logs every 5 seconds'),
+                        ('// Write logs before page unload', '// Send logs before page unload'),
+                        ('const logsToWrite = [...logBuffer];', 'const logsToSend = [...logBuffer];\n            logBuffer.length = 0; // Clear buffer after copying'),
+                    ]
+                    
+                    for old, new in replacements:
+                        html_content = html_content.replace(old, new)
+                    
+                    # Update the file via HTTP API
+                    update_payload = {
+                        'content': html_content
+                    }
+                    async with session.put(f'http://localhost:8000/api/projects/{project_id}/files/frontend/index.html', 
+                                         json=update_payload) as response:
+                        if response.status == 200:
+                            logger.info(f"Successfully updated index.html via HTTP API for project {project_id}")
+                        else:
+                            logger.error(f"Failed to update index.html via HTTP API: {response.status}")
+                            
+            except Exception as e:
+                logger.error(f"Failed to update index.html via HTTP API for project {project_id}: {e}")
+        
+        # Store the update function to call after metadata is created
+        self._pending_index_updates = getattr(self, '_pending_index_updates', [])
+        self._pending_index_updates.append((project_id, update_index_html_via_api))
         
         # Copy backend boilerplate to backend/ folder (excluding heavy directories)
         backend_path = project_path / "backend"
@@ -257,6 +438,18 @@ class LocalProjectManager:
         with open(project_path / ".project_metadata.json", 'w') as f:
             json.dump(metadata, f, indent=2)
         
+        # Execute pending index.html updates via API
+        if hasattr(self, '_pending_index_updates'):
+            for proj_id, update_func in self._pending_index_updates:
+                if proj_id == project_id:
+                    try:
+                        await update_func()
+                        logger.info(f"Successfully updated index.html via API for project {project_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to update index.html via API for project {project_id}: {e}")
+            # Clear processed updates
+            self._pending_index_updates = [(pid, func) for pid, func in self._pending_index_updates if pid != project_id]
+        
         # Skip error checking during project creation for speed
         # Error checking will be done when files are updated or when explicitly requested
         logger.info("Skipping error checking during project creation for performance")
@@ -264,19 +457,28 @@ class LocalProjectManager:
         return metadata
 
     def _run_python_error_check(self, project_id: str, file_path: str = None) -> dict:
-        """Run comprehensive Python error checker with virtual environment support"""
-        logger.info(f"Running ultimate Python error checker for {project_id}")
+        """Run Python error checker using the existing python-error-checker.py tool"""
+        logger.info(f"Running Python error checker for {project_id}")
         project_path = LOCAL_PROJECTS_PATH / project_id
         backend_path = project_path / "backend"
         python_errors = ""
         python_check_status = {"executed": True, "success": True, "error": None}
         
         try:
-            # Check if virtual environment exists
+            # Check if the python-error-checker.py exists
+            error_checker_path = backend_path / "python-error-checker.py"
+            
+            if not error_checker_path.exists():
+                logger.warning(f"python-error-checker.py not found in {backend_path}")
+                return {
+                    "errors": "⚠️ Python error checker not found - skipping error check",
+                    "status": {"executed": False, "success": True, "error": "python-error-checker.py not found"}
+                }
+            
+            # Find virtual environment python
             venv_path = backend_path / "venv"
             venv_python = None
             
-            # Try different venv locations
             possible_pythons = [
                 venv_path / "bin" / "python",
                 venv_path / "bin" / "python3",
@@ -292,243 +494,42 @@ class LocalProjectManager:
             if not venv_python:
                 # Fallback to system Python
                 python_cmd = "python3"
-                if not subprocess.run([python_cmd, "--version"], capture_output=True).returncode == 0:
+                if subprocess.run([python_cmd, "--version"], capture_output=True).returncode != 0:
                     python_cmd = "python"
                 logger.warning(f"No venv found, using system Python: {python_cmd}")
             else:
                 python_cmd = venv_python
                 logger.info(f"Using virtual environment Python: {python_cmd}")
             
-            # PHASE 1: AST Syntax Analysis for all Python files
-            errors = []
-            warnings = []
+            # Run the error checker with --once flag
+            cmd = [python_cmd, "python-error-checker.py", ".", "--once"]
             
-            app_files = []
-            exclude_dirs = {'test_env', 'venv', '__pycache__', '.git', 'node_modules', '.pytest_cache'}
+            result = subprocess.run(
+                cmd,
+                cwd=str(backend_path),
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
             
-            for root, dirs, files in os.walk(backend_path):
-                dirs[:] = [d for d in dirs if d not in exclude_dirs]
-                for file in files:
-                    if file.endswith('.py'):
-                        app_files.append(os.path.join(root, file))
-            
-            # Track all imports found in the code
-            all_imports = set()
-            local_modules = set()
-            
-            for py_file in app_files:
-                rel_path = os.path.relpath(py_file, backend_path)
-                
-                try:
-                    with open(py_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    try:
-                        import ast
-                        tree = ast.parse(content, filename=py_file)
-                        
-                        # Collect all imports
-                        for node in ast.walk(tree):
-                            if isinstance(node, ast.Import):
-                                for alias in node.names:
-                                    all_imports.add(alias.name.split('.')[0])
-                            elif isinstance(node, ast.ImportFrom):
-                                if node.module:
-                                    module = node.module.split('.')[0]
-                                    if node.level == 0:  # Absolute import
-                                        all_imports.add(module)
-                                    else:  # Relative import
-                                        local_modules.add(module)
-                        
-                    except SyntaxError as e:
-                        errors.append(f"❌ SYNTAX ERROR in {rel_path}:{e.lineno} - {e.msg}")
-                        
-                except Exception as e:
-                    errors.append(f"❌ FILE ERROR in {rel_path} - {str(e)}")
-            
-            # PHASE 2: Import Testing in Virtual Environment (if venv exists)
-            if venv_python:                
-                # Test each import in the virtual environment
-                missing_imports = set()
-                
-                for import_name in sorted(all_imports):
-                    if import_name in local_modules or import_name in ['models', 'services', 'routers', 'dependencies']:
-                        continue  # Skip local modules
-                    
-                    # Test if import works in venv
-                    test_cmd = [python_cmd, '-c', f'import {import_name}']
-                    try:
-                        result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=5)
-                        if result.returncode != 0:
-                            missing_imports.add(import_name)
-                            errors.append(f"❌ MISSING IMPORT: {import_name} - not available in virtual environment")
-                    except subprocess.TimeoutExpired:
-                        warnings.append(f"Import test timeout for {import_name}")
-            
-            # PHASE 3: Individual File Load Test + Full App Load Test
-            # First, test each Python file individually to catch runtime errors
-            for py_file in app_files:
-                rel_path = os.path.relpath(py_file, backend_path)
-                
-                # Skip certain files that shouldn't be run directly
-                if any(skip in rel_path for skip in ['__init__.py', 'test_', 'python-error-checker']):
-                    continue
-                
-                # Test individual file execution (avoid running servers)
-                if rel_path != 'app.py':  # Don't exec app.py directly as it starts servers
-                    test_cmd = [python_cmd, '-c', f'import sys; sys.path.insert(0, "."); exec(open("{py_file}").read())']
-                    try:
-                        result = subprocess.run(test_cmd, cwd=str(backend_path), capture_output=True, text=True, timeout=5)
-                        if result.returncode != 0:
-                            error_output = result.stderr.strip()
-                            if error_output and "ModuleNotFoundError" not in error_output:  # Avoid duplicate import errors
-                                # Find the actual error line instead of just taking first line
-                                error_lines = error_output.split('\n')
-                                error_detail = None
-                                for line in error_lines:
-                                    if any(keyword in line for keyword in ['Error:', 'Exception:', 'TypeError:', 'ValueError:', 'NameError:', 'SyntaxError:']):
-                                        error_detail = line.strip()
-                                        break
-                                
-                                if not error_detail:
-                                    # If no specific error found, use the last non-empty line
-                                    error_detail = next((line for line in reversed(error_lines) if line.strip()), error_lines[0] if error_lines else "Unknown error")
-                                
-                                errors.append(f"❌ RUNTIME ERROR in {rel_path}: {error_detail}")
-                    except subprocess.TimeoutExpired:
-                        warnings.append(f"Runtime test timeout for {rel_path}")
-                    except Exception:
-                        pass  # Skip files that can't be tested this way
-            
-            # Then test main app.py loading
-            test_script = '''
-import sys
-import os
-sys.path.insert(0, os.getcwd())
-
-# Try to import and create the app
-try:
-    from app import app
-    print("SUCCESS: app module imported")
-    
-    # Check if it's a FastAPI app
-    if hasattr(app, 'routes'):
-        print(f"SUCCESS: FastAPI app created with {len(app.routes)} routes")
-    else:
-        print("WARNING: app exists but doesn't appear to be a FastAPI app")
-        
-except Exception as e:
-    print(f"ERROR: {type(e).__name__}: {str(e)}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-'''
-            
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tf:
-                tf.write(test_script)
-                test_file = tf.name
-            
-            try:
-                result = subprocess.run(
-                    [python_cmd, test_file],
-                    cwd=str(backend_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                
-                if result.returncode != 0:
-                    # Parse the error to find specific issues
-                    error_output = result.stderr + result.stdout
-                    
-                    # Look for ModuleNotFoundError
-                    import re
-                    module_matches = re.findall(r"ModuleNotFoundError: No module named '([^']+)'", error_output)
-                    for module in module_matches:
-                        errors.append(f"❌ RUNTIME ERROR: Missing module '{module}' prevents server startup")
-                    
-                    # Look for ImportError
-                    import_matches = re.findall(r"ImportError: cannot import name '([^']+)'", error_output)
-                    for name in import_matches:
-                        errors.append(f"❌ RUNTIME ERROR: Cannot import '{name}' - check if function/class exists")
-                    
-                    # Look for AttributeError
-                    attr_matches = re.findall(r"AttributeError: module '([^']+)' has no attribute '([^']+)'", error_output)
-                    for module, attr in attr_matches:
-                        errors.append(f"❌ RUNTIME ERROR: Module '{module}' has no attribute '{attr}'")
-                    
-                    if not (module_matches or import_matches or attr_matches):
-                        # Generic error - show more detail
-                        error_lines = error_output.strip().split('\n')
-                        if error_lines:
-                            # Find the actual error line (usually contains 'Error:' or 'Exception:')
-                            error_detail = None
-                            for line in error_lines:
-                                if any(keyword in line for keyword in ['Error:', 'Exception:', 'TypeError:', 'ValueError:', 'NameError:']):
-                                    error_detail = line.strip()
-                                    break
-                            
-                            if not error_detail:
-                                # If no specific error found, use the last non-empty line
-                                error_detail = next((line for line in reversed(error_lines) if line.strip()), "Unknown error")
-                            
-                            errors.append(f"❌ RUNTIME ERROR: Failed to load app.py - {error_detail}")
-                        else:
-                            errors.append(f"❌ RUNTIME ERROR: Failed to load app.py - Unknown error")
-                        
-            except subprocess.TimeoutExpired:
-                errors.append("❌ TIMEOUT: App load took too long (possible infinite loop)")
-            finally:
-                os.unlink(test_file)
-            
-            # PHASE 4: Requirements.txt validation is handled by the runtime tests above
-            # No manual checking - rely on actual import tests and module loading
-            
-            # PHASE 5: Actual Server Start Test (only if no errors and doing full check)
-            if not errors and not file_path:
-                # Try to actually start the server
-                start_cmd = [python_cmd, '-m', 'uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '0']
-                
-                try:
-                    # Start server and immediately kill it (just testing if it starts)
-                    process = subprocess.Popen(
-                        start_cmd,
-                        cwd=str(backend_path),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    
-                    # Wait a bit to see if it starts
-                    import time
-                    time.sleep(2)
-                    
-                    # Check if process is still running
-                    if process.poll() is None:
-                        # Server started successfully
-                        logger.info("✅ Server starts successfully!")
-                        process.terminate()
-                    else:
-                        # Server crashed
-                        stdout, stderr = process.communicate()
-                        error_msg = stderr or stdout
-                        if error_msg:
-                            errors.append(f"❌ SERVER CRASH: {error_msg.strip()[:200]}")
-                            
-                except Exception as e:
-                    warnings.append(f"Could not test server start: {str(e)}")
-            
-            # Format results
-            if errors:
-                python_errors = f"Python Error Report\n{'='*50}\nTotal Errors: {len(errors)}\n\n" + "\n".join(errors)
-                if warnings:
-                    python_errors += f"\n\nWarnings:\n" + "\n".join(warnings)
-                python_check_status["success"] = False
-            else:
-                python_errors = "✅ No Python errors found - Backend is ready to run!"
+            if result.returncode == 0:
+                # No errors found
+                python_errors = "✅ No Python errors found"
                 python_check_status["success"] = True
-                        
+            else:
+                # Errors found
+                error_output = result.stdout.strip() or result.stderr.strip()
+                if error_output:
+                    python_errors = error_output
+                else:
+                    python_errors = "Python validation errors detected"
+                python_check_status["success"] = False
+                
+        except subprocess.TimeoutExpired:
+            python_check_status["success"] = False
+            python_check_status["error"] = "Error checker timeout"
+            python_errors = "⚠️ Python error checker timed out after 30 seconds"
+            logger.warning(f"Python error checker timed out for {project_id}")
         except Exception as e:
             python_check_status["success"] = False
             python_check_status["error"] = str(e)
@@ -575,6 +576,117 @@ except Exception as e:
             "errors": ts_errors,
             "status": ts_check_status
         }
+    
+    def _get_log_file_path(self, project_id: str, service: str) -> Path:
+        """Get log file path for a project service"""
+        timestamp = datetime.now().strftime("%Y%m%d")
+        return self.logs_base_path / f"{project_id}_{service}_{timestamp}.log"
+    
+    def _start_log_capture_thread(self, project_id: str, service: str, process: subprocess.Popen):
+        """Start a thread to capture logs from a process in real-time"""
+        import threading
+        
+        log_file_path = self._get_log_file_path(project_id, service)
+        
+        def capture_logs():
+            try:
+                with open(log_file_path, 'w', buffering=1) as log_file:
+                    # Write header
+                    log_file.write(f"===== {service.upper()} LOG CAPTURE STARTED =====\n")
+                    log_file.write(f"Project: {project_id}\n")
+                    log_file.write(f"Service: {service}\n")
+                    log_file.write(f"Timestamp: {datetime.now()}\n")
+                    log_file.write(f"PID: {process.pid}\n")
+                    log_file.write("=" * 50 + "\n\n")
+                    log_file.flush()
+                    
+                    # Capture output line by line
+                    for line in iter(process.stdout.readline, ''):
+                        if line:
+                            log_file.write(line)
+                            log_file.flush()
+                        
+                        # Check if process is still alive
+                        if process.poll() is not None:
+                            break
+                            
+            except Exception as e:
+                logger.error(f"Log capture error for {project_id} {service}: {e}")
+                
+        thread = threading.Thread(target=capture_logs, daemon=True)
+        thread.start()
+        
+        # Store the log file path in process info
+        if project_id not in self.processes:
+            self.processes[project_id] = {}
+        self.processes[project_id][f'{service}_log_file'] = str(log_file_path)
+        
+        logger.info(f"Started log capture for {project_id} {service}: {log_file_path}")
+    
+    def get_logs(self, project_id: str, service: str = "backend", include_new_only: bool = True) -> Dict:
+        """Get logs for a project service with checkpoint tracking"""
+        log_file_path = self._get_log_file_path(project_id, service)
+        
+        if not log_file_path.exists():
+            return {
+                "logs": "",
+                "total_lines": 0,
+                "new_lines": 0,
+                "checkpoint_updated": False,
+                "log_file_path": str(log_file_path),
+                "message": f"No log file found for {project_id} {service}"
+            }
+        
+        try:
+            with open(log_file_path, 'r') as f:
+                all_lines = f.readlines()
+                
+            total_lines = len(all_lines)
+            
+            # Get checkpoint for this project/service
+            if project_id not in self.log_checkpoints:
+                self.log_checkpoints[project_id] = {}
+                
+            last_seen = self.log_checkpoints[project_id].get(service, 0)
+            
+            if include_new_only and last_seen > 0:
+                # Only return new lines since last checkpoint
+                new_lines = all_lines[last_seen:]
+                new_logs = ''.join(new_lines)
+                new_line_count = len(new_lines)
+            else:
+                # Return all logs
+                new_logs = ''.join(all_lines)
+                new_line_count = total_lines
+                
+            # Update checkpoint to current position
+            self.log_checkpoints[project_id][service] = total_lines
+            
+            # Add checkpoint marker to the log file
+            with open(log_file_path, 'a') as f:
+                f.write(f"\n<!-- CHECKPOINT: Model viewed logs up to line {total_lines} at {datetime.now()} -->\n")
+                f.flush()
+            
+            return {
+                "logs": new_logs,
+                "total_lines": total_lines,
+                "new_lines": new_line_count,
+                "checkpoint_updated": True,
+                "last_checkpoint": last_seen,
+                "current_checkpoint": total_lines,
+                "log_file_path": str(log_file_path)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error reading logs for {project_id} {service}: {e}")
+            return {
+                "logs": f"Error reading logs: {e}",
+                "total_lines": 0,
+                "new_lines": 0,
+                "checkpoint_updated": False,
+                "log_file_path": str(log_file_path),
+                "error": str(e)
+            }
 
     async def start_backend(self, project_id: str) -> Dict:
         """Start only the backend service for a project"""
@@ -596,11 +708,20 @@ except Exception as e:
         
         process_info = self.processes[project_id]
         
-        # Stop existing backend if running
+        # Check if backend is already running
         if process_info.get('backend_process') and process_info['backend_process'].poll() is None:
-            process_info['backend_process'].terminate()
-            if process_info.get('backend_port'):
-                self._release_port(process_info['backend_port'])
+            backend_port = process_info.get('backend_port')
+            backend_url = f"http://localhost:{backend_port}"
+            
+            logger.info(f"✅ Backend already running on port {backend_port}")
+            return {
+                "project_id": project_id,
+                "service": "backend",
+                "status": "already_running",
+                "backend_port": backend_port,
+                "backend_url": backend_url,
+                "message": f"Backend already running at {backend_url} - use this BACKEND_URL environment variable for your tests. If you see API errors, check your implementation with check_errors instead of restarting."
+            }
         
         # Allocate backend port
         try:
@@ -651,18 +772,24 @@ except Exception as e:
                     detail=f"Cannot start backend - Python errors found:\n{python_check['errors']}"
                 )
             
-            # Start Backend Process using virtual environment
-            backend_cmd = f"venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port {backend_port} --reload"
+            # Start Backend Process using virtual environment with cache clearing
+            # Use explicit cache clearing and environment settings to prevent module caching issues
+            backend_cmd = f"venv/bin/python -u -B -m uvicorn app:app --host 0.0.0.0 --port {backend_port} --reload --reload-dir ."
             backend_process = subprocess.Popen(
                 backend_cmd,
                 shell=True,
                 cwd=str(backend_path),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={**os.environ, "PYTHONPATH": str(backend_path)}
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout for unified logging
+                env={**os.environ, "PYTHONPATH": str(backend_path), "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"},
+                universal_newlines=True,
+                bufsize=1  # Line buffered
             )
             
             logger.info(f"Started backend: {backend_cmd} (PID: {backend_process.pid})")
+            
+            # Start log capture thread
+            self._start_log_capture_thread(project_id, "backend", backend_process)
             
             # Validate backend process startup
             logger.info("⏳ Waiting for backend to initialize...")
@@ -749,8 +876,8 @@ except Exception as e:
                 logger.warning(f"Frontend npm install issues: {npm_install.stderr}")
             
             # Get backend URL for environment
-            backend_port = process_info.get('backend_port', 8001)  # Default fallback
-            backend_url = f"http://localhost:{backend_port}"
+            backend_url = await self._detect_backend_url(project_id)
+            logger.info(f"🔗 Using backend URL for frontend: {backend_url}")
             
             # Start Frontend Process
             frontend_cmd = f"npm run dev -- --host 0.0.0.0 --port {frontend_port}"
@@ -820,7 +947,7 @@ except Exception as e:
             raise HTTPException(500, f"Failed to start frontend: {str(e)}")
     
     async def restart_backend(self, project_id: str) -> Dict:
-        """Restart the backend service for a project"""
+        """Restart the backend service for a project with cache clearing"""
         if project_id in self.processes and self.processes[project_id].get('backend_process'):
             # Stop existing backend
             backend_process = self.processes[project_id]['backend_process']
@@ -839,8 +966,20 @@ except Exception as e:
             # Clear backend info
             self.processes[project_id]['backend_process'] = None
             self.processes[project_id]['backend_port'] = None
+            
+            # Clear Python cache files to ensure fresh module loading
+            backend_path = LOCAL_PROJECTS_PATH / project_id / "backend"
+            if backend_path.exists():
+                # Remove __pycache__ directories
+                import shutil
+                for root, dirs, files in os.walk(backend_path):
+                    for dir_name in dirs:
+                        if dir_name == "__pycache__":
+                            pycache_path = os.path.join(root, dir_name)
+                            shutil.rmtree(pycache_path, ignore_errors=True)
+                            logger.info(f"Cleared Python cache: {pycache_path}")
         
-        # Start backend again
+        # Start backend again with fresh imports
         return await self.start_backend(project_id)
     
     async def restart_frontend(self, project_id: str) -> Dict:
@@ -902,21 +1041,81 @@ except Exception as e:
                 else:
                     logger.info("✅ Backend virtual environment already exists")
                 
-                # Install dependencies in venv
+                # Install dependencies in venv with proper alias handling
                 requirements_file = backend_path / "requirements.txt"
                 if requirements_file.exists():
+                    # Use script that handles Python alias issues properly
+                    install_script = """
+source venv/bin/activate
+unalias python 2>/dev/null || true  # Remove Python alias if it exists
+unalias pip 2>/dev/null || true     # Remove pip alias if it exists
+pip install -r requirements.txt
+"""
                     pip_install = subprocess.run(
-                        "venv/bin/pip install -r requirements.txt",
+                        install_script,
                         shell=True,
                         cwd=str(backend_path),
                         capture_output=True,
                         text=True,
-                        timeout=120
+                        timeout=120,
+                        executable="/bin/bash"  # Ensure we use bash for source command
                     )
                     if pip_install.returncode != 0:
                         logger.warning(f"Backend pip install issues: {pip_install.stderr}")
+                        # Try fallback method using direct venv paths
+                        logger.info("Trying fallback installation method...")
+                        fallback_install = subprocess.run(
+                            "./venv/bin/pip install -r requirements.txt",
+                            shell=True,
+                            cwd=str(backend_path),
+                            capture_output=True,
+                            text=True,
+                            timeout=120
+                        )
+                        if fallback_install.returncode != 0:
+                            logger.error(f"Fallback pip install also failed: {fallback_install.stderr}")
+                        else:
+                            logger.info("✅ Backend dependencies installed (fallback method)")
                     else:
                         logger.info("✅ Backend dependencies installed")
+                
+                # Specifically install bcrypt if it's in requirements to avoid common issues
+                if requirements_file.exists():
+                    with open(requirements_file, 'r') as f:
+                        requirements_content = f.read()
+                    
+                    if 'bcrypt' in requirements_content.lower():
+                        logger.info("Installing bcrypt with specific handling...")
+                        bcrypt_script = """
+source venv/bin/activate
+unalias python 2>/dev/null || true
+unalias pip 2>/dev/null || true
+pip install bcrypt
+"""
+                        bcrypt_install = subprocess.run(
+                            bcrypt_script,
+                            shell=True,
+                            cwd=str(backend_path),
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            executable="/bin/bash"
+                        )
+                        if bcrypt_install.returncode != 0:
+                            logger.warning(f"Bcrypt install issues: {bcrypt_install.stderr}")
+                            # Try direct path method
+                            fallback_bcrypt = subprocess.run(
+                                "./venv/bin/pip install bcrypt",
+                                shell=True,
+                                cwd=str(backend_path),
+                                capture_output=True,
+                                text=True,
+                                timeout=60
+                            )
+                            if fallback_bcrypt.returncode == 0:
+                                logger.info("✅ Bcrypt installed (fallback method)")
+                        else:
+                            logger.info("✅ Bcrypt installed successfully")
                 
                 # Run Python error check
                 logger.info("Running Python error check...")
@@ -1137,6 +1336,12 @@ except Exception as e:
                 response["typescript_errors"] = f"Error check timed out: {str(e)}"
                 response["typescript_check_status"] = {"executed": False, "success": False, "error": str(e)}
         
+        # Check for environment variable usage without load_dotenv in Python files
+        if file_path.endswith(".py"):
+            env_check_result = self._check_env_usage_without_dotenv(content)
+            if env_check_result["needs_load_dotenv"]:
+                response["dotenv_reminder"] = env_check_result["message"]
+        
         return response
 
     async def read_file(self, project_id: str, file_path: str) -> str:
@@ -1168,6 +1373,107 @@ except Exception as e:
                     files.append(rel_path)
         
         return sorted(files)
+
+    async def rename_file(self, project_id: str, old_path: str, new_path: str) -> Dict:
+        """Rename/move a file within the project"""
+        project_path = LOCAL_PROJECTS_PATH / project_id
+        old_full_path = project_path / old_path
+        new_full_path = project_path / new_path
+        
+        if not project_path.exists():
+            raise HTTPException(404, f"Project {project_id} not found")
+        
+        if not old_full_path.exists():
+            raise HTTPException(404, f"File {old_path} not found")
+        
+        if new_full_path.exists():
+            raise HTTPException(409, f"File {new_path} already exists")
+        
+        # Create directories for new path if needed
+        new_full_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Move the file
+        shutil.move(str(old_full_path), str(new_full_path))
+        
+        logger.info(f"Renamed {old_path} to {new_path} in project {project_id}")
+        
+        return {
+            "status": "renamed",
+            "old_path": old_path,
+            "new_path": new_path
+        }
+    
+    async def delete_file(self, project_id: str, file_path: str) -> Dict:
+        """Delete a file from the project"""
+        project_path = LOCAL_PROJECTS_PATH / project_id
+        full_path = project_path / file_path
+        
+        if not project_path.exists():
+            raise HTTPException(404, f"Project {project_id} not found")
+        
+        if not full_path.exists():
+            raise HTTPException(404, f"File {file_path} not found")
+        
+        if full_path.is_dir():
+            raise HTTPException(400, f"Cannot delete directory {file_path} using file delete endpoint")
+        
+        # Delete the file
+        full_path.unlink()
+        
+        logger.info(f"Deleted file {file_path} from project {project_id}")
+        
+        return {
+            "project_id": project_id,
+            "file_path": file_path,
+            "status": "deleted",
+            "message": f"File {file_path} deleted successfully"
+        }
+
+    def _check_env_usage_without_dotenv(self, content: str) -> Dict:
+        """Check if Python file uses environment variables without load_dotenv()"""
+        import re
+        
+        # Check for common environment variable patterns
+        env_patterns = [
+            r"os\.environ\[",
+            r"os\.environ\.get\(",
+            r"getenv\(",
+            r"BACKEND_URL",
+            r"DATABASE_URL",
+            r"API_KEY",
+            r"SECRET_KEY"
+        ]
+        
+        # Check if load_dotenv is imported and called
+        has_dotenv_import = bool(re.search(r"from\s+dotenv\s+import\s+load_dotenv", content) or
+                                re.search(r"import\s+dotenv", content))
+        has_dotenv_call = bool(re.search(r"load_dotenv\(\)", content) or
+                              re.search(r"dotenv\.load_dotenv\(\)", content))
+        
+        # Check if any environment variable patterns are found
+        uses_env_vars = any(re.search(pattern, content) for pattern in env_patterns)
+        
+        needs_load_dotenv = uses_env_vars and not (has_dotenv_import and has_dotenv_call)
+        
+        if needs_load_dotenv:
+            message = "💡 ENVIRONMENT VARIABLES DETECTED:\n"
+            message += "Your Python file appears to use environment variables but doesn't load them.\n"
+            message += "To access environment variables like BACKEND_URL:\n\n"
+            message += "1. Add at the top of your file:\n"
+            message += "   from dotenv import load_dotenv\n"
+            message += "   load_dotenv()\n\n"
+            message += "2. Then you can use:\n"
+            message += "   import os\n"
+            message += "   backend_url = os.environ.get('BACKEND_URL')\n\n"
+            message += "3. Install python-dotenv if needed:\n"
+            message += "   pip install python-dotenv"
+            
+            return {
+                "needs_load_dotenv": True,
+                "message": message
+            }
+        
+        return {"needs_load_dotenv": False}
 
     def get_project_status(self, project_id: str) -> Dict:
         """Get project and process status"""
@@ -1223,6 +1529,16 @@ class CreateProjectRequest(BaseModel):
 
 class UpdateFileRequest(BaseModel):
     content: str
+
+class RenameFileRequest(BaseModel):
+    new_path: Optional[str] = None
+    new_name: Optional[str] = None
+    
+    @validator('new_name', 'new_path')
+    def at_least_one_required(cls, v, values):
+        if not v and not values.get('new_path') and not values.get('new_name'):
+            raise ValueError("Either new_path or new_name must be provided")
+        return v
 
 class CommandRequest(BaseModel):
     command: str = Field(..., description="Full command string to execute")
@@ -1397,25 +1713,61 @@ async def update_project_file(project_id: str, file_path: str, request: UpdateFi
     result = await project_manager.update_file(project_id, file_path, request.content)
     return result
 
+@app.patch("/api/projects/{project_id}/files/{file_path:path}/rename")
+async def rename_project_file(project_id: str, file_path: str, request: RenameFileRequest):
+    """Rename/move a file within the project"""
+    # Handle both new_path and new_name in the request
+    # new_name is typically just the filename, new_path is the full path
+    if request.new_path:
+        new_path = request.new_path
+    elif request.new_name:
+        # If only new_name is provided, keep the file in the same directory
+        import os
+        dir_path = os.path.dirname(file_path)
+        new_path = os.path.join(dir_path, request.new_name) if dir_path else request.new_name
+    else:
+        raise HTTPException(400, "Either new_path or new_name must be provided")
+    
+    result = await project_manager.rename_file(project_id, file_path, new_path)
+    return result
+
+@app.delete("/api/projects/{project_id}/files/{file_path:path}")
+async def delete_project_file(project_id: str, file_path: str):
+    """Delete a file from the project"""
+    result = await project_manager.delete_file(project_id, file_path)
+    return result
+
 @app.post("/api/projects/{project_id}/execute")
 async def execute_command(project_id: str, request: CommandRequest):
     """Execute a command in the project directory with server management restrictions"""
+    print(f"🚀 EXECUTE: Starting command execution for project {project_id}")
+    print(f"📝 EXECUTE: Command: '{request.command}'")
+    print(f"📁 EXECUTE: Working directory: '{request.cwd}'")
+    
     try:
         # Validate project exists
         project_path = LOCAL_PROJECTS_PATH / project_id
+        print(f"🔍 EXECUTE: Checking if project path exists: {project_path}")
         if not project_path.exists():
+            print(f"❌ EXECUTE: Project path does not exist: {project_path}")
             raise HTTPException(404, f"Project {project_id} not found")
+        print(f"✅ EXECUTE: Project path exists")
         
         # Check if this project has managed servers running
+        print(f"🔍 EXECUTE: Checking project status for server management...")
         project_status = project_manager.get_project_status(project_id)
-        is_running = project_status.get("container_status") == "running"
+        is_running = project_status.get("container_status") in ["running", "backend_running", "frontend_running"]
         frontend_port = project_status.get("frontend_port")
         backend_port = project_status.get("backend_port")
         
-        # Block server start/stop commands
+        print(f"📊 EXECUTE: Project status - is_running: {is_running}")
+        print(f"📊 EXECUTE: Frontend port: {frontend_port}")
+        print(f"📊 EXECUTE: Backend port: {backend_port}")
+        
+        # Block server start/stop commands and curl commands
         blocked_patterns = [
             r"uvicorn.*app.*--host.*--port",
-            r"python.*app\.py",
+            r"python\s+app\.py",  # Only block "python app.py", not test files
             r"npm.*run.*dev",
             r"npm.*start",
             r"yarn.*dev",
@@ -1423,18 +1775,55 @@ async def execute_command(project_id: str, request: CommandRequest):
             r"node.*server",
             r"fastapi.*dev",
             r"flask.*run",
-            r"django.*runserver"
+            r"django.*runserver",
+            r"curl\s"  # Block curl commands for testing
         ]
         
         import re
         command_lower = request.command.lower()
+        print(f"🔍 EXECUTE: Checking command against blocked patterns...")
+        print(f"🔍 EXECUTE: Command (lowercase): '{command_lower}'")
         
         for pattern in blocked_patterns:
             if re.search(pattern, command_lower):
+                print(f"🚫 EXECUTE: Command matches blocked pattern: {pattern}")
+                
+                # Special handling for curl commands
+                if pattern == r"curl\s":
+                    print(f"🚫 EXECUTE: Curl command blocked for testing")
+                    return CommandResponse(
+                        output="🚫 CURL COMMAND BLOCKED FOR TESTING\n\n" +
+                               "❌ curl commands are not allowed for API testing.\n\n" +
+                               "✅ PROPER TESTING APPROACH:\n" +
+                               "• Create a comprehensive test file (e.g., 'backend/test_api.py')\n" +
+                               "• Use Python requests library or httpx for HTTP testing\n" +
+                               "• Include proper error handling and response validation\n" +
+                               "• Test all endpoints systematically with different scenarios\n" +
+                               "• Add assertions to verify expected behavior\n\n" +
+                               "💡 EXAMPLE TEST FILE STRUCTURE:\n" +
+                               "```python\n" +
+                               "import requests\n" +
+                               "import os\n\n" +
+                               "BASE_URL = os.environ.get('BACKEND_URL', 'http://localhost:8000')\n\n" +
+                               "def test_get_contacts():\n" +
+                               "    response = requests.get(f'{BASE_URL}/contacts/')\n" +
+                               "    assert response.status_code == 200\n" +
+                               "    return response.json()\n\n" +
+                               "if __name__ == '__main__':\n" +
+                               "    print('Testing API endpoints...')\n" +
+                               "    contacts = test_get_contacts()\n" +
+                               "    print(f'Found {len(contacts)} contacts')\n" +
+                               "```\n\n" +
+                               "🔧 Run your test file with: python backend/test_api.py",
+                        error="",
+                        exit_code=1
+                    )
+                
                 # Provide helpful guidance instead of executing
                 guidance_msg = "🚫 SERVER COMMAND BLOCKED\n\n"
                 
                 if is_running:
+                    print(f"ℹ️ EXECUTE: Servers are running, providing running server guidance")
                     guidance_msg += f"✅ Your project servers are already managed and running:\n"
                     if frontend_port:
                         guidance_msg += f"   • Frontend: http://localhost:{frontend_port}\n"
@@ -1447,6 +1836,7 @@ async def execute_command(project_id: str, request: CommandRequest):
                     guidance_msg += "• To see backend logs: check the managed preview logs\n"
                     guidance_msg += "• Example test file: Create 'backend/test_debug.py' with a simple import test\n"
                 else:
+                    print(f"ℹ️ EXECUTE: Servers are not running, providing startup guidance")
                     guidance_msg += f"❌ Your project servers are not running.\n"
                     guidance_msg += f"📋 TO START SERVERS:\n"
                     guidance_msg += f"• Use the 'Start Preview' button or API endpoint\n"
@@ -1457,6 +1847,7 @@ async def execute_command(project_id: str, request: CommandRequest):
                 guidance_msg += f"If the API is not responding, create a simple test file to trigger error checking:\n"
                 guidance_msg += f"Example: Create 'backend/debug_test.py' with 'import app' to see any import errors"
                 
+                print(f"🚫 EXECUTE: Returning blocked command response")
                 return CommandResponse(
                     success=False,
                     output=guidance_msg,
@@ -1464,26 +1855,74 @@ async def execute_command(project_id: str, request: CommandRequest):
                     exit_code=1
                 )
         
+        print(f"✅ EXECUTE: Command passed server blocking check")
+        
+        # Block python commands if backend is not running
+        python_match = re.search(r'\bpython\d*\b', command_lower)
+        print(f"🔍 EXECUTE: Python pattern match: {python_match is not None}, is_running: {is_running}")
+        if python_match and not is_running:
+            print(f"🚫 EXECUTE: Python command detected but backend is not running")
+            guidance_msg = "🚫 PYTHON COMMAND BLOCKED\n\n"
+            guidance_msg += f"❌ Backend server is not running yet.\n"
+            guidance_msg += f"📋 TO RUN PYTHON COMMANDS:\n"
+            guidance_msg += f"• First start the backend server using the 'start_backend' action command\n"
+            guidance_msg += f"• This ensures the virtual environment is properly set up\n"
+            guidance_msg += f"• Then you can run Python commands with the correct environment\n"
+            guidance_msg += f"\n💡 ACCESSING THE BACKEND API:\n"
+            guidance_msg += f"• Use the BACKEND_URL environment variable to access the backend API\n"
+            guidance_msg += f"• Example: urllib.request.urlopen(os.environ['BACKEND_URL'] + '/api/endpoint')\n"
+            guidance_msg += f"• The BACKEND_URL will be automatically set when backend starts\n"
+            guidance_msg += f"\n💡 WHY THIS RESTRICTION:\n"
+            guidance_msg += f"• Python commands need the virtual environment to work correctly\n"
+            guidance_msg += f"• The backend startup process creates and configures the venv\n"
+            guidance_msg += f"• Running Python before this setup may cause import errors\n"
+            
+            print(f"🚫 EXECUTE: Returning blocked Python command response")
+            return CommandResponse(
+                success=False,
+                output=guidance_msg,
+                error="Python command blocked - backend server must be running first",
+                exit_code=1
+            )
+        
+        print(f"✅ EXECUTE: Command passed Python blocking check")
+        
         # Determine target directory
+        print(f"🔍 EXECUTE: Determining target directory based on cwd: '{request.cwd}'")
         if request.cwd == "backend":
             work_dir = project_path / "backend"
+            print(f"📁 EXECUTE: Using backend directory: {work_dir}")
         elif request.cwd == "frontend":
             work_dir = project_path / "frontend"
+            print(f"📁 EXECUTE: Using frontend directory: {work_dir}")
         else:
             # Default to project root
             work_dir = project_path
+            print(f"📁 EXECUTE: Using project root directory: {work_dir}")
         
         logger.info(f"Executing command '{request.command}' in {work_dir}")
+        print(f"💻 EXECUTE: Running command '{request.command}' in {work_dir}")
         
         # Modify command to use virtual environment if running in backend
         command_to_run = request.command
         if request.cwd == "backend":
+            print(f"🔍 EXECUTE: Backend directory detected, checking for virtual environment...")
             # Check if venv exists in backend directory (consistent with start_dev_server)
             venv_activate = work_dir / "venv" / "bin" / "activate"
+            print(f"🔍 EXECUTE: Checking for venv activate script: {venv_activate}")
             if venv_activate.exists():
                 # Use the same pattern as start_dev_server: source venv and run command
                 command_to_run = f"source venv/bin/activate && {request.command}"
                 logger.info(f"Using virtual environment: {command_to_run}")
+                print(f"🐍 EXECUTE: Using virtual environment: {command_to_run}")
+            else:
+                print(f"⚠️ EXECUTE: Virtual environment not found, running command without venv")
+        else:
+            print(f"ℹ️ EXECUTE: Not in backend directory, running command as-is")
+        
+        print(f"🚀 EXECUTE: About to execute command with 30 second timeout")
+        print(f"📝 EXECUTE: Final command: '{command_to_run}'")
+        print(f"📁 EXECUTE: Final working directory: {work_dir}")
         
         # Execute command locally with timeout
         result = subprocess.run(
@@ -1495,23 +1934,59 @@ async def execute_command(project_id: str, request: CommandRequest):
             timeout=30  # 30 second timeout for user commands
         )
         
+        print(f"✅ EXECUTE: Command execution completed")
+        print(f"📊 EXECUTE: Exit code: {result.returncode}")
+        print(f"📊 EXECUTE: Stdout length: {len(result.stdout) if result.stdout else 0} characters")
+        print(f"📊 EXECUTE: Stderr length: {len(result.stderr) if result.stderr else 0} characters")
+        
         # Combine stdout and stderr for full output
         full_output = ""
         if result.stdout:
+            print(f"📤 EXECUTE: Adding stdout to output")
             full_output += result.stdout
         if result.stderr:
+            print(f"📤 EXECUTE: Adding stderr to output")
             if full_output:
                 full_output += "\n"
             full_output += result.stderr
         
-        return CommandResponse(
-            success=result.returncode == 0,
-            output=full_output,
+        # Print the command output for debugging
+        print(f"📊 EXECUTE: Command completed with exit code: {result.returncode}")
+        print(f"📄 EXECUTE: Output length: {len(full_output)} characters")
+        if full_output:
+            print(f"📝 EXECUTE: Command output:\n{'-'*50}")
+            print(full_output)
+            print(f"{'-'*50}")
+        else:
+            print("📝 EXECUTE: No output from command")
+        
+        success = result.returncode == 0
+        print(f"📊 EXECUTE: Command success status: {success}")
+        
+        # Check if this was a Python command and add load_dotenv reminder
+        enhanced_output = full_output
+        python_match = re.search(r'\bpython\d*\b', command_lower)
+        if python_match and success:
+            dotenv_reminder = "\n\n💡 ENVIRONMENT VARIABLES REMINDER:\n"
+            dotenv_reminder += "If your Python script needs to access environment variables (like BACKEND_URL):\n"
+            dotenv_reminder += "1. Add: from dotenv import load_dotenv\n"
+            dotenv_reminder += "2. Add: load_dotenv() at the top of your script\n"
+            dotenv_reminder += "3. Then use: os.environ.get('BACKEND_URL')\n"
+            dotenv_reminder += "4. Install if needed: pip install python-dotenv\n"
+            enhanced_output += dotenv_reminder
+
+        response = CommandResponse(
+            success=success,
+            output=enhanced_output,
             error=result.stderr if result.returncode != 0 else None,
             exit_code=result.returncode
         )
         
+        print(f"✅ EXECUTE: Returning response with success={response.success}")
+        return response
+        
     except subprocess.TimeoutExpired:
+        print("⏰ EXECUTE: Command timed out after 30 seconds")
         return CommandResponse(
             success=False,
             output="",
@@ -1520,6 +1995,10 @@ async def execute_command(project_id: str, request: CommandRequest):
         )
     except Exception as e:
         logger.error(f"Failed to execute command: {e}")
+        print(f"❌ EXECUTE: Failed to execute command: {e}")
+        print(f"❌ EXECUTE: Exception type: {type(e).__name__}")
+        import traceback
+        print(f"❌ EXECUTE: Traceback:\n{traceback.format_exc()}")
         return CommandResponse(
             success=False,
             output="",
@@ -1544,6 +2023,382 @@ async def delete_project(project_id: str):
         return {"status": "archived", "project_id": project_id, "archive_path": str(archive_path)}
     
     raise HTTPException(404, f"Project {project_id} not found")
+
+@app.get("/api/projects/{project_id}/error-check")
+async def check_project_errors(project_id: str):
+    """Run comprehensive error checks for both backend (Python) and frontend (TypeScript) simultaneously"""
+    logger.info(f"Running comprehensive error checks for project {project_id}")
+    
+    # Validate project exists
+    project_path = LOCAL_PROJECTS_PATH / project_id
+    if not project_path.exists():
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    backend_path = project_path / "backend"
+    frontend_path = project_path / "frontend"
+    
+    # Initialize results structure
+    results = {
+        "project_id": project_id,
+        "timestamp": datetime.now().isoformat(),
+        "backend": {
+            "exists": backend_path.exists(),
+            "errors": "",
+            "status": {"executed": False, "success": False, "error": None},
+            "error_count": 0
+        },
+        "frontend": {
+            "exists": frontend_path.exists(),
+            "errors": "",
+            "status": {"executed": False, "success": False, "error": None},
+            "error_count": 0
+        },
+        "summary": {
+            "total_errors": 0,
+            "backend_has_errors": False,
+            "frontend_has_errors": False,
+            "overall_status": "unknown"
+        }
+    }
+    
+    # Run both error checks simultaneously using asyncio
+    async def run_python_check():
+        """Async wrapper for Python error check"""
+        if backend_path.exists():
+            try:
+                # Run the existing Python error check method
+                python_result = project_manager._run_python_error_check(project_id)
+                results["backend"]["errors"] = python_result.get("python_errors", "")
+                results["backend"]["status"] = python_result.get("python_check_status", {
+                    "executed": False, "success": False, "error": "No status returned"
+                })
+                
+                # Count errors
+                error_text = results["backend"]["errors"]
+                if error_text and error_text.strip():
+                    # Count error lines (rough estimate)
+                    error_lines = [line for line in error_text.split('\n') if 'error:' in line.lower() or 'traceback' in line.lower()]
+                    results["backend"]["error_count"] = len(error_lines) if error_lines else 1
+                
+                logger.info(f"Python error check completed for {project_id}: {results['backend']['error_count']} errors")
+            except Exception as e:
+                results["backend"]["status"] = {"executed": False, "success": False, "error": str(e)}
+                results["backend"]["errors"] = f"Failed to run Python error check: {str(e)}"
+                results["backend"]["error_count"] = 1
+                logger.error(f"Python error check failed for {project_id}: {e}")
+    
+    async def run_typescript_check():
+        """Async wrapper for TypeScript error check"""
+        if frontend_path.exists():
+            try:
+                # Run the existing TypeScript error check method
+                ts_result = project_manager._run_typescript_error_check(project_id)
+                results["frontend"]["errors"] = ts_result.get("ts_errors", "")
+                results["frontend"]["status"] = ts_result.get("ts_check_status", {
+                    "executed": False, "success": False, "error": "No status returned"
+                })
+                
+                # Count errors
+                error_text = results["frontend"]["errors"]
+                if error_text and error_text.strip():
+                    # Count TypeScript errors more accurately
+                    error_lines = [line for line in error_text.split('\n') if 'error TS' in line or 'Error:' in line]
+                    results["frontend"]["error_count"] = len(error_lines) if error_lines else 1
+                
+                logger.info(f"TypeScript error check completed for {project_id}: {results['frontend']['error_count']} errors")
+            except Exception as e:
+                results["frontend"]["status"] = {"executed": False, "success": False, "error": str(e)}
+                results["frontend"]["errors"] = f"Failed to run TypeScript error check: {str(e)}"
+                results["frontend"]["error_count"] = 1
+                logger.error(f"TypeScript error check failed for {project_id}: {e}")
+    
+    # Run both checks concurrently
+    try:
+        await asyncio.gather(run_python_check(), run_typescript_check())
+        
+        # Calculate summary
+        results["summary"]["backend_has_errors"] = (
+            results["backend"]["error_count"] > 0 or 
+            not results["backend"]["status"].get("success", False)
+        )
+        results["summary"]["frontend_has_errors"] = (
+            results["frontend"]["error_count"] > 0 or 
+            not results["frontend"]["status"].get("success", False)
+        )
+        results["summary"]["total_errors"] = results["backend"]["error_count"] + results["frontend"]["error_count"]
+        
+        # Determine overall status
+        if results["summary"]["total_errors"] == 0 and results["backend"]["status"].get("success", True) and results["frontend"]["status"].get("success", True):
+            results["summary"]["overall_status"] = "clean"
+        elif results["summary"]["backend_has_errors"] and results["summary"]["frontend_has_errors"]:
+            results["summary"]["overall_status"] = "both_have_errors"
+        elif results["summary"]["backend_has_errors"]:
+            results["summary"]["overall_status"] = "backend_has_errors"
+        elif results["summary"]["frontend_has_errors"]:
+            results["summary"]["overall_status"] = "frontend_has_errors"
+        else:
+            results["summary"]["overall_status"] = "unknown"
+        
+        logger.info(f"Error check completed for {project_id}: {results['summary']['overall_status']} ({results['summary']['total_errors']} total errors)")
+        
+    except Exception as e:
+        logger.error(f"Error during comprehensive error check for {project_id}: {e}")
+        results["summary"]["overall_status"] = "check_failed"
+        results["summary"]["error"] = str(e)
+    
+    return results
+
+@app.post("/api/projects/{project_id}/ast-analyze")
+async def analyze_project_ast(project_id: str, target: str = "backend", focus: str = "all"):
+    """Run AST structural analysis on project code"""
+    logger.info(f"Running AST analysis for project {project_id}, target: {target}, focus: {focus}")
+    
+    # Validate project exists
+    project_path = LOCAL_PROJECTS_PATH / project_id
+    if not project_path.exists():
+        raise HTTPException(404, f"Project {project_id} not found")
+    
+    # Validate target parameter
+    if target not in ["backend", "frontend"]:
+        raise HTTPException(400, f"Invalid target '{target}'. Must be 'backend' or 'frontend'")
+    
+    # Validate focus parameter
+    valid_focus = ["routes", "imports", "env", "database", "structure", "all"]
+    if focus not in valid_focus:
+        raise HTTPException(400, f"Invalid focus '{focus}'. Must be one of: {', '.join(valid_focus)}")
+    
+    target_path = project_path / target
+    if not target_path.exists():
+        raise HTTPException(404, f"{target.capitalize()} directory not found in project {project_id}")
+    
+    try:
+        # Copy AST analyzer to target directory if it doesn't exist
+        analyzer_path = target_path / "ast-analyzer.py"
+        boilerplate_analyzer = LOCAL_BACKEND_BOILERPLATE_PATH / "ast-analyzer.py"
+        
+        if not analyzer_path.exists() and boilerplate_analyzer.exists():
+            import shutil
+            shutil.copy(boilerplate_analyzer, analyzer_path)
+            logger.info(f"Copied AST analyzer to {analyzer_path}")
+        
+        # Run AST analysis
+        cmd = ["python3", "ast-analyzer.py", ".", target, focus]
+        logger.info(f"Running AST analysis command: {' '.join(cmd)} in {target_path}")
+        
+        result = subprocess.run(
+            cmd,
+            cwd=str(target_path),
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            # Parse the JSON output from stdout
+            try:
+                output_lines = result.stdout.strip().split('\n')
+                json_start = -1
+                for i, line in enumerate(output_lines):
+                    if line.startswith('{'):
+                        json_start = i
+                        break
+                
+                if json_start >= 0:
+                    json_output = '\n'.join(output_lines[json_start:])
+                    analysis_result = json.loads(json_output)
+                    
+                    logger.info(f"AST analysis completed for {project_id}: {analysis_result.get('summary', {}).get('files_analyzed', 0)} files analyzed")
+                    
+                    # Add metadata
+                    analysis_result["project_id"] = project_id
+                    analysis_result["timestamp"] = datetime.now().isoformat()
+                    analysis_result["success"] = True
+                    
+                    return analysis_result
+                else:
+                    logger.warning(f"AST analyzer did not return valid JSON output for {project_id}")
+                    return {
+                        "project_id": project_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "success": False,
+                        "error": "AST analyzer did not return valid JSON",
+                        "raw_output": result.stdout
+                    }
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AST analyzer JSON output for {project_id}: {e}")
+                return {
+                    "project_id": project_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "success": False,
+                    "error": f"JSON parsing error: {e}",
+                    "raw_output": result.stdout
+                }
+        else:
+            logger.error(f"AST analyzer failed for {project_id} with exit code {result.returncode}")
+            return {
+                "project_id": project_id,
+                "timestamp": datetime.now().isoformat(),
+                "success": False,
+                "error": f"AST analyzer failed with exit code {result.returncode}",
+                "stderr": result.stderr,
+                "stdout": result.stdout
+            }
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"AST analysis timed out for {project_id}")
+        return {
+            "project_id": project_id,
+            "timestamp": datetime.now().isoformat(),
+            "success": False,
+            "error": "AST analysis timed out after 30 seconds"
+        }
+    except Exception as e:
+        logger.error(f"Error during AST analysis for {project_id}: {e}")
+        return {
+            "project_id": project_id,
+            "timestamp": datetime.now().isoformat(),
+            "success": False,
+            "error": f"AST analysis error: {str(e)}"
+        }
+
+@app.get("/api/projects/{project_id}/check-logs")
+async def check_project_logs(
+    project_id: str, 
+    service: str = "backend", 
+    include_new_only: bool = True
+):
+    """Get logs for a project service with checkpoint tracking"""
+    logger.info(f"Checking logs for project {project_id}, service: {service}, new_only: {include_new_only}")
+    
+    # Validate project exists (special handling for frontend console logs)
+    project_path = LOCAL_PROJECTS_PATH / project_id
+    if not project_path.exists():
+        # For frontend service, allow generic "frontend-console" project
+        if service == "frontend" and project_id in ["frontend-console", "current-frontend"]:
+            # Use "frontend-console" as fallback for frontend logs
+            actual_project_id = "frontend-console"
+        else:
+            raise HTTPException(404, f"Project {project_id} not found")
+    else:
+        actual_project_id = project_id
+    
+    # Validate service parameter
+    if service not in ["backend", "frontend"]:
+        raise HTTPException(400, f"Invalid service '{service}'. Must be 'backend' or 'frontend'")
+    
+    try:
+        # Get logs from project manager
+        log_result = project_manager.get_logs(actual_project_id, service, include_new_only)
+        
+        # Add metadata
+        log_result.update({
+            "project_id": project_id,
+            "service": service,
+            "timestamp": datetime.now().isoformat(),
+            "include_new_only": include_new_only
+        })
+        
+        # Check if service is running
+        if project_id in project_manager.processes:
+            process_info = project_manager.processes[project_id]
+            service_process = process_info.get(f'{service}_process')
+            log_result['service_running'] = service_process is not None and service_process.poll() is None
+            
+            if service == "backend":
+                log_result['backend_port'] = process_info.get('backend_port')
+                log_result['backend_url'] = f"http://localhost:{process_info.get('backend_port')}" if process_info.get('backend_port') else None
+            elif service == "frontend":
+                log_result['frontend_port'] = process_info.get('frontend_port')
+                log_result['frontend_url'] = f"http://localhost:{process_info.get('frontend_port')}" if process_info.get('frontend_port') else None
+        else:
+            log_result['service_running'] = False
+        
+        logger.info(f"Retrieved {log_result['new_lines']} new lines from {log_result['total_lines']} total for {project_id} {service}")
+        return log_result
+        
+    except Exception as e:
+        logger.error(f"Error checking logs for {project_id} {service}: {e}")
+        raise HTTPException(500, f"Failed to check logs: {str(e)}")
+
+class FrontendLogEntry(BaseModel):
+    timestamp: str
+    level: str
+    message: str
+    url: str
+    userAgent: Optional[str] = None
+
+class FrontendLogBatch(BaseModel):
+    project_id: str
+    logs: List[FrontendLogEntry]
+    immediate: bool = False
+
+@app.post("/api/frontend-logs")
+async def receive_frontend_logs(request: Request):
+    """Receive frontend console logs and store them"""
+    try:
+        # Parse the request body
+        body = await request.json()
+        
+        # Handle both batch and single log formats
+        if "logs" in body:
+            # Batch format from our console capture script
+            log_batch = FrontendLogBatch(**body)
+            project_id = log_batch.project_id
+            log_entries = log_batch.logs
+        else:
+            # Single log format (backward compatibility)
+            log_entry = FrontendLogEntry(**body)
+            project_id = "frontend-console"
+            log_entries = [log_entry]
+            
+            # Try to find active frontend project for single format
+            for pid, process_info in project_manager.processes.items():
+                if process_info.get('frontend_process') and process_info['frontend_process'].poll() is None:
+                    frontend_port = process_info.get('frontend_port')
+                    if frontend_port and f"localhost:{frontend_port}" in log_entry.url:
+                        project_id = pid
+                        break
+        
+        # Get log file path (create logs directory if needed)
+        logs_dir = Path("/Users/shanjairaj/local-projects/logs")
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        today = datetime.now().strftime("%Y%m%d")
+        log_file_path = logs_dir / f"{project_id}_frontend_{today}.log"
+        
+        # Initialize log file if it's new
+        if not log_file_path.exists():
+            with open(log_file_path, 'w') as f:
+                f.write(f"===== FRONTEND CONSOLE LOG CAPTURE STARTED =====\n")
+                f.write(f"Project: {project_id}\n")
+                f.write(f"Service: frontend\n") 
+                f.write(f"URL: {log_entries[0].url if log_entries else 'N/A'}\n")
+                f.write(f"Timestamp: {datetime.now()}\n")
+                f.write("==================================================\n\n")
+        
+        # Write all log entries to file
+        logs_written = 0
+        with open(log_file_path, 'a', buffering=1) as f:
+            for log_entry in log_entries:
+                # Format log entry with better formatting
+                formatted_log = f"[{log_entry.timestamp}] [{log_entry.level.upper()}] {log_entry.message}"
+                if hasattr(log_entry, 'stack') and log_entry.stack:
+                    formatted_log += f"\nStack: {log_entry.stack}"
+                f.write(formatted_log + '\n')
+                logs_written += 1
+        
+        return {
+            "status": "success", 
+            "logged": True,
+            "project_id": project_id,
+            "logs_written": logs_written,
+            "log_file": str(log_file_path)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error receiving frontend log: {e}")
+        raise HTTPException(500, f"Failed to log frontend entry: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

@@ -26,7 +26,7 @@ docker_client = None
 # VPS Configuration - PERSISTENT STORAGE
 VPS_BASE_PATH = Path("/opt/codebase-platform")
 VPS_PROJECTS_PATH = VPS_BASE_PATH / "projects"
-VPS_FRONTEND_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "shadcn-boilerplate"
+VPS_FRONTEND_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "shadcn-boilerplate"  # React boilerplate with custom CSS (not shadcn components)
 VPS_BACKEND_BOILERPLATE_PATH = VPS_BASE_PATH / "boilerplate" / "backend-boilerplate"
 
 # Ensure directories exist
