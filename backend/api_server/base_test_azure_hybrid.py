@@ -25,7 +25,7 @@ import sys
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
-from groq import Groq
+# from groq import Groq  # Removed - not using Groq anymore
 from typing import Generator, Dict, Optional
 from shared_models import GroqAgentState, StreamingXMLParser
 from openai import OpenAI, AzureOpenAI
@@ -41,7 +41,7 @@ deepseek_endpoint = "https://rajsu-m9qoo96e-eastus2.services.ai.azure.com"
 deepseek_model_name = "DeepSeek-R1-0528"
 deepseek_api_version = "2024-05-01-preview"
 
-subscription_key = "FMj8fTNAOYsSv4jMIq7W0CbHATRiQAUa0MQIR6wuqlS8vvaT6ZoSJQQJ99BDACHYHv6XJ3w3AAAAACOGVJL1"
+subscription_key = os.environ.get('AZURE_SUBSCRIPTION_KEY', 'FMj8fTNAOYsSv4jMIq7W0CbHATRiQAUa0MQIR6wuqlS8vvaT6ZoSJQQJ99BDACHYHv6XJ3w3AAAAACOGVJL1')
 
 # Default model selection (can be overridden with MODEL_TYPE=deepseek)
 model_type = os.environ.get("MODEL_TYPE", "gpt").lower()
@@ -64,12 +64,12 @@ azure_client = AzureOpenAI(
     api_key=subscription_key,
 )
 
-openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key='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', default_headers={"x-include-usage": 'true'})
+openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.environ.get('OPENAI_KEY', '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'), default_headers={"x-include-usage": 'true'})
 
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"
 
-from coder.prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, atlas_gpt4_prompt, atlas_gpt4_ultra_prompt, atlas_gpt4_short_prompt, prompt
+from prompts import plan_prompts, generate_error_check_prompt, _build_summary_prompt, todo_optimised_senior_engineer_prompt as senior_engineer_prompt, atlas_prompt, atlas_gpt4_prompt, atlas_gpt4_ultra_prompt, atlas_gpt4_short_prompt, prompt
 
 # Custom exception for frontend command interrupts
 class FrontendCommandInterrupt(Exception):
@@ -86,8 +86,9 @@ if USE_AZURE_MODE:
     from index_fixed_azure_hybrid import coder  # Use local API server version
     print("🔵 Using Azure OpenAI mode with hybrid compatibility")
 else:
-    from coder.index_fixed import coder
-    print("🟢 Using OpenRouter mode")
+    # Fallback to Azure mode for Modal deployment
+    from index_fixed_azure_hybrid import coder
+    print("🟢 Using OpenRouter mode (fallback to Azure)")
 
 
 def generate_project_name(user_request: str) -> str:
@@ -257,17 +258,9 @@ class BoilerplatePersistentGroq:
 
     def _load_project_context(self):
         """Load existing project summary and conversation history for update mode"""
-        # Load project summary
-        summaries_dir = self.backend_dir / "project_summaries"
-        summary_file = summaries_dir / f"{self.project_id}_summary.md"
-        
-        if summary_file.exists():
-            with open(summary_file, 'r', encoding='utf-8') as f:
-                self.project_summary = f.read()
-            print(f"📋 Loaded project summary from: {summary_file}")
-        else:
-            self.project_summary = "No project summary available."
-            print(f"⚠️  No project summary found at: {summary_file}")
+        # Initialize project summary (cloud storage only)
+        self.project_summary = "No project summary available."
+        print(f"📋 Project summary: cloud storage only (no local files)")
         
         # Load conversation history - CLOUD FIRST, LOCAL FALLBACK
         conversation_loaded = False
@@ -294,40 +287,6 @@ class BoilerplatePersistentGroq:
             except Exception as e:
                 print(f"⚠️ Failed to load conversation history from cloud: {str(e)}")
         
-        # Fallback to local file if cloud failed or not available
-        if not conversation_loaded:
-            print(f"💾 Falling back to local conversation history file")
-            conversations_dir = self.backend_dir / "project_conversations"
-            conversations_dir.mkdir(exist_ok=True)
-            
-            conversation_file = conversations_dir / f"{self.project_id}_messages.json"
-            
-            if conversation_file.exists():
-                try:
-                    with open(conversation_file, 'r', encoding='utf-8') as f:
-                        conversation_data = json.load(f)
-                        self.conversation_history = conversation_data.get('messages', [])
-                        
-                        # Load token usage from conversation data
-                        if 'token_usage' in conversation_data:
-                            # Ensure backwards compatibility with old token format
-                            old_usage = conversation_data['token_usage']
-                            self.token_usage = {
-                                'total_tokens': old_usage.get('total_tokens', 0),
-                                'prompt_tokens': old_usage.get('total_prompt_tokens', 0),
-                                'completion_tokens': old_usage.get('total_completion_tokens', 0)
-                            }
-                        
-                    print(f"💾 ✅ Loaded conversation history from local file: {conversation_file}")
-                    print(f"💬 Messages loaded: {len(self.conversation_history)}")
-                    if 'token_usage' in conversation_data:
-                        print(f"💰 Total tokens used: {self.token_usage['total_tokens']:,}")
-                    conversation_loaded = True
-                    
-                except Exception as e:
-                    print(f"❌ Failed to load local conversation file: {str(e)}")
-            else:
-                print(f"📄 No local conversation history found at: {conversation_file}")
         
         # Final status
         if conversation_loaded:
@@ -372,12 +331,7 @@ class BoilerplatePersistentGroq:
             }
         }
         
-        # Ensure local file path exists for fallback
-        conversations_dir = self.backend_dir / "project_conversations"
-        conversations_dir.mkdir(exist_ok=True)
-        conversation_file = conversations_dir / f"{self.project_id}_messages.json"
-        
-        # Save to cloud storage if available, fallback to local file
+        # Save to cloud storage only - no local fallbacks
         if self.cloud_storage and self.project_id:
             # Save conversation history
             success = self.cloud_storage.save_conversation_history(self.project_id, self.conversation_history)
@@ -394,16 +348,9 @@ class BoilerplatePersistentGroq:
             elif success:
                 print(f"☁️ Saved conversation history to cloud storage (metadata save failed)")
             else:
-                print(f"⚠️ Failed to save conversation to cloud, falling back to local file")
-                # Fallback to local file
-                with open(conversation_file, 'w', encoding='utf-8') as f:
-                    json.dump(conversation_data, f, indent=2, ensure_ascii=False)
-                print(f"💾 Saved conversation history to: {conversation_file}")
+                print(f"❌ Failed to save conversation to cloud storage")
         else:
-            # Fallback to local file if cloud storage not available
-            with open(conversation_file, 'w', encoding='utf-8') as f:
-                json.dump(conversation_data, f, indent=2, ensure_ascii=False)
-            print(f"💾 Saved conversation history to: {conversation_file}")
+            print(f"❌ No cloud storage available - conversation not saved")
 
     def _check_and_summarize_conversation(self, is_mid_task=False):
         """Check if conversation needs summarization and create detailed summary"""
@@ -890,22 +837,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 print(f"📖 Previously read files: {len(self.read_files_persistent)} files")
                 return
             else:
-                print(f"📄 No read files tracking found in cloud storage, checking local file")
-        
-        # Fallback to local file
-        read_files_dir = self.backend_dir / "project_read_files"
-        read_files_dir.mkdir(exist_ok=True)
-        
-        read_files_file = read_files_dir / f"{self.project_id}_read_files.json"
-        
-        if read_files_file.exists():
-            with open(read_files_file, 'r', encoding='utf-8') as f:
-                read_files_data = json.load(f)
-                self.read_files_persistent = set(read_files_data.get('read_files', []))
-            print(f"📚 Loaded read files tracking from local file: {read_files_file}")
-            print(f"📖 Previously read files: {len(self.read_files_persistent)} files")
-        else:
-            print(f"⚠️ No read files tracking found locally or in cloud")
+                print(f"📄 No read files tracking found in cloud storage")
     
     def _save_read_files_tracking(self):
         """Save project-specific read files tracking to cloud storage"""
@@ -915,31 +847,9 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             if success:
                 print(f"☁️ Saved read files tracking to cloud storage")
             else:
-                print(f"⚠️ Failed to save read files tracking to cloud, falling back to local file")
-                self._save_read_files_tracking_local()
+                print(f"❌ Failed to save read files tracking to cloud storage")
         else:
-            # Fallback to local file if cloud storage not available
-            self._save_read_files_tracking_local()
-    
-    def _save_read_files_tracking_local(self):
-        """Save read files tracking to local JSON file (fallback)"""
-        read_files_dir = self.backend_dir / "project_read_files"
-        read_files_dir.mkdir(exist_ok=True)
-        
-        read_files_file = read_files_dir / f"{self.project_id}_read_files.json"
-        
-        read_files_data = {
-            "project_id": self.project_id,
-            "created_at": datetime.now().isoformat(),
-            "last_updated": datetime.now().isoformat(),
-            "read_files": list(self.read_files_persistent),
-            "total_files_read": len(self.read_files_persistent)
-        }
-        
-        with open(read_files_file, 'w', encoding='utf-8') as f:
-            json.dump(read_files_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"📚 Saved read files tracking to: {read_files_file}")
+            print(f"❌ No cloud storage available - read files tracking not saved")
 
 
     def create_project_via_cloud_storage(self, project_name: str) -> str:
@@ -1060,9 +970,10 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 
                 # Add all errors to conversation history
                 if all_errors:
+                    errors_text = '\n\n'.join(all_errors)
                     error_message = {
                         "role": "user", 
-                        "content": f"Project created but validation found issues:\n\n{'\n\n'.join(all_errors)}\n\nPlease fix these errors."
+                        "content": f"Project created but validation found issues:\n\n{errors_text}\n\nPlease fix these errors."
                     }
                     self.conversation_history.append(error_message)
                 
@@ -1630,13 +1541,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 
                 print(f"📊 Token usage for summary: {usage.total_tokens} tokens")
             
-            # Save summary to MD file
-            summary_file = summaries_dir / f"{self.project_id}_summary.md"
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(summary_content)
-            
-            print(f"✅ Project summary generated: {summary_file}")
-            return str(summary_file)
+            print(f"✅ Project summary generated (cloud storage only)")
+            return "summary_generated_cloud_only"
             
         except Exception as e:
             print(f"❌ Error generating project summary: {e}")
@@ -2663,7 +2569,7 @@ If you really want to create an empty file, please confirm by responding with th
                 # Look for <action type="attempt_completion">content</action>
                 action_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', accumulated_content, re.DOTALL | re.IGNORECASE)
                 if action_match:
-                    completion_message = action_match.group(1).strip()
+                    completion_message = action_match.group(1).strip(' \t\r')
                     print(f"📄 Method 3 - Extracted from XML action tag: {len(completion_message)} chars")
                     
                 # Look for other attempt_completion patterns in content
@@ -2818,149 +2724,16 @@ If you really want to create an empty file, please confirm by responding with th
             }
     
     def _get_todo_file_path(self):
-        """Get the path for todo storage file"""
-        todos_dir = f"projects/{self.project_id}"
-        os.makedirs(todos_dir, exist_ok=True)
-        return os.path.join(todos_dir, "todos.md")
+        """Todo system disabled - using cloud storage only"""
+        return None
     
     def _load_todos(self):
-        """Load todos from markdown file"""
-        todo_file = self._get_todo_file_path()
-        if not os.path.exists(todo_file):
-            return []
-        
-        todos = []
-        try:
-            with open(todo_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            # Parse markdown format todos
-            lines = content.split('\n')
-            current_todo = None
-            
-            for line in lines:
-                line = line.strip()
-                if line.startswith('- [ ]') or line.startswith('- [x]') or line.startswith('- [🔄]') or line.startswith('- [⏳]') or line.startswith('- [🚫]'):
-                    # Parse todo line
-                    if line.startswith('- [x]'):
-                        status = 'completed'
-                    elif line.startswith('- [🔄]'):
-                        status = 'in_progress'
-                    elif line.startswith('- [⏳]'):
-                        status = 'pending'
-                    elif line.startswith('- [🚫]'):
-                        status = 'blocked'
-                    else:
-                        status = 'pending'
-                    
-                    # Extract content and ID
-                    todo_text = line[5:].strip()  # Remove checkbox part
-                    todo_id = None
-                    description = todo_text
-                    priority = 'medium'
-                    integration = False
-                    
-                    # Look for ID in format (id: todo_123)
-                    if '(id:' in todo_text:
-                        id_start = todo_text.find('(id:')
-                        id_end = todo_text.find(')', id_start)
-                        if id_end > id_start:
-                            todo_id = todo_text[id_start+4:id_end].strip()
-                            description = todo_text[:id_start].strip()
-                    
-                    # Look for priority in format [priority: high]
-                    if '[priority:' in description:
-                        prio_start = description.find('[priority:')
-                        prio_end = description.find(']', prio_start)
-                        if prio_end > prio_start:
-                            priority = description[prio_start+10:prio_end].strip()
-                            description = description[:prio_start].strip()
-                    
-                    # Look for integration flag [integration: true]
-                    if '[integration:' in description:
-                        int_start = description.find('[integration:')
-                        int_end = description.find(']', int_start)
-                        if int_end > int_start:
-                            integration = description[int_start+13:int_end].strip() == 'true'
-                            description = description[:int_start].strip()
-                    
-                    if not todo_id:
-                        todo_id = f"todo_{uuid.uuid4().hex[:8]}"
-                    
-                    current_todo = {
-                        'id': todo_id,
-                        'description': description,
-                        'priority': priority,
-                        'integration': integration,
-                        'status': status,
-                        'created_at': datetime.now().isoformat()
-                    }
-                    todos.append(current_todo)
-                    
-        except Exception as e:
-            print(f"Error loading todos: {e}")
-            return []
-        
-        return todos
+        """Todo system disabled - using cloud storage only"""
+        return []
     
     def _save_todos(self, todos):
-        """Save todos to markdown file"""
-        todo_file = self._get_todo_file_path()
-        
-        try:
-            with open(todo_file, 'w', encoding='utf-8') as f:
-                f.write("# Todo List\n\n")
-                
-                # Group by status
-                pending = [t for t in todos if t['status'] == 'pending']
-                in_progress = [t for t in todos if t['status'] == 'in_progress']
-                completed = [t for t in todos if t['status'] == 'completed']
-                blocked = [t for t in todos if t['status'] == 'blocked']
-                
-                # Write pending todos
-                if pending:
-                    f.write("## Pending\n\n")
-                    for todo in pending:
-                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
-                        if todo.get('integration'):
-                            metadata += " [integration: true]"
-                        f.write(f"- [⏳] {todo['description']}{metadata} (id: {todo['id']})\n")
-                    f.write("\n")
-                
-                # Write in progress todos
-                if in_progress:
-                    f.write("## In Progress\n\n")
-                    for todo in in_progress:
-                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
-                        if todo.get('integration'):
-                            metadata += " [integration: true]"
-                        f.write(f"- [🔄] {todo['description']}{metadata} (id: {todo['id']})\n")
-                    f.write("\n")
-                
-                # Write blocked todos
-                if blocked:
-                    f.write("## Blocked\n\n")
-                    for todo in blocked:
-                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
-                        if todo.get('integration'):
-                            metadata += " [integration: true]"
-                        f.write(f"- [🚫] {todo['description']}{metadata} (id: {todo['id']})\n")
-                    f.write("\n")
-                
-                # Write completed todos
-                if completed:
-                    f.write("## Completed\n\n")
-                    for todo in completed:
-                        metadata = f" [priority: {todo['priority']}]" if todo['priority'] != 'medium' else ""
-                        if todo.get('integration'):
-                            metadata += " [integration: true]"
-                        if todo.get('integration_tested'):
-                            metadata += " [integration_tested: true]"
-                        f.write(f"- [x] {todo['description']}{metadata} (id: {todo['id']})\n")
-                    f.write("\n")
-                        
-        except Exception as e:
-            print(f"Error saving todos: {e}")
+        """Todo system disabled - using cloud storage only"""
+        print("ℹ️ Todo system disabled - using cloud storage only")
     
     def _ensure_todos_loaded(self):
         """Ensure todos are loaded from persistent storage"""

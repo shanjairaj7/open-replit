@@ -124,7 +124,7 @@ def _handle_attempt_completion_interrupt(self: GroqAgentState, action: dict, acc
             # Look for <action type="attempt_completion">content</action>
             action_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', accumulated_content, re.DOTALL | re.IGNORECASE)
             if action_match:
-                completion_message = action_match.group(1).strip()
+                completion_message = action_match.group(1).strip(' \t\r')
                 print(f"📄 Method 3 - Extracted from XML action tag: {len(completion_message)} chars")
                 
             # Look for other attempt_completion patterns in content
@@ -356,9 +356,6 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             except Exception as e:
                 print(f"⚠️ CODER: Streaming callback error: {e}")
     
-    # Log messages and token count at each coder() call
-    _log_coder_call(messages, self)
-    print("📝 CODER: Call logging completed")
     
     max_iterations = 200  # Prevent infinite loops
     iteration = 0
@@ -1141,11 +1138,12 @@ The file '{file_path}' uses `os.environ` but doesn't call `load_dotenv()`.
 **To fix this, add these lines at the top of your file:**
 """
                         if error_messages:
+                            error_text = '\n\n'.join(error_messages)
                             user_content = f"""
 ✅ File '{file_path}' created.
 
 **Static Analysis Results:**
-{'\n\n'.join(error_messages)}
+{error_text}
 
 **NEXT STEPS:**
 1. Fix these static errors first
@@ -2523,14 +2521,19 @@ Note: Continue with the highest priority todo.
     frontend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"frontend\"/> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
     
     # Add service status to full_user_msg
+    backend_running = f"🟢 Running ・ Available at {backend_url} (available from BACKEND_URL environment variable)" if backend_url else "🚫 Not running"
+    frontend_running = f"🟢 Running ・ Available at {frontend_url}" if frontend_url else "🚫 Not running"
+    backend_instructions = "" if backend_url else "Backend is not running. Use <action type=\"start_backend\"/> to start or <action type=\"restart_backend\"/> to restart it."
+    frontend_instructions = "" if frontend_url else "Frontend is not running. Use <action type=\"start_frontend\"/> to start or <action type=\"restart_frontend\"/> to restart it."
+    
     full_user_msg += f"""
 <service_status>
-Backend: {f"🟢 Running ・ Available at {backend_url} (available from BACKEND_URL environment variable)" if backend_url else "🚫 Not running"} ・ {backend_status}{backend_error_indicator}
-Frontend: {f"🟢 Running ・ Available at {frontend_url}" if frontend_url else "🚫 Not running"} ・ {frontend_status}{frontend_error_indicator}
+Backend: {backend_running} ・ {backend_status}{backend_error_indicator}
+Frontend: {frontend_running} ・ {frontend_status}{frontend_error_indicator}
 
-{"" if backend_url else "Backend is not running. Use <action type=\"start_backend\"/> to start or <action type=\"restart_backend\"/> to restart it."}
+{backend_instructions}
     - Remember to load_dotenv() in your backend code to use the environment variables.
-{"" if frontend_url else "Frontend is not running. Use <action type=\"start_frontend\"/> to start or <action type=\"restart_frontend\"/> to restart it."}
+{frontend_instructions}
 </service_status>
 """
     print(f"🔍 CODER: Backend status: {backend_status}")
@@ -2909,137 +2912,8 @@ def _run_file_diagnostics(self, file_path):
         traceback.print_exc()
         return f"<diagnostics>\n**All Checks:** ❌ ERROR - {str(e)}\n</diagnostics>"
 
-def _log_coder_call(messages, self):
-    """Log exact messages and token count at each coder() call"""
-    try:
-        # Create logs directory
-        logs_dir = os.path.join(os.path.dirname(__file__), '..', 'coder_call_logs')
-        os.makedirs(logs_dir, exist_ok=True)
-        
-        # Generate timestamp and filename
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # milliseconds
-        project_id = getattr(self, 'project_id', 'unknown')
-        filename = f"coder_call_{project_id}_{timestamp}"
-        
-        # Current token usage
-        current_tokens = getattr(self, 'token_usage', {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0})
-        
-        # Calculate approximate input tokens for this call
-        input_text = ""
-        for msg in messages:
-            input_text += f"{msg.get('role', '')}: {msg.get('content', '')}\n"
-        
-        estimated_input_tokens = len(input_text) // 4  # rough estimate: 4 chars per token
-        
-        # Create log data
-        log_data = {
-            "timestamp": datetime.now().isoformat(),
-            "project_id": project_id,
-            "iteration_info": {
-                "total_tokens_before_call": current_tokens.get('total_tokens', 0),
-                "prompt_tokens_before_call": current_tokens.get('prompt_tokens', 0),
-                "completion_tokens_before_call": current_tokens.get('completion_tokens', 0),
-                "estimated_input_tokens_this_call": estimated_input_tokens
-            },
-            "model": getattr(self, 'model', 'unknown'),
-            "messages_count": len(messages),
-            "messages": messages,
-            "statistics": {
-                "total_characters": len(input_text),
-                "message_breakdown": [
-                    {
-                        "role": msg.get('role', ''),
-                        "content_length": len(msg.get('content', ''))
-                    } for msg in messages
-                ]
-            }
-        }
-        
-        # Save as JSON file
-        json_file = os.path.join(logs_dir, f"{filename}.json")
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(log_data, f, indent=2, ensure_ascii=False)
-        
-        # Save as markdown file for readability
-        md_file = os.path.join(logs_dir, f"{filename}.md")
-        with open(md_file, 'w', encoding='utf-8') as f:
-            f.write(f"# Coder Call Log - {timestamp}\n\n")
-            f.write(f"**Project ID:** {project_id}\n")
-            f.write(f"**Timestamp:** {datetime.now().isoformat()}\n")
-            f.write(f"**Model:** {getattr(self, 'model', 'unknown')}\n\n")
-            
-            f.write("## Token Usage Before This Call\n\n")
-            f.write(f"- **Total Tokens:** {current_tokens.get('total_tokens', 0):,}\n")
-            f.write(f"- **Prompt Tokens:** {current_tokens.get('prompt_tokens', 0):,}\n") 
-            f.write(f"- **Completion Tokens:** {current_tokens.get('completion_tokens', 0):,}\n")
-            f.write(f"- **Estimated Input Tokens (this call):** {estimated_input_tokens:,}\n\n")
-            
-            f.write("## Messages Sent to Model\n\n")
-            f.write(f"**Total Messages:** {len(messages)}\n")
-            f.write(f"**Total Characters:** {len(input_text):,}\n\n")
-            
-            for i, msg in enumerate(messages, 1):
-                role = msg.get('role', 'unknown')
-                content = msg.get('content', '')
-                f.write(f"### Message {i} - {role.title()}\n\n")
-                f.write(f"**Length:** {len(content):,} characters\n\n")
-                f.write("```\n")
-                f.write(content)
-                f.write("\n```\n\n")
-        
-        print(f"📊 CODER_LOG: Saved call details to {json_file} and {md_file}")
-        
-    except Exception as e:
-        print(f"❌ CODER_LOG: Error logging coder call: {e}")
-        # Don't let logging errors break the main flow
 
 
-# Add the missing conversation history management methods to GroqAgentState
-def _save_conversation_history_method(self):
-    """Save current conversation history to JSON file"""
-    if not hasattr(self, 'backend_dir') or not hasattr(self, 'project_id'):
-        print("⚠️ Missing backend_dir or project_id, cannot save conversation history")
-        return
-    
-    from pathlib import Path
-    conversations_dir = Path(self.backend_dir) / "setup" / "project_conversations"
-    conversations_dir.mkdir(parents=True, exist_ok=True)
-    
-    conversation_file = conversations_dir / f"{self.project_id}_messages.json"
-    
-    # Check if we need to summarize conversation
-    token_usage = getattr(self, 'token_usage', {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0})
-    
-    if token_usage['total_tokens'] >= 75000:  # Use 75k tokens as threshold for coder version
-        # Mid-task summarization (token limit reached)
-        print(f"🔄 Triggering summarization: {token_usage['total_tokens']:,} total tokens")
-        self._check_and_summarize_conversation(is_mid_task=True)
-    elif token_usage['total_tokens'] >= 50000 and len(self.conversation_history) > 50:
-        # Optional summarization for completed tasks (lower threshold)
-        print(f"🔄 Optional summarization for completed task: {token_usage['total_tokens']:,} total tokens")
-        self._check_and_summarize_conversation(is_mid_task=False)
-    # if length of conversation is more than 60 messages, summarise
-    elif len(self.conversation_history) > 60:
-        print(f"🔄 Summarizing conversation: {len(self.conversation_history)} messages")
-        self._check_and_summarize_conversation(is_mid_task=True)
-    
-    conversation_data = {
-        "project_id": self.project_id,
-        "created_at": datetime.now().isoformat(),
-        "last_updated": datetime.now().isoformat(),
-        "summary_generated": True,
-        "messages": self.conversation_history,
-        "token_usage": token_usage,
-        "project_state": {
-            "files_created": list(getattr(self, 'project_files', {}).keys()),
-            "last_preview_status": "running"
-        }
-    }
-    
-    with open(conversation_file, 'w', encoding='utf-8') as f:
-        json.dump(conversation_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"💾 Saved conversation history to: {conversation_file}")
 
 def _check_and_summarize_conversation_method(self, is_mid_task=False):
     """Check if conversation needs summarization and create detailed summary"""
@@ -3204,12 +3078,7 @@ def _reset_token_tracking_after_summary_method(self):
         'completion_tokens': 0
     }
 
-# Monkey patch the methods onto GroqAgentState class
-GroqAgentState._save_conversation_history = _save_conversation_history_method
-GroqAgentState._check_and_summarize_conversation = _check_and_summarize_conversation_method  
-GroqAgentState._generate_detailed_conversation_summary = _generate_detailed_conversation_summary_method
-GroqAgentState._is_valid_summary = _is_valid_summary_method
-GroqAgentState._reset_token_tracking_after_summary = _reset_token_tracking_after_summary_method
+# Local storage removed - using cloud storage only
 
 print("✅ Added missing conversation history management methods to GroqAgentState")
 
