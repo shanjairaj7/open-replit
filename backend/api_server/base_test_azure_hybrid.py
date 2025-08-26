@@ -13,6 +13,7 @@ import json
 import shutil
 import requests
 import asyncio
+import aiohttp
 import time
 import argparse
 import uuid
@@ -206,6 +207,9 @@ class BoilerplatePersistentGroq:
                 # Test project - minimal setup
                 self.system_prompt = "Test system prompt"
                 print(f"✅ Test project initialized: {self.project_name} (ID: {self.project_id})")
+                
+                # Initialize empty todos for new projects
+                self.todos = []
             
         else:
             # Create new project
@@ -218,6 +222,8 @@ class BoilerplatePersistentGroq:
                 self.project_id = self.create_project_via_cloud_storage(self.project_name)
                 
             self.project_files = {}
+            # Initialize empty todos for new projects
+            self.todos = []
             # Use cloud storage scanning for existing projects
             if self.cloud_storage:
                 self._scan_project_files_via_cloud_storage()
@@ -281,6 +287,9 @@ class BoilerplatePersistentGroq:
                     if project_metadata and 'token_usage' in project_metadata:
                         self.token_usage = project_metadata['token_usage']
                         print(f"💰 Loaded token usage from cloud metadata: {self.token_usage['total_tokens']:,} total tokens")
+                    
+                    # Load todos from cloud storage
+                    self._ensure_todos_loaded()
                 else:
                     print(f"☁️ No conversation history found in cloud storage")
                     
@@ -336,12 +345,23 @@ class BoilerplatePersistentGroq:
             # Save conversation history
             success = self.cloud_storage.save_conversation_history(self.project_id, self.conversation_history)
             
-            # Also save project metadata with token usage
-            metadata_success = self.cloud_storage.save_project_metadata(self.project_id, {
+            # Also save project metadata with token usage and todos
+            # IMPORTANT: Load existing metadata first to preserve backend_deployment info
+            existing_metadata = self.cloud_storage.load_project_metadata(self.project_id) or {}
+            
+            metadata_to_save = {
+                **existing_metadata,  # Preserve existing data like backend_deployment
                 "token_usage": self.token_usage,
                 "project_state": conversation_data["project_state"],
                 "last_conversation_update": datetime.now().isoformat()
-            })
+            }
+            
+            # Include todos if they exist
+            if hasattr(self, 'todos') and self.todos:
+                metadata_to_save["todos"] = self.todos
+                metadata_to_save["todos_last_updated"] = datetime.now().isoformat()
+            
+            metadata_success = self.cloud_storage.save_project_metadata(self.project_id, metadata_to_save)
             
             if success and metadata_success:
                 print(f"☁️ Saved conversation history and metadata to cloud storage")
@@ -1554,8 +1574,56 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # This is a placeholder - the real implementation is in index_fixed.py
         return None
 
-    def _process_update_request_with_interrupts(self, user_message: str, mode: str = "update", step_info: dict = None, streaming_callback=None):
-        """Process request with interrupt-and-continue pattern - supports both update and step generation modes"""
+    async def _async_http_get(self, url, timeout=30):
+        """Async HTTP GET request"""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(url) as response:
+                text = await response.text()
+                return {
+                    'status_code': response.status,
+                    'json': lambda: json.loads(text) if text.strip() else {},
+                    'text': text
+                }
+    
+    async def _async_http_post(self, url, json_data=None, timeout=30):
+        """Async HTTP POST request"""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.post(url, json=json_data) as response:
+                text = await response.text()
+                return {
+                    'status_code': response.status,
+                    'json': lambda: json.loads(text) if text.strip() else {},
+                    'text': text
+                }
+    
+    async def _async_http_put(self, url, json_data=None, timeout=30):
+        """Async HTTP PUT request"""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.put(url, json=json_data) as response:
+                text = await response.text()
+                return {
+                    'status_code': response.status,
+                    'json': lambda: json.loads(text) if text.strip() else {},
+                    'text': text
+                }
+
+    async def _async_coder(self, messages, streaming_callback=None):
+        """Async wrapper for AI model calls to prevent blocking other requests"""
+        import asyncio
+        
+        # Run the synchronous coder function in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        
+        def run_coder():
+            from index_fixed_azure_hybrid import coder
+            return coder(messages=messages, self=self, streaming_callback=streaming_callback)
+        
+        # Execute in thread pool to maintain concurrency
+        response_content = await loop.run_in_executor(None, run_coder)
+        return response_content
+
+    async def _process_update_request_with_interrupts(self, user_message: str, mode: str = "update", step_info: dict = None, streaming_callback=None):
+        """Process request with interrupt-and-continue pattern - supports both update and step generation modes (async for concurrency)"""
         
         if mode == "step":
             step_number = step_info.get('step_number', 'N/A')
@@ -1618,8 +1686,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             print(f"  {i+1}. {role}: {content_preview}")
         print()
         
-        # Start initial generation
-        response_content = coder(messages=messages, self=self, streaming_callback=streaming_callback)
+        # Start initial generation (async to allow concurrent requests)
+        response_content = await self._async_coder(messages=messages, streaming_callback=streaming_callback)
         
         # Add final response to conversation history and save in real-time
         if response_content:
@@ -1700,8 +1768,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return None
 
     def _handle_check_logs_interrupt(self, action: dict) -> dict:
-        """Handle check_logs action by calling the logs API"""
-        print(f"📋 CODER: Handling check_logs interrupt")
+        """Handle check_logs action using Modal app logs command for serverless backend"""
+        print(f"📋 CODER: Handling check_logs interrupt for serverless backend")
         
         try:
             project_id = getattr(self, 'project_id', None)
@@ -1711,53 +1779,95 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             
             # Get parameters from action
             service = action.get('service', 'backend')
-            new_only = action.get('new_only', True)
             
-            print(f"📡 CODER: Calling logs API for project: {project_id}, service: {service}, new_only: {new_only}")
-            
-            # Import requests for API call
-            import requests
-            import json
-            
-            # Call the check_logs API we implemented
-            api_base_url = getattr(self, 'api_base_url', 'http://localhost:8000')
-            if api_base_url.endswith('/api'):
-                api_base_url = api_base_url[:-4]  # Remove '/api' suffix
-            
-            logs_url = f"{api_base_url}/api/projects/{project_id}/check-logs"
-            params = {
-                'service': service,
-                'include_new_only': new_only
-            }
-            
-            print(f"📡 CODER: Calling {logs_url} with params: {params}")
-            
-            response = requests.get(logs_url, params=params, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                print(f"✅ CODER: Logs retrieved successfully")
-                print(f"📊 CODER: Service status: {'Running' if result.get('service_running', False) else 'Stopped'}")
-                print(f"📈 CODER: Total lines: {result.get('total_lines', 0)}, New lines: {result.get('new_lines', 0)}")
+            if service == 'backend':
+                print(f"🔍 Getting backend info for project: {project_id}")
                 
-                # Log summary of what was retrieved
-                if result.get('new_lines', 0) > 0:
-                    print(f"📋 CODER: Retrieved {result['new_lines']} new log lines")
-                else:
-                    print("📋 CODER: No new logs since last check")
+                import subprocess
+                
+                # Get backend deployment info using reusable function
+                backend_info = self._get_backend_deployment_info(project_id)
+                
+                if backend_info['status'] == 'success':
+                    app_name = backend_info['app_name']
                     
-                return result
+                    if app_name:
+                        print(f"✅ Found backend app name: {app_name}")
+                        
+                        # Use Modal CLI to get logs (latest 200 lines max)
+                        print(f"📡 Getting logs from Modal app: {app_name}")
+                        
+                        try:
+                            # Run modal app logs command
+                            cmd = ["modal", "app", "logs", app_name, "--timestamps"]
+                            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                            
+                            if result.returncode == 0:
+                                logs_output = result.stdout.strip()
+                                
+                                # Limit to last 200 lines
+                                log_lines = logs_output.split('\n') if logs_output else []
+                                if len(log_lines) > 200:
+                                    log_lines = log_lines[-200:]  # Keep last 200 lines
+                                    logs_output = '\n'.join(log_lines)
+                                
+                                print(f"✅ Retrieved {len(log_lines)} log lines from Modal")
+                                
+                                return {
+                                    'status': 'success',
+                                    'service': service,
+                                    'app_name': app_name,
+                                    'logs': logs_output,
+                                    'line_count': len(log_lines),
+                                    'source': 'modal_cli'
+                                }
+                            else:
+                                error_msg = result.stderr.strip() if result.stderr else "Unknown Modal CLI error"
+                                print(f"❌ Modal logs command failed: {error_msg}")
+                                return {
+                                    'status': 'error',
+                                    'error': f"Modal logs command failed: {error_msg}",
+                                    'service': service
+                                }
+                                
+                        except subprocess.TimeoutExpired:
+                            print("❌ Modal logs command timed out")
+                            return {
+                                'status': 'error',
+                                'error': "Modal logs command timed out after 30 seconds",
+                                'service': service
+                            }
+                    else:
+                        print("❌ No app_name found in backend deployment metadata")
+                        return {
+                            'status': 'error',
+                            'error': "No app_name found in backend deployment metadata",
+                            'service': service
+                        }
+                else:
+                    error_msg = backend_info['error']
+                    print(f"❌ {error_msg}")
+                    return {
+                        'status': 'error',
+                        'error': error_msg,
+                        'service': service
+                    }
+                    
+            elif service == 'frontend':
+                # Frontend logs are still handled locally since frontend runs in WebContainer
+                print("📡 Frontend logs - WebContainer handles this locally")
+                return {
+                    'status': 'info',
+                    'service': service,
+                    'message': 'Frontend logs are handled by WebContainer locally. Check browser console or WebContainer terminal.',
+                    'logs': 'Frontend runs in WebContainer - logs available in browser console'
+                }
             else:
-                print(f"❌ CODER: Logs API failed with status {response.status_code}")
-                print(f"❌ CODER: Response: {response.text}")
-                return None
-                
-        except requests.exceptions.ConnectionError:
-            print("❌ CODER: Connection error - is the API server running?")
-            return None
-        except requests.exceptions.Timeout:
-            print("❌ CODER: Logs request timed out")
-            return None
+                return {
+                    'status': 'error',
+                    'error': f"Unknown service: {service}. Use 'backend' or 'frontend'",
+                    'service': service
+                }
         except Exception as e:
             print(f"❌ CODER: Exception during log check: {e}")
             import traceback
@@ -1844,31 +1954,164 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # Then frontend will send action_result back via chatstream API
         raise FrontendCommandInterrupt(command, cwd, action, self.project_id)
     
+    def _get_backend_deployment_info(self, project_id: str = None) -> dict:
+        """
+        Reusable function to get backend deployment information for a project
+        Returns backend deployment metadata including URL, app_name, etc.
+        """
+        if not project_id:
+            project_id = getattr(self, 'project_id', None)
+        
+        if not project_id:
+            return {
+                'status': 'error',
+                'error': 'No project_id provided or available'
+            }
+        
+        try:
+            project_metadata = self.cloud_storage.load_project_metadata(project_id)
+            
+            if not project_metadata:
+                return {
+                    'status': 'error',
+                    'error': f'No metadata found for project {project_id}'
+                }
+            
+            backend_deployment = project_metadata.get('backend_deployment')
+            if not backend_deployment:
+                return {
+                    'status': 'error',
+                    'error': 'No backend deployment found for this project'
+                }
+            
+            return {
+                'status': 'success',
+                'project_id': project_id,
+                'backend_deployment': backend_deployment,
+                'app_name': backend_deployment.get('app_name'),
+                'url': backend_deployment.get('url'),
+                'docs_url': backend_deployment.get('docs_url'),
+                'secret_name': backend_deployment.get('secret_name'),
+                'deployed_at': backend_deployment.get('deployed_at')
+            }
+            
+        except Exception as e:
+            return {
+                'status': 'error',
+                'error': f'Error loading backend deployment info: {str(e)}'
+            }
+    
+    def _update_backend_deployment_info(self, backend_url: str, app_name: str, project_id: str = None):
+        """
+        Update backend deployment information in project metadata
+        """
+        if not project_id:
+            project_id = getattr(self, 'project_id', None)
+        
+        if not project_id:
+            print("⚠️  No project_id available to save backend deployment info")
+            return
+        
+        try:
+            from datetime import datetime
+            
+            # Load existing metadata
+            project_metadata = self.cloud_storage.load_project_metadata(project_id) or {}
+            
+            # Update backend deployment info
+            project_metadata['backend_deployment'] = {
+                'url': backend_url,
+                'app_name': app_name,
+                'docs_url': f"{backend_url}/docs",
+                'secret_name': f"{app_name}-secrets",
+                'deployed_at': datetime.now().isoformat()
+            }
+            
+            # Save updated metadata
+            self.cloud_storage.save_project_metadata(project_id, project_metadata)
+            print(f"✅ Backend deployment info saved for project {project_id}")
+            
+        except Exception as e:
+            print(f"❌ Error saving backend deployment info: {str(e)}")
+
     def _handle_backend_command_interrupt(self, command: str, cwd: str, action: dict) -> str:
-        """Handle backend commands with ACTUAL interrupt (same as frontend)"""
+        """Handle backend commands by calling the deployed backend's terminal API"""
         print(f"🔧 BACKEND COMMAND DETECTED: {command}")
-        print(f"📤 INTERRUPTING STREAM - User will execute this backend command...")
+        print(f"📡 Executing command in deployed backend container...")
         
-        # Save current conversation state to cloud storage before interrupt
-        if self.cloud_storage and self.project_id:
-            try:
-                print(f"☁️ Saving conversation state to cloud storage before backend interrupt...")
-                save_success = self.cloud_storage.save_conversation_history(
-                    self.project_id, 
-                    self.conversation_history
-                )
-                if save_success:
-                    print(f"✅ Conversation state saved to cloud storage")
+        # Get backend deployment info using reusable function
+        backend_info = self._get_backend_deployment_info()
+        
+        if backend_info['status'] != 'success':
+            error_msg = backend_info['error']
+            print(f"❌ {error_msg}")
+            return f"❌ {error_msg}. Deploy backend first using the backend deployment action."
+        
+        backend_url = backend_info['url']
+        app_name = backend_info['app_name']
+        
+        print(f"🎯 Calling backend terminal API: {backend_url} (app: {app_name})")
+        
+        try:
+            import requests
+            
+            # Call the hidden terminal API endpoint
+            terminal_url = f"{backend_url}/_internal/terminal"
+            command_data = {
+                'command': command,
+                'cwd': '/root' if cwd == 'backend' else '/root',  # Map to backend container paths
+                'timeout': 60  # 1 minute timeout for backend commands
+            }
+            
+            print(f"📤 Sending command to backend: {command}")
+            
+            response = requests.post(terminal_url, json=command_data, timeout=70)  # Slightly longer than backend timeout
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if result.get('status') == 'success':
+                    stdout = result.get('stdout', '')
+                    stderr = result.get('stderr', '')
+                    exit_code = result.get('exit_code', 0)
+                    
+                    output_parts = []
+                    if stdout:
+                        output_parts.append(f"STDOUT:\n{stdout}")
+                    if stderr and exit_code != 0:
+                        output_parts.append(f"STDERR:\n{stderr}")
+                    
+                    if not output_parts:
+                        output_parts.append("Command executed successfully (no output)")
+                    
+                    result_text = f"✅ Backend command executed successfully (exit code {exit_code}):\n\n" + "\n\n".join(output_parts)
+                    print(f"✅ Backend command completed with exit code {exit_code}")
+                    return result_text
                 else:
-                    print(f"⚠️ Warning: Failed to save conversation state to cloud")
-            except Exception as e:
-                print(f"⚠️ Error saving conversation state: {e}")
-        
-        # CRITICAL: Raise special exception to interrupt the stream
-        # This will break out of the coder iteration loop and end streaming
-        # Frontend will receive this command via the stream and execute it
-        # Then frontend will send action_result back via chatstream API
-        raise FrontendCommandInterrupt(command, cwd, action, self.project_id)
+                    # Command failed
+                    error = result.get('error', 'Unknown error')
+                    stderr = result.get('stderr', '')
+                    exit_code = result.get('exit_code', 1)
+                    
+                    error_text = f"❌ Backend command failed (exit code {exit_code}): {error}"
+                    if stderr and stderr != error:
+                        error_text += f"\n\nSTDERR:\n{stderr}"
+                    
+                    print(f"❌ Backend command failed: {error}")
+                    return error_text
+            else:
+                error_msg = f"Backend terminal API returned HTTP {response.status_code}: {response.text}"
+                print(f"❌ API call failed: {error_msg}")
+                return f"❌ Failed to execute backend command: {error_msg}"
+                
+        except requests.exceptions.Timeout:
+            error_msg = "Backend command timed out (>60s)"
+            print(f"❌ {error_msg}")
+            return f"❌ {error_msg}"
+        except Exception as e:
+            error_msg = f"Error executing backend command: {str(e)}"
+            print(f"❌ {error_msg}")
+            return f"❌ {error_msg}"
     
     def _handle_backend_command_placeholder(self, command: str, cwd: str, action: dict) -> str:
         """Handle backend commands with realistic placeholder responses"""
@@ -2364,34 +2607,108 @@ If you really want to create an empty file, please confirm by responding with th
             print(f"❌ Error processing file {file_path}: {e}")
     
     def _handle_start_backend_interrupt(self, action: dict) -> dict:
-        """Handle start_backend action during interrupt"""
-        print(f"🚀 Starting backend service...")
+        """Handle start_backend action during interrupt - Deploy backend to Modal.com"""
+        print(f"🚀 Deploying backend service to Modal.com...")
         
         try:
-            # Call the local API to start backend
-            import requests
-            url = f"{self.api_base_url}/projects/{self.project_id}/start-backend"
-            response = requests.post(url, timeout=30)
+            # Always check for existing backend deployment info
+            backend_info = self._get_backend_deployment_info()
+            has_deployment_history = backend_info.get('status') == 'success'
             
-            if response.status_code == 200:
-                result = response.json()
-                print(f"✅ Backend started successfully on port {result.get('backend_port')}")
-                print(f"🔗 Backend URL: {result.get('backend_url')}")
+            # If backend exists and has a working URL, return it
+            if has_deployment_history and backend_info.get('url'):
+                existing_url = backend_info.get('url')
+                print(f"🔍 Found existing backend deployment: {existing_url}")
                 
-                # Update backend URL in state
-                self.backend_url = result.get('backend_url')
-                
-                self._write_file_via_api('backend/.env', f'BACKEND_URL={self.backend_url}')
-                
-                return {"status": "success", "result": result}
+                # Quick health check to see if it's still working
+                try:
+                    import requests
+                    health_response = requests.get(f"{existing_url}/health", timeout=5)
+                    if health_response.status_code == 200:
+                        print(f"✅ Backend already deployed and healthy at: {existing_url}")
+                        self.backend_url = existing_url
+                        return {"status": "success", "result": {"backend_url": self.backend_url, "already_deployed": True}}
+                    else:
+                        print(f"⚠️  Backend exists but not healthy (HTTP {health_response.status_code}), will redeploy...")
+                except Exception as e:
+                    print(f"⚠️  Backend exists but health check failed: {e}, will redeploy...")
+            
+            # Deploy backend to Modal.com - Call deployment function directly
+            import subprocess
+            import asyncio
+            app_name = f"{self.project_id}-backend"
+            secret_name = f"{app_name}-secrets"
+            
+            # Use backend deployment info as the source of truth
+            # If backend info shows deployment exists, use redeployment mode
+            is_redeployment = has_deployment_history
+            if is_redeployment:
+                print(f"✅ Backend deployment info confirms deployment exists - using redeployment mode")
             else:
-                error_details = f"HTTP {response.status_code}: {response.text}"
-                print(f"❌ Failed to start backend: {error_details}")
-                return {"status": "error", "error": error_details, "status_code": response.status_code}
+                print(f"🆕 No deployment history found - deploying fresh backend")
+            
+            deploy_type = "Redeploying" if is_redeployment else "Deploying new"
+            print(f"🔄 {deploy_type} {app_name} to Modal.com (redeployment={is_redeployment})...")
+            
+            # Import and call the Modal deployment function directly (no HTTP API call)
+            try:
+                from streaming_api import _execute_modal_deployment, ModalDeploymentRequest
                 
+                # Create deployment request
+                deployment_request = ModalDeploymentRequest(
+                    project_id=self.project_id,
+                    app_name=app_name,
+                    app_title="AI Generated Backend",
+                    app_description="Auto-generated FastAPI backend",
+                    redeployment=is_redeployment,
+                    database_name=f"{app_name}_database.db",
+                    secrets={}
+                )
+                
+                print(f"🚀 Calling deployment function directly...")
+                
+                # Call the deployment function directly using asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(_execute_modal_deployment(deployment_request))
+                finally:
+                    loop.close()
+                
+                print(f"✅ Direct deployment completed: {result.status}")
+                
+                if result.status == "success":
+                    backend_url = result.url
+                    
+                    print(f"✅ Backend deployed successfully!")
+                    print(f"🔗 Backend URL: {backend_url}")
+                    
+                    # Update backend URL in state
+                    self.backend_url = backend_url
+                    
+                    # Update backend info in project metadata
+                    if hasattr(self, 'project_id') and self.project_id:
+                        try:
+                            self._update_backend_deployment_info(backend_url, app_name)
+                        except Exception as e:
+                            print(f"⚠️  Warning: Could not save backend deployment info: {e}")
+                    
+                    return {"status": "success", "result": {"backend_url": backend_url, "app_name": app_name}}
+                else:
+                    error_msg = result.error or 'Unknown deployment error'
+                    print(f"❌ Deployment failed: {error_msg}")
+                    return {"status": "error", "error": f"Modal deployment failed: {error_msg}"}
+                    
+            except ImportError as e:
+                print(f"❌ Could not import deployment functions: {e}")
+                return {"status": "error", "error": f"Could not import deployment functions: {e}"}
+            except Exception as e:
+                print(f"❌ Direct deployment failed: {e}")
+                return {"status": "error", "error": f"Direct deployment failed: {e}"}
+        
         except Exception as e:
             error_details = f"Exception: {str(e)}"
-            print(f"❌ Error starting backend: {error_details}")
+            print(f"❌ Error deploying backend: {error_details}")
             return {"status": "error", "error": error_details}
     
     def _handle_start_frontend_interrupt(self, action: dict) -> dict:
@@ -2424,32 +2741,134 @@ If you really want to create an empty file, please confirm by responding with th
             return {"status": "error", "error": error_details}
     
     def _handle_restart_backend_interrupt(self, action: dict) -> dict:
-        """Handle restart_backend action during interrupt"""
-        print(f"🔄 Restarting backend service...")
+        """Handle restart_backend action using Modal redeploy API"""
+        print(f"🔄 Restarting backend service via Modal redeploy...")
         
         try:
-            # Call the local API to restart backend
+            # Get backend deployment info to get current app name
+            backend_info = self._get_backend_deployment_info()
+            
+            if backend_info['status'] != 'success':
+                error_msg = backend_info['error']
+                print(f"❌ {error_msg}")
+                return {
+                    "status": "error", 
+                    "error": f"{error_msg}. Deploy backend first before restarting."
+                }
+            
+            app_name = backend_info['app_name']
+            current_url = backend_info['url']
+            
+            print(f"🎯 Redeploying Modal app: {app_name}")
+            print(f"📡 Current URL: {current_url}")
+            
             import requests
-            url = f"{self.api_base_url}/projects/{self.project_id}/restart-backend"
-            response = requests.post(url, timeout=30)
+            
+            # Call the streaming API's Modal redeploy endpoint
+            redeploy_url = "http://localhost:8084/modal/deploy"
+            redeploy_data = {
+                "project_id": self.project_id,
+                "app_name": app_name,
+                "redeployment": True  # This is a redeployment, not a new deployment
+            }
+            
+            print(f"📤 Calling redeploy API: {redeploy_url}")
+            
+            # Use short timeout for starting redeploy
+            response = requests.post(redeploy_url, json=redeploy_data, timeout=30)  # Short timeout for starting deployment
             
             if response.status_code == 200:
                 result = response.json()
-                print(f"✅ Backend restarted successfully on port {result.get('backend_port')}")
-                print(f"🔗 Backend URL: {result.get('backend_url')}")
                 
-                # Update backend URL in state
-                self.backend_url = result.get('backend_url')
-                
-                return {"status": "success", "result": result}
+                if result.get('status') == 'started':
+                    # New background deployment system
+                    deployment_id = result.get('deployment_id')
+                    status_url = f"http://localhost:8084/modal/deploy/status/{deployment_id}"
+                    
+                    print(f"🔄 Modal redeployment started in background...")
+                    print(f"📋 Deployment ID: {deployment_id}")
+                    
+                    # Poll deployment status
+                    import time
+                    max_wait_time = 600  # 10 minutes total
+                    start_time = time.time()
+                    check_interval = 5
+                    
+                    while time.time() - start_time < max_wait_time:
+                        try:
+                            status_response = requests.get(status_url, timeout=10)
+                            if status_response.status_code == 200:
+                                status_result = status_response.json()
+                                deployment_status = status_result.get('status')
+                                progress = status_result.get('progress', 'No progress info')
+                                
+                                print(f"📊 Redeployment Status: {deployment_status} - {progress}")
+                                
+                                if deployment_status == 'success':
+                                    deployment_result = status_result.get('result', {})
+                                    new_url = deployment_result.get('url')
+                                    docs_url = deployment_result.get('docs_url')
+                                    break  # Exit polling loop
+                                
+                                elif deployment_status == 'error':
+                                    error_msg = status_result.get('error', 'Unknown redeployment error')
+                                    print(f"❌ Modal redeployment failed: {error_msg}")
+                                    return {"status": "error", "error": f"Modal redeployment failed: {error_msg}"}
+                                
+                                time.sleep(check_interval)
+                                check_interval = min(check_interval * 1.2, 30)
+                            else:
+                                print(f"⚠️ Status check failed: {status_response.status_code}")
+                                time.sleep(5)
+                        except requests.RequestException as e:
+                            print(f"⚠️ Status check request failed: {e}")
+                            time.sleep(5)
+                    else:
+                        return {"status": "error", "error": "Redeployment timeout: exceeded 10 minutes"}
+                        
+                elif result.get('status') == 'success':
+                    new_url = result.get('url')
+                    docs_url = result.get('docs_url')
+                    
+                    print(f"✅ Backend redeployed successfully!")
+                    print(f"🔗 Backend URL: {new_url}")
+                    print(f"📚 API Docs: {docs_url}")
+                    
+                    # Update backend URL in state
+                    self.backend_url = new_url
+                    
+                    return {
+                        "status": "success", 
+                        "result": {
+                            "backend_url": new_url,
+                            "docs_url": docs_url,
+                            "app_name": app_name,
+                            "redeployed": True,
+                            "deployment_output": result.get('deployment_output', 'Backend redeployed successfully')
+                        }
+                    }
+                else:
+                    error_msg = result.get('error', 'Unknown deployment error')
+                    print(f"❌ Backend redeploy failed: {error_msg}")
+                    return {
+                        "status": "error", 
+                        "error": f"Modal redeploy failed: {error_msg}"
+                    }
             else:
                 error_details = f"HTTP {response.status_code}: {response.text}"
-                print(f"❌ Failed to restart backend: {error_details}")
-                return {"status": "error", "error": error_details, "status_code": response.status_code}
+                print(f"❌ Redeploy API call failed: {error_details}")
+                return {
+                    "status": "error", 
+                    "error": f"Redeploy API call failed: {error_details}"
+                }
                 
+        except requests.exceptions.Timeout:
+            error_msg = "Backend redeploy timed out (>3 minutes)"
+            print(f"❌ {error_msg}")
+            return {"status": "error", "error": error_msg}
         except Exception as e:
-            error_details = f"Exception: {str(e)}"
-            print(f"❌ Error restarting backend: {error_details}")
+            error_details = f"Exception during backend restart: {str(e)}"
+            print(f"❌ {error_details}")
             return {"status": "error", "error": error_details}
     
     def _handle_restart_frontend_interrupt(self, action: dict) -> dict:
@@ -2724,16 +3143,52 @@ If you really want to create an empty file, please confirm by responding with th
             }
     
     def _get_todo_file_path(self):
-        """Todo system disabled - using cloud storage only"""
+        """Todo system integrated with cloud storage - no local files needed"""
         return None
     
     def _load_todos(self):
-        """Todo system disabled - using cloud storage only"""
-        return []
+        """Load todos from project metadata in cloud storage"""
+        try:
+            if not self.project_id or not self.cloud_storage:
+                return []
+            
+            project_metadata = self.cloud_storage.load_project_metadata(self.project_id)
+            if not project_metadata:
+                return []
+            
+            todos = project_metadata.get('todos', [])
+            if todos:
+                print(f"📋 Loaded {len(todos)} todos from cloud storage")
+            return todos
+            
+        except Exception as e:
+            print(f"❌ Error loading todos from cloud storage: {e}")
+            return []
     
     def _save_todos(self, todos):
-        """Todo system disabled - using cloud storage only"""
-        print("ℹ️ Todo system disabled - using cloud storage only")
+        """Save todos to project metadata in cloud storage"""
+        try:
+            if not self.project_id or not self.cloud_storage:
+                print("⚠️ Cannot save todos - no project_id or cloud_storage available")
+                return
+            
+            # Load existing metadata
+            project_metadata = self.cloud_storage.load_project_metadata(self.project_id) or {}
+            
+            # Update todos
+            project_metadata['todos'] = todos
+            project_metadata['todos_last_updated'] = datetime.now().isoformat()
+            
+            # Save updated metadata
+            success = self.cloud_storage.save_project_metadata(self.project_id, project_metadata)
+            
+            if success:
+                print(f"✅ Saved {len(todos)} todos to cloud storage")
+            else:
+                print(f"❌ Failed to save todos to cloud storage")
+                
+        except Exception as e:
+            print(f"❌ Error saving todos to cloud storage: {e}")
     
     def _ensure_todos_loaded(self):
         """Ensure todos are loaded from persistent storage"""

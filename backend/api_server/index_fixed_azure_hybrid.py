@@ -124,7 +124,7 @@ def _handle_attempt_completion_interrupt(self: GroqAgentState, action: dict, acc
             # Look for <action type="attempt_completion">content</action>
             action_match = re.search(r'<action[^>]*type="attempt_completion"[^>]*>(.*?)</action>', accumulated_content, re.DOTALL | re.IGNORECASE)
             if action_match:
-                completion_message = action_match.group(1).strip(' \t\r')
+                completion_message = action_match.group(1).strip(' \t')  # Keep newlines, remove only spaces/tabs
                 print(f"📄 Method 3 - Extracted from XML action tag: {len(completion_message)} chars")
                 
             # Look for other attempt_completion patterns in content
@@ -173,8 +173,13 @@ def _handle_attempt_completion_interrupt(self: GroqAgentState, action: dict, acc
         if completion_message:
             # Remove XML tags if they're still present
             completion_message = re.sub(r'<[^>]+>', '', completion_message)
-            # Clean up extra whitespace
-            completion_message = re.sub(r'\s+', ' ', completion_message).strip()
+            # Clean up extra whitespace but preserve line breaks
+            # Only collapse spaces/tabs, not newlines
+            completion_message = re.sub(r'[ \t]+', ' ', completion_message)
+            # Remove leading/trailing whitespace from each line but preserve line structure
+            lines = completion_message.split('\n')
+            lines = [line.strip() for line in lines]
+            completion_message = '\n'.join(lines).strip()
         
         # Fallback to default message
         if not completion_message:
@@ -392,7 +397,7 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             completion_params = {
                 "model": self.model,
                 "messages": self._get_filtered_conversation_history(),
-                "temperature": 0.0,
+                "temperature": 0.1,
                 "stream": True,
                 "stream_options": {"include_usage": True}
             }
@@ -622,7 +627,6 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
 - `<action type="update_file" path="path">content</action>` - Update existing file
 - `<action type="run_command" cwd="directory" command="command"/>` - Run terminal command
 - `<action type="start_backend"/>` - Start backend service
-- `<action type="start_frontend"/>` - Start frontend service
 - `<action type="check_errors"/>` - Check for project errors
 - `<action type="ast_analyze" target="backend|frontend" focus="routes|imports|env|database|structure|all"/>` - Deep structural code analysis
 - `<action type="todo_create" id="task_id" priority="high|medium|low">task description</action>` - Create todo
@@ -1832,7 +1836,7 @@ Great! You've completed a todo. Please continue with the next highest priority t
                     # Handle check_logs action
                     print(f"📋 CODER: Processing check_logs interrupt")
                     
-                    logs_result = _handle_check_logs_interrupt(self, interrupt_action)
+                    logs_result = self._handle_check_logs_interrupt(interrupt_action)
                     if logs_result is not None:
                         # Add the logs result to messages and conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
@@ -2307,100 +2311,31 @@ Note: Continue with the highest priority todo.
         print("✅ CODER: No todo status found")
     
     # Add backend and frontend urls and status
-    backend_url = self.backend_url
+    # Use Modal.com backend deployment info instead of local backend_url
+    try:
+        backend_deployment_info = self._get_backend_deployment_info()
+        if backend_deployment_info.get('status') == 'success':
+            backend_url = backend_deployment_info.get('url')
+            app_name = backend_deployment_info.get('app_name', 'Unknown')
+            backend_status = f"Deployed on Modal.com ({app_name})"
+        else:
+            backend_url = None
+            backend_status = "Not deployed"
+    except Exception as e:
+        backend_url = None
+        backend_status = f"Error checking deployment: {str(e)}"
+    
     frontend_url = self.preview_url
     
     # Ping backend and frontend to check status using multiple methods
-    backend_status = "Not running"
     frontend_status = "Not running"
     
-    # checking backend status
-    if backend_url:
-        try:
-            import requests
-            # Try multiple endpoints to check if backend is working
-            endpoints_to_try = [
-                f"{backend_url}/health",
-                f"{backend_url}/",
-                f"{backend_url}/api",
-                f"{backend_url}/status"
-            ]
-            
-            for endpoint in endpoints_to_try:
-                try:
-                    response = requests.get(endpoint, timeout=3)
-                    if response.status_code in [200, 404, 405]:  # 404/405 means server is running but endpoint doesn't exist
-                        backend_status = f"Running and responding (status: {response.status_code})"
-                        break
-                except:
-                    continue
-            else:
-                # If all endpoints fail, try a simple TCP connection check
-                try:
-                    import socket
-                    from urllib.parse import urlparse
-                    parsed = urlparse(backend_url)
-                    host = parsed.hostname or 'localhost'
-                    port = parsed.port or 80
-                    
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(2)
-                    result = sock.connect_ex((host, port))
-                    sock.close()
-                    
-                    if result == 0:
-                        backend_status = "Port is open but HTTP not responding"
-                    else:
-                        backend_status = "Port is closed"
-                except Exception as e:
-                    backend_status = f"Connection check failed: {str(e)}"
-                    
-        except Exception as e:
-            backend_status = f"Error checking status: {str(e)}"
+    # Backend status is already determined by Modal.com deployment info above
+    # (Commented out old localhost backend status checking logic)
     
-    # checking frontend status
+    # Simplify frontend status
     if frontend_url:
-        try:
-            import requests
-            # For frontend, try the main page and common paths
-            endpoints_to_try = [
-                frontend_url,
-                f"{frontend_url}/",
-                f"{frontend_url}/index.html",
-                f"{frontend_url}/static"
-            ]
-            
-            for endpoint in endpoints_to_try:
-                try:
-                    response = requests.get(endpoint, timeout=3)
-                    if response.status_code in [200, 404, 405]:
-                        frontend_status = f"Running and responding (status: {response.status_code})"
-                        break
-                except:
-                    continue
-            else:
-                # TCP connection check for frontend
-                try:
-                    import socket
-                    from urllib.parse import urlparse
-                    parsed = urlparse(frontend_url)
-                    host = parsed.hostname or 'localhost'
-                    port = parsed.port or 80
-                    
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(2)
-                    result = sock.connect_ex((host, port))
-                    sock.close()
-                    
-                    if result == 0:
-                        frontend_status = "Port is open but HTTP not responding"
-                    else:
-                        frontend_status = "Port is closed"
-                except Exception as e:
-                    frontend_status = f"Connection check failed: {str(e)}"
-                    
-        except Exception as e:
-            frontend_status = f"Error checking status: {str(e)}"
+        frontend_status = "Running"
     
     # Check for errors in logs (only new lines since last checkpoint)
     def _check_service_has_errors(service):
@@ -2511,20 +2446,25 @@ Note: Continue with the highest priority todo.
             
         return False
     
-    # Check for errors in both services (regardless of whether they're running)
-    # This is important because crashed services won't have URLs but may have errors in logs
-    backend_has_errors = _check_service_has_errors('backend')
-    frontend_has_errors = _check_service_has_errors('frontend')
+    # Commented out error checking for Modal.com deployment approach
+    # # Check for errors in both services (regardless of whether they're running)
+    # # This is important because crashed services won't have URLs but may have errors in logs
+    # backend_has_errors = _check_service_has_errors('backend')
+    # frontend_has_errors = _check_service_has_errors('frontend')
+    # 
+    # # Create error indicators with critical urgency
+    # backend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"backend\"/> to see errors and FIX IMMEDIATELY" if backend_has_errors else ""
+    # frontend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"frontend\"/> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
     
-    # Create error indicators with critical urgency
-    backend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"backend\"/> to see errors and FIX IMMEDIATELY" if backend_has_errors else ""
-    frontend_error_indicator = " 🚨 CRITICAL ERRORS - SERVICE BROKEN! Use <action type=\"check_logs\" service=\"frontend\"/> to see errors and FIX IMMEDIATELY" if frontend_has_errors else ""
+    # No error indicators for Modal.com deployment approach
+    backend_error_indicator = ""
+    frontend_error_indicator = ""
     
     # Add service status to full_user_msg
-    backend_running = f"🟢 Running ・ Available at {backend_url} (available from BACKEND_URL environment variable)" if backend_url else "🚫 Not running"
-    frontend_running = f"🟢 Running ・ Available at {frontend_url}" if frontend_url else "🚫 Not running"
-    backend_instructions = "" if backend_url else "Backend is not running. Use <action type=\"start_backend\"/> to start or <action type=\"restart_backend\"/> to restart it."
-    frontend_instructions = "" if frontend_url else "Frontend is not running. Use <action type=\"start_frontend\"/> to start or <action type=\"restart_frontend\"/> to restart it."
+    backend_running = f"🟢 Deployed ・ Available at {backend_url} (accessible to frontend via VITE_APP_BACKEND_URL env variable)" if backend_url else "🚫 Not deployed"
+    frontend_running = f"Running"
+    backend_instructions = "" if backend_url else "Backend is not deployed. Use <action type=\"start_backend\"/> to deploy to Modal.com or <action type=\"restart_backend\"/> to redeploy it."
+    frontend_instructions = "Frontend is always running. The user can your changes in realtime. So don't half do anything. Implement everything fully and proeprly. Fulfilled UI."
     
     full_user_msg += f"""
 <service_status>
@@ -2538,8 +2478,10 @@ Frontend: {frontend_running} ・ {frontend_status}{frontend_error_indicator}
 """
     print(f"🔍 CODER: Backend status: {backend_status}")
     print(f"🔍 CODER: Frontend status: {frontend_status}")
-    print(f"🔍 CODER: Backend has errors: {backend_has_errors}")
-    print(f"🔍 CODER: Frontend has errors: {frontend_has_errors}")
+    print(f"🔍 CODER: Backend URL: {backend_url}")
+    print(f"🔍 CODER: Frontend URL: {frontend_url}")
+    # print(f"🔍 CODER: Backend has errors: {backend_has_errors}")  # Commented out for Modal.com approach
+    # print(f"🔍 CODER: Frontend has errors: {frontend_has_errors}")  # Commented out for Modal.com approach
     
     return full_user_msg
 

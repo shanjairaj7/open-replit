@@ -88,12 +88,35 @@ class UpdateFileHandler:
                 for failure in failures:
                     print(f"      • {failure}")
             
-            # If no successful replacements, return failure
+            # If no successful replacements, provide detailed error feedback
             if not successes:
-                failure_msg = f"❌ No successful replacements in '{file_path}'"
+                failure_msg = f"❌ DIFF UPDATE FAILED: No search patterns matched in '{file_path}'\n"
+                failure_msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                
                 if failures:
-                    failure_msg += f"\n\nSearch blocks that failed to match:\n" + "\n".join(f"• {f}" for f in failures)
-                failure_msg += f"\n\nTip: Ensure search text matches exactly (including whitespace and indentation)"
+                    failure_msg += f"\n📋 DETAILED ERROR ANALYSIS:\n"
+                    for i, failure in enumerate(failures, 1):
+                        failure_msg += f"\n{i}. {failure}\n"
+                        
+                failure_msg += f"\n🎯 NEXT STEPS TO FIX THIS:\n"
+                failure_msg += f"   1. First, use read_file action on '{file_path}' to see current content\n"
+                failure_msg += f"   2. Identify the exact text section you want to modify\n"
+                failure_msg += f"   3. Copy the EXACT text including all whitespace and indentation\n" 
+                failure_msg += f"   4. Use that exact text in your SEARCH block\n"
+                failure_msg += f"   5. Make sure your diff uses the correct format:\n"
+                failure_msg += f"      <diff>\n"
+                failure_msg += f"      ------- SEARCH\n"
+                failure_msg += f"      [exact text to find]\n"
+                failure_msg += f"      =======\n"
+                failure_msg += f"      [replacement text]\n" 
+                failure_msg += f"      </diff>\n"
+                failure_msg += f"\n⚠️  COMMON MISTAKES TO AVOID:\n"
+                failure_msg += f"   • Mixing spaces and tabs for indentation\n"
+                failure_msg += f"   • Missing or extra line breaks\n"
+                failure_msg += f"   • Assuming file content without reading it first\n"
+                failure_msg += f"   • Using content from different files or old versions\n"
+                failure_msg += f"   • Making search blocks too large (try smaller sections)\n"
+                
                 return failure_msg
             
             # Apply the changes
@@ -101,7 +124,7 @@ class UpdateFileHandler:
             
             if update_result and update_result.get('status') == 'updated':
                 print(f"✅ File updated successfully: {file_path}")
-                return self._build_success_message(file_path, successes, failures, update_result, "diff blocks")
+                return self._build_detailed_success_message(file_path, successes, failures, update_result, "diff blocks")
             else:
                 error_msg = f"Failed to update file '{file_path}' after diff processing"
                 if update_result:
@@ -160,7 +183,54 @@ class UpdateFileHandler:
             print(f"⚠️ TypeScript validation errors found")
             success_msg += f"\nTypeScript validation errors:\n{typescript_errors}"
         
+        # Add backend restart instruction if this is a backend file
+        if self._is_backend_file(file_path):
+            success_msg += f"\n\n🚨 IMPORTANT: Backend file updated! You MUST restart the backend to apply these changes:"
+            success_msg += f"\n   Use <action type=\"restart_backend\"/> to redeploy the backend with the latest changes."
+            success_msg += f"\n   The backend will not reflect these changes until redeployed."
+        
         return success_msg
+    
+    def _build_detailed_success_message(self, file_path: str, successes: list, failures: list, update_result: dict, method: str) -> str:
+        """Build a detailed success message with partial failure guidance"""
+        if not failures:
+            # Complete success
+            message = f"✅ SUCCESS: File '{file_path}' updated completely using {method}.\n"
+            message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            message += f"📊 CHANGES APPLIED ({len(successes)} total):\n"
+            for i, success in enumerate(successes, 1):
+                message += f"   {i}. {success}\n"
+            message += f"\n🎉 All diff blocks were successfully applied!"
+            
+            # Add backend restart instruction if this is a backend file
+            if self._is_backend_file(file_path):
+                message += f"\n\n🚨 IMPORTANT: Backend file updated! You MUST restart the backend to apply these changes:"
+                message += f"\n   Use <action type=\"restart_backend\"/> to redeploy the backend with the latest changes."
+                message += f"\n   The backend will not reflect these changes until redeployed."
+            
+            return message
+        else:
+            # Partial success
+            message = f"⚠️  PARTIAL SUCCESS: File '{file_path}' updated with {len(successes)} of {len(successes) + len(failures)} changes.\n"
+            message += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            
+            if successes:
+                message += f"✅ SUCCESSFUL CHANGES ({len(successes)}):\n"
+                for i, success in enumerate(successes, 1):
+                    message += f"   {i}. {success}\n"
+                message += f"\n"
+            
+            message += f"❌ FAILED CHANGES ({len(failures)}) - Need your attention:\n"
+            for i, failure in enumerate(failures, 1):
+                message += f"   {i}. {failure}\n"
+            
+            message += f"\n🔧 TO COMPLETE THE REMAINING UPDATES:\n"
+            message += f"   1. Read the file again to see current state after partial update\n"
+            message += f"   2. Create new update_file actions for the failed changes\n"
+            message += f"   3. Use exact text matching for the SEARCH blocks\n"
+            message += f"   4. Consider smaller, more targeted diff blocks\n"
+            
+            return message
     
     def _remove_backticks(self, content: str) -> str:
         """Remove backticks from content if present"""
@@ -210,3 +280,34 @@ def updated_function():
 </action>
 
 If you really want to update the file to be empty, please confirm by responding with the action again and explicitly stating it should be empty."""
+    
+    def _is_backend_file(self, file_path: str) -> bool:
+        """Check if the updated file is a backend file that requires restart"""
+        if not file_path:
+            return False
+        
+        # Normalize path
+        normalized_path = file_path.lower()
+        
+        # Check if file is in backend directory or has backend-related patterns
+        backend_indicators = [
+            '/backend/',
+            'backend/',
+            'app.py',
+            'routes/',
+            'api_',
+            'server.py',
+            'main.py',
+            '.py'  # Any Python file could be backend code
+        ]
+        
+        # Check for backend indicators
+        for indicator in backend_indicators:
+            if indicator in normalized_path:
+                # Additional check: exclude frontend files that might be in backend folder
+                if not any(frontend_pattern in normalized_path for frontend_pattern in [
+                    'frontend/', 'src/', 'components/', '.tsx', '.jsx', '.js', '.ts', '.vue', '.html', '.css'
+                ]):
+                    return True
+        
+        return False

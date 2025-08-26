@@ -1,7 +1,7 @@
 """
 FastAPI Streaming Conversation API
 Provides real-time streaming interface for model conversations with action tracking
-Compatible with Modal.com deployment
+Azure-compatible deployment
 """
 import os
 import json
@@ -9,6 +9,8 @@ import uuid
 import asyncio
 import queue
 import threading
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional, AsyncGenerator
 from pathlib import Path
@@ -18,44 +20,385 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# Modal.com imports
-import modal
+# Import the model system and project pool
+from base_test_azure_hybrid import BoilerplatePersistentGroq, FrontendCommandInterrupt
+from project_pool_manager import get_pool_manager
 
-# Import the model system and project pool - moved inside function for Modal compatibility
 
-# Modal app configuration
-modal_app = modal.App("horizon-api")
-app = modal_app  # Alias for Modal deployment
+# =============================================================================
+# MODAL.COM BACKEND DEPLOYMENT API
+# =============================================================================
 
-# Modal image with required dependencies
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install([
-        "fastapi==0.104.1",
-        "uvicorn==0.24.0", 
-        "pydantic==2.5.0",
-        "requests==2.31.0",
-        "python-multipart==0.0.6",
-        "openai",
-        "azure-storage-blob==12.19.0",
-        "azure-core==1.29.5",
-        "python-dotenv==1.0.0"
-    ])
-    .add_local_dir(".", "/root")
-)
+class ModalDeploymentRequest(BaseModel):
+    project_id: str
+    app_name: str
+    app_title: Optional[str] = "AI Generated Backend"
+    app_description: Optional[str] = "Auto-generated FastAPI backend"
+    secrets: Optional[Dict[str, str]] = None
+    database_name: Optional[str] = None
+    redeployment: bool = False
 
-# Modal ASGI app with secrets and configuration
-@modal_app.function(
-    image=image,
-    secrets=[
-        modal.Secret.from_name("horizon-keys"), 
-    ],
-)
-@modal.asgi_app()
-def fastapi_app():
-    # Import dependencies inside function for Modal compatibility
-    from base_test_azure_hybrid import BoilerplatePersistentGroq, FrontendCommandInterrupt
-    from project_pool_manager import get_pool_manager
+class ModalSecretsRequest(BaseModel):
+    secret_name: str
+    secrets: Dict[str, str]
+    overwrite: bool = True
+
+class ModalDeploymentResponse(BaseModel):
+    status: str
+    app_name: str
+    url: Optional[str] = None
+    docs_url: Optional[str] = None
+    logs_command: Optional[str] = None
+    error: Optional[str] = None
+    deployment_output: Optional[str] = None
+
+class ModalSecretsResponse(BaseModel):
+    status: str
+    secret_name: str
+    secret_count: int
+    error: Optional[str] = None
+
+class BulkFileRequest(BaseModel):
+    project_id: str
+    file_paths: List[str]  # List of file paths to retrieve
+
+class FileContent(BaseModel):
+    file_path: str
+    content: Optional[str] = None
+    error: Optional[str] = None
+    exists: bool = True
+    success: bool = True
+
+class BulkFileResponse(BaseModel):
+    status: str
+    project_id: str
+    files: List[FileContent]
+    total_files: int
+    successful_files: int
+    failed_files: int
+
+
+async def create_modal_secrets_standalone(request: ModalSecretsRequest) -> ModalSecretsResponse:
+    """Create or update Modal.com secrets programmatically - standalone reusable function"""
+    try:
+        import subprocess
+        import tempfile
+        
+        print(f"🔐 Creating Modal secrets: {request.secret_name}")
+        
+        # Build modal secret create command
+        cmd = ["modal", "secret", "create", request.secret_name]
+        
+        # Add overwrite flag if needed
+        if request.overwrite:
+            # Delete existing secret first (ignore errors) - async
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "modal", "secret", "delete", request.secret_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await proc.communicate()  # Don't care about result for deletion
+            except:
+                pass
+        
+        # Add all key=value pairs
+        for key, value in request.secrets.items():
+            cmd.append(f"{key}={value}")
+        
+        # Execute modal command (async to avoid blocking other requests)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate()
+        stdout = stdout.decode('utf-8') if stdout else ""
+        stderr = stderr.decode('utf-8') if stderr else ""
+        
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, stderr)
+            
+        # Create result object to match original subprocess.run interface  
+        result = type('Result', (), {
+            'stdout': stdout,
+            'stderr': stderr,
+            'returncode': proc.returncode
+        })()
+        
+        print(f"✅ Modal secrets created: {request.secret_name}")
+        
+        return ModalSecretsResponse(
+            status="success",
+            secret_name=request.secret_name,
+            secret_count=len(request.secrets)
+        )
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Modal secrets creation failed: {e.stderr}"
+        print(f"❌ {error_msg}")
+        return ModalSecretsResponse(
+            status="error",
+            secret_name=request.secret_name,
+            secret_count=0,
+            error=error_msg
+        )
+    except Exception as e:
+        error_msg = f"Secrets creation error: {str(e)}"
+        print(f"❌ {error_msg}")
+        return ModalSecretsResponse(
+            status="error",
+            secret_name=request.secret_name,
+            secret_count=0,
+            error=error_msg
+        )
+
+
+
+def extract_modal_url(output: str, app_name: str) -> Optional[str]:
+    """Extract the deployed URL from Modal's output"""
+    lines = output.split('\n')
+    for line in lines:
+        if 'modal.run' in line and 'https://' in line:
+            words = line.split()
+            for word in words:
+                if word.startswith('https://') and 'modal.run' in word:
+                    return word.rstrip('.,!?')
+    
+    # Fallback URL pattern (will need to be updated with actual username)
+    return f"https://your-username--{app_name}-fastapi-app.modal.run"
+
+
+
+
+async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDeploymentResponse:
+    """Execute the actual Modal deployment (extracted from original function)"""
+    try:
+        from cloud_storage import get_cloud_storage
+        import tempfile
+        import subprocess
+        import shutil
+        from pathlib import Path
+        import os
+        
+        print(f"🚀 Starting REAL Modal deployment: {request.app_name}")
+        print(f"📋 Project: {request.project_id}")
+        
+        # Check if project has backend files first
+        from cloud_storage import get_cloud_storage
+        cloud_storage = get_cloud_storage()
+        if not cloud_storage:
+            raise Exception("Cloud storage not available")
+        
+        # Check for backend files
+        backend_files = cloud_storage.list_files(request.project_id, 'backend/')
+        if not backend_files:
+            raise Exception(f"No backend files found for project {request.project_id}")
+        
+        print(f"📂 Found {len(backend_files)} backend files - proceeding with REAL deployment")
+        
+        # Create temporary directory for REAL deployment
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            project_path = temp_path / "project"
+            project_path.mkdir(parents=True)
+            
+            print(f"📥 Downloading backend from Azure Storage...")
+            
+            # Download all backend files
+            success_count = 0
+            for file_path in backend_files:
+                try:
+                    content = cloud_storage.download_file(request.project_id, file_path)
+                    if content:
+                        # Remove 'backend/' prefix and create local file
+                        relative_path = file_path.replace('backend/', '', 1)
+                        local_file = project_path / relative_path
+                        local_file.parent.mkdir(parents=True, exist_ok=True)
+                        local_file.write_text(content, encoding='utf-8')
+                        success_count += 1
+                    else:
+                        print(f"⚠️ Failed to download: {file_path}")
+                except Exception as e:
+                    print(f"❌ Error downloading {file_path}: {e}")
+            
+            if success_count == 0:
+                raise Exception(f"Failed to download any backend files for project {request.project_id}")
+            
+            print(f"✅ Successfully downloaded {success_count} backend files")
+            
+            # Set up environment variables for the deployment
+            env = os.environ.copy()
+            env.update({
+                "MODAL_APP_NAME": request.app_name,
+                "APP_TITLE": request.app_title or "AI Generated Backend",
+                "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
+            })
+            
+            # Set database name if provided
+            if request.database_name:
+                env["DATABASE_NAME"] = request.database_name
+            else:
+                env["DATABASE_NAME"] = f"{request.app_name}_database.db"
+            
+            secret_name = f"{request.app_name}-secrets"
+            env["MODAL_SECRET_NAME"] = secret_name
+            
+            # Handle secrets creation for first deployment with fallback
+            secrets_created_successfully = True
+            final_secrets = {}  # Initialize to avoid undefined variable
+            
+            if not request.redeployment:
+                print(f"🔐 Creating Modal secrets for first deployment")
+                
+                default_secrets = {
+                    "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
+                    "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
+                    "APP_TITLE": request.app_title or "AI Generated Backend",
+                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend"
+                }
+                
+                final_secrets = {**default_secrets}
+                if request.secrets:
+                    final_secrets.update(request.secrets)
+                
+                # Try to create secrets, but fallback to redeployment if it fails
+                try:
+                    secrets_request = ModalSecretsRequest(
+                        secret_name=secret_name,
+                        secrets=final_secrets,
+                        overwrite=False  # Don't try to delete - we know secrets don't exist
+                    )
+                    secrets_result = await create_modal_secrets_standalone(secrets_request)
+                    
+                    if secrets_result and secrets_result.status == "success":
+                        print(f"✅ Secrets created: {secret_name}")
+                        secrets_created_successfully = True
+                    else:
+                        print(f"⚠️ Secret creation failed: {secrets_result.error if secrets_result else 'Unknown error'}")
+                        print(f"🔄 Falling back to redeployment mode (secrets may already exist)")
+                        secrets_created_successfully = False
+                except Exception as e:
+                    print(f"⚠️ Secret creation error: {e}")
+                    print(f"🔄 Falling back to redeployment mode (secrets may already exist)")
+                    secrets_created_successfully = False
+            else:
+                print(f"🔄 Redeployment mode: skipping secret creation")
+                secrets_created_successfully = False  # Mark as false for redeployments
+            
+            # Change to project directory and deploy with REAL Modal CLI
+            original_cwd = os.getcwd()
+            os.chdir(project_path)
+            
+            try:
+                print(f"🚀 REAL Modal deployment starting...")
+                
+                # Run ACTUAL modal deploy command
+                proc = await asyncio.create_subprocess_exec(
+                    "modal", "deploy", "app.py",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env
+                )
+                
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 minutes
+                    stdout = stdout.decode('utf-8') if stdout else ""
+                    stderr = stderr.decode('utf-8') if stderr else ""
+                    
+                    if proc.returncode != 0:
+                        print(f"❌ Modal deploy failed with exit code {proc.returncode}")
+                        print(f"📤 STDOUT: {stdout}")
+                        print(f"📥 STDERR: {stderr}")
+                        raise subprocess.CalledProcessError(proc.returncode, ["modal", "deploy", "app.py"], stderr)
+                    
+                    print(f"✅ Modal deploy command completed successfully")
+                    
+                    # Extract URL from Modal output
+                    output = stdout + stderr
+                    deployed_url = extract_modal_url(output, request.app_name)
+                    
+                    if not deployed_url or "placeholder" in deployed_url:
+                        # Fallback URL generation if extraction fails
+                        import hashlib
+                        hash_suffix = hashlib.md5(request.project_id.encode()).hexdigest()[:8]
+                        deployed_url = f"https://user--{request.app_name}-{hash_suffix}.modal.run"
+                    
+                    print(f"✅ Deployment successful: {deployed_url}")
+                    
+                    # Update project metadata with deployment information
+                    try:
+                        from datetime import datetime
+                        
+                        # Load existing metadata
+                        existing_metadata = cloud_storage.load_project_metadata(request.project_id) or {}
+                        
+                        # Update with deployment info
+                        deployment_info = {
+                            "backend_deployment": {
+                                "status": "deployed",
+                                "url": deployed_url,
+                                "docs_url": f"{deployed_url}/docs" if deployed_url else None,
+                                "app_name": request.app_name,
+                                "secret_name": secret_name,
+                                "secret_keys": list(final_secrets.keys()),
+                                "deployed_at": datetime.now().isoformat(),
+                                "last_deployment": datetime.now().isoformat()
+                            }
+                        }
+                        
+                        # Merge with existing metadata
+                        updated_metadata = {**existing_metadata, **deployment_info}
+                        
+                        # Save updated metadata
+                        metadata_success = cloud_storage.save_project_metadata(request.project_id, updated_metadata)
+                        if metadata_success:
+                            print(f"✅ Updated project metadata with deployment info")
+                        else:
+                            print(f"⚠️ Failed to update project metadata")
+                        
+                        # Update frontend .env file with backend URL (only on first deployment)
+                        if not request.redeployment:
+                            env_content = f"VITE_APP_BACKEND_URL={deployed_url}\n"
+                            env_success = cloud_storage.upload_file(request.project_id, "frontend/.env", env_content)
+                            if env_success:
+                                print(f"✅ Updated frontend .env with backend URL")
+                            else:
+                                print(f"⚠️ Failed to update frontend .env file")
+                                
+                    except Exception as e:
+                        print(f"⚠️ Error updating project metadata: {e}")
+                    
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    raise subprocess.TimeoutExpired(["modal", "deploy", "app.py"], 600)
+                
+            finally:
+                os.chdir(original_cwd)
+        
+        return ModalDeploymentResponse(
+            status="success", 
+            app_name=request.app_name,
+            url=deployed_url,
+            docs_url=f"{deployed_url}/docs",
+            logs_command=f"modal logs {request.app_name}",
+            deployment_output=f"Successfully deployed {request.app_name} with {len(backend_files)} backend files"
+        )
+        
+    except Exception as e:
+        return ModalDeploymentResponse(
+            status="error",
+            app_name=request.app_name,
+            error=str(e)
+        )
+
+
+
+
+# Create FastAPI app
+def create_app():
     
     app = FastAPI(title="Model Conversation API with Project Pool", version="1.0.0")
     
@@ -71,6 +414,9 @@ def fastapi_app():
     # Global storage for active conversations
     active_conversations: Dict[str, BoilerplatePersistentGroq] = {}
     conversation_metadata: Dict[str, dict] = {}
+    
+    # Global storage for deployment status tracking
+    deployment_status: Dict[str, dict] = {}
 
     class ConversationRequest(BaseModel):
         message: str
@@ -123,6 +469,10 @@ def fastapi_app():
             self.conversation_id = conversation_id
             self.current_action_id = None
             
+            # File tracking for this streaming session
+            self.files_created = []  # List of file paths created
+            self.files_updated = []  # List of file paths updated
+            
             # Load existing streaming chunks from this conversation (cumulative approach)
             project_id = getattr(model_system, 'project_id', None)
             if project_id:
@@ -172,12 +522,28 @@ def fastapi_app():
                         # For file operations, include action_type and content at root level
                         if action_data:
                             action_type = action_data.get("action_type")
-                            if action_type in ["read_file", "create_file", "update_file"]:
+                            if action_type in ["read_file", "create_file", "update_file", "file"]:
                                 data["action_type"] = action_type
                                 if "content" in action_data:
                                     data["content"] = action_data["content"]
                                 if "file_path" in action_data:
-                                    data["file_path"] = action_data["file_path"]
+                                    file_path = action_data["file_path"]
+                                    data["file_path"] = file_path
+                                    
+                                    # Track file operations for session summary
+                                    if action_type == "create_file":
+                                        if file_path not in self.files_created:
+                                            self.files_created.append(file_path)
+                                            print(f"📄 FILE TRACKING: Created {file_path}")
+                                    elif action_type == "update_file":
+                                        if file_path not in self.files_updated:
+                                            self.files_updated.append(file_path)
+                                            print(f"📝 FILE TRACKING: Updated {file_path}")
+                                    elif action_type == "file":
+                                        # "file" action_type is typically used for creating files
+                                        if file_path not in self.files_created:
+                                            self.files_created.append(file_path)
+                                            print(f"📄 FILE TRACKING: Created {file_path} (via file action)")
                         
                         chunk = create_stream_chunk("action_result", data, self.conversation_id, f"action_{action_counter}")
                     elif content_type == "assistant_message":
@@ -260,10 +626,10 @@ def fastapi_app():
                 }, self.conversation_id)
                 await asyncio.sleep(0.01)  # Allow immediate flush
                 
-                # Start model execution in background thread
-                def run_model():
+                # Start model execution as async task (no threads needed!)
+                async def run_model():
                     try:
-                        result = self._execute_model_with_streaming(message, queue_callback)
+                        result = await self._execute_model_with_streaming(message, queue_callback)
                         stream_queue.put(("FINAL_RESULT", result))
                     except Exception as e:
                         stream_queue.put(("ERROR", str(e)))
@@ -271,8 +637,8 @@ def fastapi_app():
                         model_finished.set()
                         stream_queue.put(("FINISHED", None))
                 
-                model_thread = threading.Thread(target=run_model, daemon=True)
-                model_thread.start()
+                # Create async task instead of thread
+                model_task = asyncio.create_task(run_model())
                 
                 # Stream content from queue with immediate yielding
                 while True:
@@ -284,17 +650,27 @@ def fastapi_app():
                             command, data = item
                             if command == "FINAL_RESULT":
                                 project_id = getattr(self.model_system, 'project_id', None)
+                                
+                                # Prepare file tracking summary
+                                files_changed = self._get_file_tracking_summary()
+                                
                                 yield create_stream_chunk("text", {
                                     "content": "✅ Conversation completed successfully",
                                     "final_result": data,
-                                    "project_id": project_id
+                                    "project_id": project_id,
+                                    "files_changed": files_changed
                                 }, self.conversation_id)
                             elif command == "ERROR":
                                 project_id = getattr(self.model_system, 'project_id', None)
+                                
+                                # Include file tracking even in error cases
+                                files_changed = self._get_file_tracking_summary()
+                                
                                 yield create_stream_chunk("error", {
                                     "error": data,
                                     "message": "An error occurred during model execution",
-                                    "project_id": project_id
+                                    "project_id": project_id,
+                                    "files_changed": files_changed
                                 }, self.conversation_id)
                             elif command == "FINISHED":
                                 break
@@ -339,8 +715,8 @@ def fastapi_app():
                 # Batch save all streaming chunks to Azure at the end
                 await self._save_streaming_chunks_batch()
         
-        def _execute_model_with_streaming(self, message: str, stream_callback) -> dict:
-            """Execute the model request with proper action streaming"""
+        async def _execute_model_with_streaming(self, message: str, stream_callback) -> dict:
+            """Execute the model request with proper action streaming (async for concurrency)"""
             try:
                 # Initial status updates
                 if hasattr(self.model_system, 'project_id') and self.model_system.project_id:
@@ -350,9 +726,9 @@ def fastapi_app():
                     stream_callback("assistant_message", f"I'll create a new project for you based on your request.")
                     mode = "creation"
                 
-                # Call the actual processing method with streaming callback
+                # Call the actual processing method with streaming callback (now async!)
                 if hasattr(self.model_system, '_process_update_request_with_interrupts'):
-                    result = self.model_system._process_update_request_with_interrupts(message, streaming_callback=stream_callback)
+                    result = await self.model_system._process_update_request_with_interrupts(message, streaming_callback=stream_callback)
                     
                     # Save conversation history
                     if hasattr(self.model_system, '_save_conversation_history'):
@@ -384,14 +760,15 @@ def fastapi_app():
                         "project_id": e.project_id
                     })
                     
-                    # Return interrupt signal instead of continuing
+                    # Return interrupt signal with file tracking information
                     interrupt_result = {
                         "status": "interrupted",
                         "reason": "frontend_command",
                         "command": e.command,
                         "cwd": e.cwd,
                         "project_id": e.project_id,
-                        "message": f"Stream interrupted for frontend command: {e.command}"
+                        "message": f"Stream interrupted for frontend command: {e.command}",
+                        "files_changed": self._get_file_tracking_summary()
                     }
                     print(f"🚨 STREAMING API: Returning interrupt result: {interrupt_result}")
                     return interrupt_result
@@ -454,6 +831,14 @@ def fastapi_app():
                 
             except Exception as e:
                 print(f"⚠️ Background save error: {e}")
+        
+        def _get_file_tracking_summary(self):
+            """Get file tracking summary for this streaming session"""
+            return {
+                "files_created": self.files_created.copy(),
+                "files_updated": self.files_updated.copy(),
+                "total_files_changed": len(self.files_created) + len(self.files_updated)
+            }
 
     @app.get("/")
     async def root():
@@ -864,36 +1249,30 @@ def fastapi_app():
 
     @app.get("/projects/list")
     async def list_projects():
-        """Get list of all projects for webcontainer selector"""
+        """Get list of all projects from project pool (fast!)"""
         try:
-            from cloud_storage import AzureBlobStorage
-            cloud_storage = AzureBlobStorage()
+            # Get projects from the project pool manager instead of scanning Azure
+            pool_manager = get_pool_manager()
+            pool_status = pool_manager.get_pool_status()
             
-            # Get all project folders from Azure
-            all_files = []
-            blob_list = cloud_storage.container_client.list_blobs()
+            # Extract project list from pool status
+            project_list = []
+            if 'projects' in pool_status:
+                for project_data in pool_status['projects']:
+                    project_id = project_data.get('id', project_data.get('name', 'unknown'))
+                    project_list.append({
+                        "id": project_id,
+                        "name": project_id.replace('-', ' ').title(),
+                        "description": f"Project: {project_id}",
+                        "created_at": project_data.get("created_at"),
+                        "status": project_data.get("status", "unknown"),
+                        "file_count": project_data.get("file_count", "N/A")
+                    })
             
-            projects = {}
-            for blob in blob_list:
-                # Extract project ID from blob path (format: project_id/file_path)
-                parts = blob.name.split('/', 1)
-                if len(parts) >= 1:
-                    project_id = parts[0]
-                    if project_id and project_id not in projects:
-                        # Get project metadata
-                        projects[project_id] = {
-                            "id": project_id,
-                            "name": project_id.replace('-', ' ').title(),
-                            "description": f"Project created from {project_id}",
-                            "created_at": blob.last_modified.isoformat() if blob.last_modified else None,
-                            "file_count": 0
-                        }
-                    projects[project_id]["file_count"] += 1
-            
-            # Convert to list and sort by creation date
-            project_list = list(projects.values())
+            # Sort by creation date
             project_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             
+            print(f"📋 Retrieved {len(project_list)} projects from pool (fast!)")
             return {"projects": project_list}
             
         except Exception as e:
@@ -967,6 +1346,77 @@ def fastapi_app():
             print(f"❌ Error getting frontend files for {project_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get frontend files: {str(e)}")
 
+    @app.post("/projects/{project_id}/files/bulk", response_model=BulkFileResponse)
+    async def get_bulk_file_contents(project_id: str, request: BulkFileRequest):
+        """Get contents of multiple files from a project"""
+        try:
+            print(f"📁 Bulk file request for project {project_id}: {len(request.file_paths)} files")
+            
+            from cloud_storage import AzureBlobStorage
+            cloud_storage = AzureBlobStorage()
+            
+            # Validate project_id matches request
+            if project_id != request.project_id:
+                raise HTTPException(status_code=400, detail="Project ID mismatch between URL and request body")
+            
+            files_result = []
+            successful_count = 0
+            failed_count = 0
+            
+            for file_path in request.file_paths:
+                try:
+                    # Download file content from cloud storage
+                    content = cloud_storage.download_file(project_id, file_path)
+                    
+                    if content is not None:
+                        files_result.append(FileContent(
+                            file_path=file_path,
+                            content=content,
+                            exists=True,
+                            success=True,
+                            error=None
+                        ))
+                        successful_count += 1
+                        print(f"✅ Retrieved: {file_path}")
+                    else:
+                        files_result.append(FileContent(
+                            file_path=file_path,
+                            content=None,
+                            exists=False,
+                            success=False,
+                            error="File not found"
+                        ))
+                        failed_count += 1
+                        print(f"❌ Not found: {file_path}")
+                        
+                except Exception as e:
+                    files_result.append(FileContent(
+                        file_path=file_path,
+                        content=None,
+                        exists=False,
+                        success=False,
+                        error=str(e)
+                    ))
+                    failed_count += 1
+                    print(f"❌ Error retrieving {file_path}: {e}")
+            
+            status = "success" if failed_count == 0 else "partial" if successful_count > 0 else "error"
+            
+            print(f"📊 Bulk file retrieval complete: {successful_count} success, {failed_count} failed")
+            
+            return BulkFileResponse(
+                status=status,
+                project_id=project_id,
+                files=files_result,
+                total_files=len(request.file_paths),
+                successful_files=successful_count,
+                failed_files=failed_count
+            )
+            
+        except Exception as e:
+            print(f"❌ Error in bulk file retrieval for {project_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
+
     def convert_to_webcontainer_format(project_id: str, files_list: list, cloud_storage) -> dict:
         """Convert cloud files to WebContainer mount format"""
         try:
@@ -1007,6 +1457,454 @@ def fastapi_app():
         except Exception as e:
             print(f"❌ Error converting files to WebContainer format: {e}")
             return {}
+ 
+    @app.post("/modal/secrets/create", response_model=ModalSecretsResponse)
+    async def create_modal_secrets(request: ModalSecretsRequest):
+        """Create or update Modal.com secrets programmatically"""
+        try:
+            import subprocess
+            import tempfile
+            
+            print(f"🔐 Creating Modal secrets: {request.secret_name}")
+            
+            # Build modal secret create command
+            cmd = ["modal", "secret", "create", request.secret_name]
+            
+            # Add overwrite flag if needed
+            if request.overwrite:
+                # Delete existing secret first (ignore errors) - async
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "modal", "secret", "delete", request.secret_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.communicate()  # Don't care about result for deletion
+                except:
+                    pass
+            
+            # Add all key=value pairs
+            for key, value in request.secrets.items():
+                cmd.append(f"{key}={value}")
+            
+            # Execute modal command (async to avoid blocking other requests)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await proc.communicate()
+            stdout = stdout.decode('utf-8') if stdout else ""
+            stderr = stderr.decode('utf-8') if stderr else ""
+            
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, cmd, stderr)
+                
+            # Create result object to match original subprocess.run interface  
+            result = type('Result', (), {
+                'stdout': stdout,
+                'stderr': stderr,
+                'returncode': proc.returncode
+            })()
+            
+            print(f"✅ Modal secrets created: {request.secret_name}")
+            
+            return ModalSecretsResponse(
+                status="success",
+                secret_name=request.secret_name,
+                secret_count=len(request.secrets)
+            )
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Modal secrets creation failed: {e.stderr}"
+            print(f"❌ {error_msg}")
+            return ModalSecretsResponse(
+                status="error",
+                secret_name=request.secret_name,
+                secret_count=0,
+                error=error_msg
+            )
+        except Exception as e:
+            error_msg = f"Secrets creation error: {str(e)}"
+            print(f"❌ {error_msg}")
+            return ModalSecretsResponse(
+                status="error",
+                secret_name=request.secret_name,
+                secret_count=0,
+                error=error_msg
+            )
+    
+    async def _deploy_backend_background(deployment_id: str, request: ModalDeploymentRequest):
+        """Background task for Modal deployment to avoid blocking the server"""
+        try:
+            deployment_status[deployment_id] = {
+                "status": "deploying",
+                "progress": "Initializing deployment...",
+                "started_at": datetime.now().isoformat()
+            }
+            
+            # Execute the actual deployment logic in background
+            result = await _execute_modal_deployment(request)
+            
+            # Update status with result
+            deployment_status[deployment_id] = {
+                "status": result.status,
+                "progress": "Deployment completed",
+                "result": result.dict(),
+                "completed_at": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            deployment_status[deployment_id] = {
+                "status": "error",
+                "progress": f"Deployment failed: {str(e)}",
+                "error": str(e),
+                "failed_at": datetime.now().isoformat()
+            }
+
+    @app.post("/modal/deploy")
+    async def deploy_backend_to_modal(request: ModalDeploymentRequest):
+        """Deploy Modal backend synchronously (blocking but reliable)"""
+        try:
+            print(f"🚀 Starting SYNCHRONOUS Modal deployment for: {request.app_name}")
+            
+            # Call the actual deployment function directly (no background task)
+            result = await _execute_modal_deployment(request)
+            
+            print(f"✅ Synchronous deployment completed: {result.status}")
+            
+            if result.status == "success":
+                return {
+                    "status": "success",
+                    "app_name": result.app_name,
+                    "url": result.url,
+                    "docs_url": result.docs_url,
+                    "logs_command": result.logs_command,
+                    "message": "Deployment completed successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "app_name": result.app_name,
+                    "error": result.error,
+                    "message": "Deployment failed"
+                }
+                
+        except Exception as e:
+            print(f"❌ Synchronous deployment failed: {e}")
+            return {
+                "status": "error",
+                "app_name": request.app_name,
+                "error": str(e),
+                "message": "Deployment failed with exception"
+            }
+    
+    @app.get("/modal/deploy/status/{deployment_id}")
+    async def get_deployment_status(deployment_id: str):
+        """Get deployment status for background deployment"""
+        if deployment_id not in deployment_status:
+            return {
+                "status": "not_found",
+                "error": "Deployment ID not found",
+                "deployment_id": deployment_id
+            }
+        
+        return {
+            "deployment_id": deployment_id,
+            **deployment_status[deployment_id]
+        }
+
+  
+    @app.get("/modal/apps")
+    async def list_modal_apps():
+        """List deployed Modal.com apps"""
+        try:
+            import subprocess
+            
+            # Async subprocess to avoid blocking other requests
+            proc = await asyncio.create_subprocess_exec(
+                "modal", "app", "list",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                stdout = stdout.decode('utf-8') if stdout else ""
+                stderr = stderr.decode('utf-8') if stderr else ""
+                
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode, ["modal", "app", "list"], stderr)
+                    
+                # Create result object to match original subprocess.run interface
+                result = type('Result', (), {
+                    'stdout': stdout,
+                    'stderr': stderr,
+                    'returncode': proc.returncode
+                })()
+                
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise subprocess.TimeoutExpired(["modal", "app", "list"], 30)
+            
+            # Parse the output to extract app names and status
+            apps = []
+            lines = result.stdout.split('\n')
+            
+            for line in lines:
+                if line.strip() and not line.startswith('App Name'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        apps.append({
+                            "name": parts[0],
+                            "status": parts[1] if len(parts) > 1 else "unknown"
+                        })
+            
+            return {
+                "status": "success",
+                "apps": apps,
+                "total_apps": len(apps)
+            }
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "apps": []
+            }
+    
+    @app.delete("/modal/apps/{app_name}")
+    async def delete_modal_app(app_name: str):
+        """Delete a Modal.com app"""
+        try:
+            import subprocess
+            
+            # Async subprocess to avoid blocking other requests
+            proc = await asyncio.create_subprocess_exec(
+                "modal", "app", "stop", app_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                stdout = stdout.decode('utf-8') if stdout else ""
+                stderr = stderr.decode('utf-8') if stderr else ""
+                
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode, ["modal", "app", "stop", app_name], stderr)
+                    
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise subprocess.TimeoutExpired(["modal", "app", "stop", app_name], 30)
+            
+            return {
+                "status": "success",
+                "app_name": app_name,
+                "message": "App stopped successfully"
+            }
+            
+        except subprocess.CalledProcessError as e:
+            return {
+                "status": "error",
+                "app_name": app_name,
+                "error": f"Failed to stop app: {e.stderr}"
+            }
+        except Exception as e:
+            return {
+                "status": "error", 
+                "app_name": app_name,
+                "error": str(e)
+            }
+    
+    # Backend info endpoint with health check
+    @app.get("/projects/{project_id}/backend/info")
+    async def get_project_backend_info(project_id: str):
+        """Get project backend deployment info and health status"""
+        try:
+            from cloud_storage import get_cloud_storage
+            from datetime import datetime
+            import asyncio
+            import aiohttp
+            
+            cloud_storage = get_cloud_storage()
+            if not cloud_storage:
+                raise Exception("Cloud storage not available")
+            
+            # Load project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata:
+                return {
+                    "status": "error",
+                    "error": "Project metadata not found",
+                    "project_id": project_id
+                }
+            
+            backend_deployment = metadata.get("backend_deployment")
+            if not backend_deployment:
+                return {
+                    "status": "not_deployed",
+                    "message": "Backend not deployed yet",
+                    "project_id": project_id,
+                    "metadata": metadata
+                }
+            
+            # Get backend URL for health check
+            backend_url = backend_deployment.get("url")
+            health_status = None
+            health_error = None
+            
+            if backend_url:
+                try:
+                    # Perform health check with timeout
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(f"{backend_url}/health") as response:
+                            if response.status == 200:
+                                health_data = await response.json()
+                                health_status = "healthy"
+                                health_data["response_time_ms"] = response.headers.get("X-Response-Time", "N/A")
+                                health_data["status_code"] = response.status
+                            else:
+                                health_status = "unhealthy"
+                                health_error = f"HTTP {response.status}"
+                                health_data = {"status_code": response.status}
+                                
+                except asyncio.TimeoutError:
+                    health_status = "timeout"
+                    health_error = "Health check timeout (10s)"
+                    health_data = {}
+                except Exception as e:
+                    health_status = "error"
+                    health_error = str(e)
+                    health_data = {}
+            else:
+                health_status = "no_url"
+                health_error = "No backend URL found"
+                health_data = {}
+            
+            return {
+                "status": "success",
+                "project_id": project_id,
+                "backend_deployment": backend_deployment,
+                "health_check": {
+                    "status": health_status,
+                    "error": health_error,
+                    "data": health_data,
+                    "checked_at": datetime.now().isoformat()
+                },
+                "frontend_env_updated": metadata.get("frontend_env_updated", False)
+            }
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "project_id": project_id
+            }
+    
+    # Add secrets and redeploy backend
+    @app.post("/projects/{project_id}/backend/secrets/update")
+    async def update_backend_secrets_and_redeploy(project_id: str, secrets: Dict[str, str]):
+        """Add/update individual backend secrets without replacing existing ones"""
+        try:
+            from cloud_storage import get_cloud_storage
+            import asyncio
+            
+            cloud_storage = get_cloud_storage()
+            if not cloud_storage:
+                raise Exception("Cloud storage not available")
+            
+            # Load existing project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata or not metadata.get("backend_deployment"):
+                return {
+                    "status": "error", 
+                    "error": "No backend deployment found for this project",
+                    "project_id": project_id
+                }
+            
+            backend_deployment = metadata["backend_deployment"]
+            secret_name = backend_deployment.get("secret_name")
+            app_name = backend_deployment["app_name"]
+            
+            if not secret_name:
+                return {
+                    "status": "error",
+                    "error": "No secret name found in backend deployment info",
+                    "project_id": project_id
+                }
+            
+            print(f"🔐 Adding new secrets to existing Modal secret: {secret_name}")
+            
+            # Add each new secret variable individually using modal secret set
+            updated_secrets = []
+            failed_secrets = []
+            
+            for key, value in secrets.items():
+                try:
+                    print(f"🔑 Adding secret: {key}")
+                    
+                    # Use modal secret set to ADD this variable to existing secret
+                    proc = await asyncio.create_subprocess_exec(
+                        "modal", "secret", "set", secret_name, f"{key}={value}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    stdout = stdout.decode('utf-8') if stdout else ""
+                    stderr = stderr.decode('utf-8') if stderr else ""
+                    
+                    if proc.returncode == 0:
+                        print(f"✅ Successfully added secret: {key}")
+                        updated_secrets.append(key)
+                    else:
+                        print(f"❌ Failed to add secret {key}: {stderr}")
+                        failed_secrets.append({"key": key, "error": stderr})
+                        
+                except Exception as e:
+                    print(f"❌ Error adding secret {key}: {e}")
+                    failed_secrets.append({"key": key, "error": str(e)})
+            
+            # Update metadata with new secret keys (add to existing list)
+            current_secret_keys = backend_deployment.get("secret_keys", [])
+            new_secret_keys = list(set(current_secret_keys + updated_secrets))  # Remove duplicates
+            
+            # Update backend deployment info in metadata
+            backend_deployment["secret_keys"] = new_secret_keys
+            backend_deployment["last_secrets_update"] = datetime.now().isoformat()
+            
+            # Save updated metadata
+            metadata["backend_deployment"] = backend_deployment
+            cloud_storage.save_project_metadata(project_id, metadata)
+            
+            if updated_secrets:
+                return {
+                    "status": "success",
+                    "message": f"Successfully added {len(updated_secrets)} secret(s) to existing backend",
+                    "app_name": app_name,
+                    "secret_name": secret_name,
+                    "updated_secrets": updated_secrets,
+                    "failed_secrets": failed_secrets,
+                    "project_id": project_id
+                }
+            else:
+                return {
+                    "status": "error", 
+                    "error": "Failed to add any secrets",
+                    "failed_secrets": failed_secrets,
+                    "project_id": project_id
+                }
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "project_id": project_id
+            }
+
     
     return app
 
@@ -1023,5 +1921,10 @@ if __name__ == "__main__":
     print("  DELETE /conversations/{id} - Delete conversation")
     print("=" * 50)
     
-    app = fastapi_app()
+    app = create_app()
     uvicorn.run(app, host="0.0.0.0", port=8084)
+
+# For Azure deployment
+app = create_app()
+
+

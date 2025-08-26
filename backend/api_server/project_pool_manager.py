@@ -76,13 +76,22 @@ class BoilerplateCache:
         print(f"📂 Boilerplate cache initialized at: {self.cache_dir}")
     
     def _clone_repo_once(self, repo_url: str, target_path: Path) -> bool:
-        """Clone repository only if it doesn't exist locally"""
+        """Clone repository with 2-hour cache expiration"""
         try:
+            # Check if cache exists and is still valid (2 hours)
             if target_path.exists():
-                print(f"♻️ Reusing cached boilerplate: {target_path}")
-                return True
+                cache_age = time.time() - target_path.stat().st_mtime
+                cache_hours = cache_age / 3600
+                
+                if cache_hours < 2.0:
+                    print(f"♻️ Reusing cached boilerplate: {target_path} (age: {cache_hours:.1f}h)")
+                    return True
+                else:
+                    print(f"🕐 Cache expired for {target_path} (age: {cache_hours:.1f}h) - refreshing...")
+                    # Remove old cache
+                    shutil.rmtree(target_path, ignore_errors=True)
             
-            print(f"📡 First-time clone of {repo_url} to {target_path}")
+            print(f"📡 Cloning fresh boilerplate {repo_url} to {target_path}")
             
             # Clone repository
             result = subprocess.run([
@@ -101,12 +110,38 @@ class BoilerplateCache:
             return False
     
     def ensure_boilerplates_cached(self) -> Tuple[bool, bool]:
-        """Ensure both boilerplates are cached locally"""
+        """Ensure both boilerplates are cached locally with 2-hour expiration"""
         with self.cache_lock:
+            print(f"🔍 Checking boilerplate cache status...")
             frontend_ready = self._clone_repo_once(self.frontend_repo, self.frontend_path)
             backend_ready = self._clone_repo_once(self.backend_repo, self.backend_path)
             
+            if frontend_ready and backend_ready:
+                print(f"✅ Both boilerplates ready in cache")
+            else:
+                print(f"⚠️ Cache issues: frontend={frontend_ready}, backend={backend_ready}")
+            
             return frontend_ready, backend_ready
+    
+    def get_cache_status(self) -> Dict[str, any]:
+        """Get detailed cache status information"""
+        status = {
+            "cache_dir": str(self.cache_dir),
+            "frontend": {"exists": False, "age_hours": None, "valid": False},
+            "backend": {"exists": False, "age_hours": None, "valid": False}
+        }
+        
+        for name, path in [("frontend", self.frontend_path), ("backend", self.backend_path)]:
+            if path.exists():
+                cache_age = time.time() - path.stat().st_mtime
+                cache_hours = cache_age / 3600
+                status[name].update({
+                    "exists": True,
+                    "age_hours": round(cache_hours, 1),
+                    "valid": cache_hours < 2.0
+                })
+        
+        return status
     
     def upload_cached_boilerplate_to_project(self, cloud_storage: AzureBlobStorage, 
                                            project_id: str, boilerplate_type: str) -> bool:
@@ -209,6 +244,9 @@ class ProjectPoolManager:
         
         print(f"🏊‍♂️ ProjectPoolManager initialized")
         print(f"📊 Current pool status: {self.get_pool_stats()}")
+        
+        # Start background maintenance worker immediately to maintain pool autonomously
+        self._ensure_background_worker()
     
     def _generate_pooled_project_id(self) -> str:
         """Generate unique project ID for pooled projects - simple format for URLs"""
@@ -348,9 +386,7 @@ class ProjectPoolManager:
                     # Save updated pool state
                     self._save_pool_to_storage()
                     
-                    # Trigger background maintenance
-                    self._ensure_background_worker()
-                    
+                    # Background worker runs continuously, no trigger needed
                     return project_id
             
             # No available projects
@@ -390,6 +426,10 @@ class ProjectPoolManager:
             
             return stats
     
+    async def _async_ensure_background_worker(self) -> None:
+        """Ensure background worker is running (async version)"""
+        await asyncio.to_thread(self._ensure_background_worker)
+
     def _ensure_background_worker(self) -> None:
         """Ensure background worker is running"""
         if not self.background_worker_running:
@@ -428,6 +468,15 @@ class ProjectPoolManager:
                         
                         # Small delay between creations
                         time.sleep(2)
+                
+                # Refresh boilerplate cache if needed (check every maintenance cycle)
+                try:
+                    cache_status = self.boilerplate_cache.get_cache_status()
+                    if not cache_status["frontend"]["valid"] or not cache_status["backend"]["valid"]:
+                        print(f"🔄 Refreshing expired boilerplate cache...")
+                        self.boilerplate_cache.ensure_boilerplates_cached()
+                except Exception as e:
+                    print(f"⚠️ Error checking/refreshing cache: {e}")
                 
                 # Clean up old archived projects (keep only last 10)
                 self._cleanup_archived_projects()
