@@ -246,7 +246,7 @@ class ProjectPoolManager:
         print(f"📊 Current pool status: {self.get_pool_stats()}")
         
         # Start background maintenance worker immediately to maintain pool autonomously
-        self._ensure_background_worker()
+        # self._ensure_background_worker()
     
     def _generate_pooled_project_id(self) -> str:
         """Generate unique project ID for pooled projects - simple format for URLs"""
@@ -547,7 +547,7 @@ def get_pool_manager() -> ProjectPoolManager:
     if _pool_manager is None:
         _pool_manager = ProjectPoolManager()
         # Start background worker
-        _pool_manager._ensure_background_worker()
+        # _pool_manager._ensure_background_worker()
     return _pool_manager
 
 
