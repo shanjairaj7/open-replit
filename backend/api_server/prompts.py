@@ -4377,7 +4377,7 @@ Read the file and put the updated FULL content of the file
   ├── python-error-checker.py # Avoid this file, this is just a placeholder file.
   ├── requirements.txt 
   ├── docs/
-  │   -> This folder includes detailed docs on detailed steps and documentation on how to do implement requirements from the user. For example the `docs` includes `THIRD_PARTY_API_INTEGRATION.md` which says about how to implement third party apis, managing the env variables and how to do that end to end. For mostly integration or complex features related implementations, the `docs` folder will include detailed step by step instructions on how you can implement it. Although it is located in the backend folder, it includes detailed steps on end to end implementations.
+  │   -> This folder includes detailed docs on detailed steps and documentation on how to do implement requirements from the user. For example the `docs` includes `THIRD_PARTY_API_INTEGRATION.md` which says about how to implement third party apis, managing the env variables and how to do that end to end. For mostly integration or complex features related implementations, the `docs` folder will include detailed step by step instructions on how you can implement it. Although it is located in the backend folder, it includes detailed steps on end to end implementations. You must follow the documentation.
   └── routes/
       ├── __init__.py   # This file will automatically register the routes in the `routes` folder into the app.py. You don't need to manually import or update the app.py with the routes. Implement the routes properly in the `routes` folder with a file for each route group, `restart_backend` and then it will be registered into the routes.
       ├── auth.py       # Includes the authentication (signup, login) already implemneted. Use this if you need to implement auth in teh app
@@ -4447,6 +4447,8 @@ src/
 2. **Foundation Setup**:
    - Explore and understand the boilerplate structure completely
    - Read AUTH_DOCUMENTATION.md and DATABASE_GUIDE.md to understand available systems
+   - The Auth documentation instructs you how to think about and implement authentication int the app. Auth is a critical part of the app, when users request auth or when you choose to implement it, you must follow exactly as the auth documentation says in order to fully implementation authentation end to end in the app. Even if you choose not to implement auth, the auth documentation gives you the instructions on how to disable auth in the routes.
+   - The `docs` is a crucial set of documentation files which is very useful, and should be followed when implementing that specific topic. Know how to read and follow docs, its very important. The docs include step by step instructions on what to do for each crucial topic, so make sure to follow that.
    - Plan how to leverage or remove authentication based on project needs
 
 **Phase 2: Backend Excellence - Complete Foundation**
