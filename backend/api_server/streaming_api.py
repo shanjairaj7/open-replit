@@ -77,6 +77,17 @@ class BulkFileResponse(BaseModel):
     successful_files: int
     failed_files: int
 
+class FileUpdateRequest(BaseModel):
+    file_path: str
+    content: str
+
+class FileUpdateResponse(BaseModel):
+    status: str
+    project_id: str
+    file_path: str
+    message: str
+    error: Optional[str] = None
+
 
 async def create_modal_secrets_standalone(request: ModalSecretsRequest) -> ModalSecretsResponse:
     """Create or update Modal.com secrets programmatically - standalone reusable function"""
@@ -1345,6 +1356,68 @@ def create_app():
         except Exception as e:
             print(f"❌ Error getting frontend files for {project_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get frontend files: {str(e)}")
+
+    @app.put("/projects/{project_id}/files/update", response_model=FileUpdateResponse)
+    async def update_file_content(project_id: str, request: FileUpdateRequest):
+        """Update a specific file's content in Azure Blob Storage"""
+        try:
+            print(f"📝 Updating file {request.file_path} in project {project_id}")
+            
+            from cloud_storage import AzureBlobStorage
+            cloud_storage = AzureBlobStorage()
+            
+            # Upload the updated file content to Azure Blob Storage
+            success = cloud_storage.upload_file(project_id, request.file_path, request.content)
+            
+            if success:
+                print(f"✅ Successfully updated file: {request.file_path}")
+                
+                # Update project metadata to track the file modification
+                try:
+                    existing_metadata = cloud_storage.load_project_metadata(project_id) or {}
+                    
+                    # Track file updates in metadata
+                    file_updates = existing_metadata.get("file_updates", {})
+                    file_updates[request.file_path] = {
+                        "updated_at": datetime.now().isoformat(),
+                        "content_length": len(request.content),
+                        "update_method": "api_direct"
+                    }
+                    existing_metadata["file_updates"] = file_updates
+                    existing_metadata["last_file_update"] = datetime.now().isoformat()
+                    
+                    # Save updated metadata
+                    cloud_storage.save_project_metadata(project_id, existing_metadata)
+                    print(f"✅ Updated project metadata with file modification tracking")
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to update project metadata: {e}")
+                
+                return FileUpdateResponse(
+                    status="success",
+                    project_id=project_id,
+                    file_path=request.file_path,
+                    message=f"File {request.file_path} updated successfully"
+                )
+            else:
+                print(f"❌ Failed to update file: {request.file_path}")
+                return FileUpdateResponse(
+                    status="error",
+                    project_id=project_id,
+                    file_path=request.file_path,
+                    message="Failed to update file",
+                    error="Azure Blob Storage upload failed"
+                )
+                
+        except Exception as e:
+            print(f"❌ Error updating file {request.file_path}: {e}")
+            return FileUpdateResponse(
+                status="error",
+                project_id=project_id,
+                file_path=request.file_path,
+                message="File update failed",
+                error=str(e)
+            )
 
     @app.post("/projects/{project_id}/files/bulk", response_model=BulkFileResponse)
     async def get_bulk_file_contents(project_id: str, request: BulkFileRequest):
