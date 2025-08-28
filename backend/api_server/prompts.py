@@ -108,11 +108,11 @@ Your users are creative, non-technical people with great app ideas. They bring v
    @router.post("/contacts")
    async def create_contact(request: Request):
        data = await request.json()
-       
+
        # Basic validation in route
        if not data.get("name") or not data.get("email"):
            return {"error": "Name and email required"}, 400
-       
+
        # Store directly - let database handle the data
        contact = db.insert("contacts", data)
        return {"success": True, "contact": contact}
@@ -465,14 +465,14 @@ from routes.auth import router
 **Complete implementation pattern for the database system:**
 
 ```python
-# models.py - Simple data structures only (no complex schemas needed)  
+# models.py - Simple data structures only (no complex schemas needed)
 from typing import Optional
 from datetime import datetime
 
 # No models needed - use dictionaries directly in routes
 # Example data structure:
 # user_data = {
-#     "email": "user@example.com", 
+#     "email": "user@example.com",
 #     "password": "hashed_password",
 #     "role": "staff"
 # }
