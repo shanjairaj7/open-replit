@@ -147,7 +147,7 @@ async def create_modal_secrets_standalone(request: ModalSecretsRequest) -> Modal
         )
         
     except subprocess.CalledProcessError as e:
-        error_msg = f"Modal secrets creation failed: {e.stderr}"
+        error_msg = f"Modal secrets creation failed: {e.stderr or str(e)}"
         print(f"❌ {error_msg}")
         return ModalSecretsResponse(
             status="error",
@@ -166,6 +166,35 @@ async def create_modal_secrets_standalone(request: ModalSecretsRequest) -> Modal
         )
 
 
+
+def generate_modal_secret_name(app_name: str) -> str:
+    """Generate a Modal-compliant secret name that's under 64 characters"""
+    import hashlib
+    
+    # Start with app_name prefix (truncated if needed)
+    base_name = app_name
+    suffix = "-secrets"
+    
+    # If the full name would be too long, create a shorter version
+    full_name = f"{base_name}{suffix}"
+    if len(full_name) >= 64:
+        # Create a hash-based short name that's deterministic
+        hash_obj = hashlib.md5(app_name.encode())
+        short_hash = hash_obj.hexdigest()[:8]
+        
+        # Use first part of app_name + hash + suffix
+        max_base_length = 64 - len(suffix) - len(short_hash) - 1  # -1 for dash
+        short_base = base_name[:max_base_length].rstrip('-')
+        full_name = f"{short_base}-{short_hash}{suffix}"
+    
+    # Ensure it's under 64 chars and valid
+    full_name = full_name[:63]  # Leave room for safety
+    
+    # Replace any invalid characters with dashes
+    import re
+    full_name = re.sub(r'[^a-zA-Z0-9._-]', '-', full_name)
+    
+    return full_name
 
 def extract_modal_url(output: str, app_name: str) -> Optional[str]:
     """Extract the deployed URL from Modal's output"""
@@ -254,7 +283,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             else:
                 env["DATABASE_NAME"] = f"{request.app_name}_database.db"
             
-            secret_name = f"{request.app_name}-secrets"
+            secret_name = generate_modal_secret_name(request.app_name)
             env["MODAL_SECRET_NAME"] = secret_name
             
             # Handle secrets creation for first deployment with fallback
@@ -296,8 +325,23 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     print(f"🔄 Falling back to redeployment mode (secrets may already exist)")
                     secrets_created_successfully = False
             else:
-                print(f"🔄 Redeployment mode: skipping secret creation")
-                secrets_created_successfully = False  # Mark as false for redeployments
+                print(f"🔄 Redeployment mode: checking if secrets exist...")
+                
+                # For redeployments, we still need to ensure secrets exist
+                # Set up default secrets in case they need to be created
+                default_secrets = {
+                    "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
+                    "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
+                    "APP_TITLE": request.app_title or "AI Generated Backend",
+                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend"
+                }
+                
+                final_secrets = {**default_secrets}
+                if request.secrets:
+                    final_secrets.update(request.secrets)
+                
+                # Skip secret creation for now, but we'll handle missing secrets after deployment fails
+                secrets_created_successfully = False
             
             # Change to project directory and deploy with REAL Modal CLI
             original_cwd = os.getcwd()
@@ -323,7 +367,66 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                         print(f"❌ Modal deploy failed with exit code {proc.returncode}")
                         print(f"📤 STDOUT: {stdout}")
                         print(f"📥 STDERR: {stderr}")
-                        raise subprocess.CalledProcessError(proc.returncode, ["modal", "deploy", "app.py"], stderr)
+                        
+                        # Check if failure is due to missing secrets
+                        if "Secret" in stderr and "not found" in stderr and request.redeployment:
+                            print(f"🔍 Detected missing secrets during redeployment - attempting to create them...")
+                            
+                            try:
+                                # Create the missing secrets
+                                secrets_request = ModalSecretsRequest(
+                                    secret_name=secret_name,
+                                    secrets=final_secrets,
+                                    overwrite=False  # Don't overwrite in case some secrets exist
+                                )
+                                secrets_result = await create_modal_secrets_standalone(secrets_request)
+                                
+                                if secrets_result and secrets_result.status == "success":
+                                    print(f"✅ Created missing secrets: {secret_name}")
+                                    print(f"🔄 Retrying Modal deployment...")
+                                    
+                                    # Retry the deployment with secrets now available
+                                    retry_proc = await asyncio.create_subprocess_exec(
+                                        "modal", "deploy", "app.py",
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                        env=env
+                                    )
+                                    
+                                    try:
+                                        retry_stdout, retry_stderr = await asyncio.wait_for(retry_proc.communicate(), timeout=600)
+                                        retry_stdout = retry_stdout.decode('utf-8') if retry_stdout else ""
+                                        retry_stderr = retry_stderr.decode('utf-8') if retry_stderr else ""
+                                        
+                                        if retry_proc.returncode != 0:
+                                            print(f"❌ Modal deploy retry failed with exit code {retry_proc.returncode}")
+                                            print(f"📤 RETRY STDOUT: {retry_stdout}")
+                                            print(f"📥 RETRY STDERR: {retry_stderr}")
+                                            retry_error_details = f"Command '['modal', 'deploy', 'app.py']' returned non-zero exit status {retry_proc.returncode} (retry attempt).\n\nSTDOUT:\n{retry_stdout}\n\nSTDERR:\n{retry_stderr}"
+                                            raise subprocess.CalledProcessError(retry_proc.returncode, ["modal", "deploy", "app.py"], retry_error_details)
+                                        else:
+                                            print(f"✅ Modal deploy retry succeeded!")
+                                            # Use retry output for URL extraction
+                                            stdout = retry_stdout
+                                            stderr = retry_stderr
+                                            
+                                    except asyncio.TimeoutError:
+                                        retry_proc.kill()
+                                        raise subprocess.TimeoutExpired(["modal", "deploy", "app.py"], 600)
+                                        
+                                else:
+                                    print(f"❌ Failed to create missing secrets: {secrets_result.error if secrets_result else 'Unknown error'}")
+                                    error_details = f"Command '['modal', 'deploy', 'app.py']' returned non-zero exit status {proc.returncode}. Secret creation failed.\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+                                    raise subprocess.CalledProcessError(proc.returncode, ["modal", "deploy", "app.py"], error_details)
+                                    
+                            except Exception as secret_error:
+                                print(f"❌ Error handling missing secrets: {secret_error}")
+                                error_details = f"Command '['modal', 'deploy', 'app.py']' returned non-zero exit status {proc.returncode}. Secret handling error: {secret_error}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+                                raise subprocess.CalledProcessError(proc.returncode, ["modal", "deploy", "app.py"], error_details)
+                        else:
+                            # Not a secrets error, or not a redeployment - raise original error with full details
+                            error_details = f"Command '['modal', 'deploy', 'app.py']' returned non-zero exit status {proc.returncode}.\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+                            raise subprocess.CalledProcessError(proc.returncode, ["modal", "deploy", "app.py"], error_details)
                     
                     print(f"✅ Modal deploy command completed successfully")
                     
@@ -398,6 +501,14 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             deployment_output=f"Successfully deployed {request.app_name} with {len(backend_files)} backend files"
         )
         
+    except subprocess.CalledProcessError as e:
+        # For subprocess errors, use the detailed error information we prepared
+        error_details = e.stderr if e.stderr else str(e)
+        return ModalDeploymentResponse(
+            status="error",
+            app_name=request.app_name,
+            error=error_details
+        )
     except Exception as e:
         return ModalDeploymentResponse(
             status="error",

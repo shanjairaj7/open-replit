@@ -1918,24 +1918,53 @@ Great! You've completed a todo. Please continue with the next highest priority t
                         print(f"❌ Failed to check logs, stopping generation")
                         break
                 elif interrupt_action.get('type') == 'attempt_completion':
-                    # Handle attempt completion action - IMMEDIATELY END THE SESSION
-                    print(f"🎯 CODER: Processing attempt_completion interrupt - TERMINATING SESSION")
+                    # Handle attempt completion action - CHECK TODOS FIRST BEFORE ENDING
+                    print(f"🎯 CODER: Processing attempt_completion interrupt - CHECKING TODOS FIRST")
                     
-                    completion_result = self._handle_attempt_completion_interrupt(interrupt_action, accumulated_content)
-                    
-                    # Add the completion message to conversation history
-                    assistant_msg = {"role": "assistant", "content": accumulated_content}
-                    self.conversation_history.append(assistant_msg)
-                    self._save_conversation_history()
-                    
-                    # Session will end after this return - completion message already handled in streaming buffer
-                    
-                    print(f"🏁 CODER: Session TERMINATED by attempt_completion action")
-                    print(f"📝 CODER: Final response length: {len(full_response + accumulated_content)} chars")
-                    print(f"🔚 CODER: Ending iteration loop at iteration {iteration}")
-                    
-                    # IMMEDIATELY RETURN AND END THE ENTIRE CODER FUNCTION
-                    return full_response + accumulated_content
+                    # Check if there are incomplete todos
+                    if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
+                        print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
+                        
+                        # Get detailed todo message
+                        incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                        
+                        # Add the incomplete todos warning to conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()
+                        
+                        # Continue the conversation instead of ending
+                        full_user_msg += f"""
+<action_result type="attempt_completion_blocked">
+{incomplete_message}
+</action_result>
+"""
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        messages.append(assistant_msg)
+                        print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
+                        continue
+                    else:
+                        # No incomplete todos - proceed with completion
+                        print(f"✅ CODER: No incomplete todos found - PROCEEDING WITH TERMINATION")
+                        
+                        completion_result = self._handle_attempt_completion_interrupt(interrupt_action, accumulated_content)
+                        
+                        # Add the completion message to conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()
+                        
+                        # Session will end after this return - completion message already handled in streaming buffer
+                        
+                        print(f"🏁 CODER: Session TERMINATED by attempt_completion action")
+                        print(f"📝 CODER: Final response length: {len(full_response + accumulated_content)} chars")
+                        print(f"🔚 CODER: Ending iteration loop at iteration {iteration}")
+                        
+                        # IMMEDIATELY RETURN AND END THE ENTIRE CODER FUNCTION
+                        return full_response + accumulated_content
             else:
                  # No interruption, process any remaining actions and finish
                 print("🎬 CODER: No interrupt detected, processing remaining actions...")
@@ -1983,23 +2012,52 @@ Great! You've completed a todo. Please continue with the next highest priority t
                                 break
                 
                 if attempt_completion_detected:
-                    print("🎯 CODER: attempt_completion detected in content - ENDING SESSION IMMEDIATELY")
-                    print("🏁 CODER: Session terminated by attempt_completion action")
+                    print("🎯 CODER: attempt_completion detected in content - CHECKING TODOS FIRST")
                     
-                    # If we extracted a specific completion message, add it to the response
-                    if detected_completion_message:
-                        print(f"📝 CODER: Including extracted completion message in final response")
-                        # Clean up the completion message  
-                        detected_completion_message = re.sub(r'<[^>]+>', '', detected_completion_message)
-                        detected_completion_message = re.sub(r'\s+', ' ', detected_completion_message).strip()
+                    # Check if there are incomplete todos
+                    if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
+                        print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
                         
-                        # Ensure the completion message is visible in the response
-                        final_response = full_response + accumulated_content
-                        if detected_completion_message not in final_response:
-                            final_response += f"\n\n{detected_completion_message}"
-                        return final_response
-                    
-                    return full_response + accumulated_content
+                        # Get detailed todo message
+                        incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                        
+                        # Add the incomplete todos warning to conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()
+                        
+                        # Continue the conversation instead of ending
+                        full_user_msg += f"""
+<action_result type="attempt_completion_blocked">
+{incomplete_message}
+</action_result>
+"""
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        messages.append(assistant_msg)
+                        print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
+                        continue
+                    else:
+                        # No incomplete todos - proceed with completion
+                        print("✅ CODER: No incomplete todos found - ENDING SESSION IMMEDIATELY")
+                        print("🏁 CODER: Session terminated by attempt_completion action")
+                        
+                        # If we extracted a specific completion message, add it to the response
+                        if detected_completion_message:
+                            print(f"📝 CODER: Including extracted completion message in final response")
+                            # Clean up the completion message  
+                            detected_completion_message = re.sub(r'<[^>]+>', '', detected_completion_message)
+                            detected_completion_message = re.sub(r'\s+', ' ', detected_completion_message).strip()
+                            
+                            # Ensure the completion message is visible in the response
+                            final_response = full_response + accumulated_content
+                            if detected_completion_message not in final_response:
+                                final_response += f"\n\n{detected_completion_message}"
+                            return final_response
+                        
+                        return full_response + accumulated_content
                 
                 self._process_remaining_actions(accumulated_content)
                 
@@ -2166,8 +2224,31 @@ Please continue working on the next highest priority todo. Remember to:
                         print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
                         continue
                     else:
-                        print("✅ CODER: All todos completed or no todos exist, breaking from iteration loop")
-                        break
+                        print("✅ CODER: All todos completed or no todos exist, continuing iteration with completion prompt")
+                        
+                        # Add a message prompting the model to use attempt_completion if conversation is done
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        full_user_msg += f"""
+<action_result type="no_actions_taken">
+No actions were performed in this iteration. All current todos appear to be completed.
+
+If you believe the task is fully complete and the user's request has been satisfied, please use the attempt_completion tool to summarize what was accomplished and end the conversation.
+
+If there's more work to be done, please continue with additional implementation or create new todos for the remaining work.
+</action_result>
+"""
+                        
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        continue
     
               
             # 💡 additional context - Add todo and service status

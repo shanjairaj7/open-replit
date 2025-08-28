@@ -1,3 +1,0 @@
-# Requirements for Groq Bolt testing
-groq>=0.4.0
-asyncio
