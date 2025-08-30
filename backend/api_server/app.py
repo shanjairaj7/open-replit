@@ -45,10 +45,6 @@ def fastapi_app():
     # Import dependencies inside function for Modal compatibility
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
-    from routes.auth import router as auth_router
-    from routes.organisation import router as organisation_router
-    from routes.task import router as task_router
-    from routes.health import router as health_router
 
     # Create FastAPI app with dynamic configuration
     app = FastAPI(
@@ -65,41 +61,9 @@ def fastapi_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # Include routers
-    app.include_router(auth_router)
-    app.include_router(organisation_router)
-    app.include_router(task_router)
-    app.include_router(health_router)
-
     return app
 
 # For local development
 if __name__ == "__main__":
     import uvicorn
     print("🔧 Running in local development mode")
-
-    # Create a simple FastAPI app for local development
-    from fastapi import FastAPI
-    from fastapi.middleware.cors import CORSMiddleware
-    from routes.auth import router as auth_router
-    from routes.organisation import router as organisation_router
-    from routes.task import router as task_router
-    from routes.health import router as health_router
-
-    local_app = FastAPI(title="Emergency Project Management - Local Dev")
-
-    local_app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    local_app.include_router(auth_router)
-    local_app.include_router(organisation_router)
-    local_app.include_router(task_router)
-    local_app.include_router(health_router)
-
-    uvicorn.run(local_app, host="0.0.0.0", port=8000)

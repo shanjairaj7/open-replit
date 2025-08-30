@@ -1,0 +1,14 @@
+{
+  "project_id": "horizon-419-11d64",
+  "read_files": [
+    "backend/routes/__init__.py",
+    "backend/app.py",
+    "backend/models.py",
+    "backend/requirements.txt",
+    "backend/routes/organizations.py",
+    "backend/routes/tasks.py",
+    "backend/routes/comments.py"
+  ],
+  "last_updated": "2025-08-30T03:56:11.222169",
+  "file_count": 7
+}

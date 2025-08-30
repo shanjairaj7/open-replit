@@ -11,6 +11,7 @@ import os
 import re
 import json
 import shutil
+from click.termui import prompt
 import requests
 import asyncio
 import aiohttp
@@ -70,7 +71,7 @@ openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.envir
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "false").lower() == "true"
 
-from prompts import gemini_prompt, gpt_prompt
+from prompts import gemini_prompt, gpt_prompt, fundamental_prompt, simpler_prompt
 
 # Custom exception for frontend command interrupts
 class FrontendCommandInterrupt(Exception):
@@ -119,39 +120,8 @@ def generate_project_name(user_request: str) -> str:
 
 
 
-def generate_short_app_name(project_id: str) -> str:
-    """Generate a short, Modal-compliant app name from project ID"""
-    import hashlib
-    import re
-
-    # Create a deterministic hash from project_id
-    hash_obj = hashlib.md5(project_id.encode())
-    short_hash = hash_obj.hexdigest()[:8]
-
-    # Extract meaningful parts from project_id
-    # Remove common prefixes and suffixes
-    clean_id = project_id.replace('emergency-really-nice-project-management-', '')
-    clean_id = clean_id.replace('-backend', '')
-
-    # Take first meaningful part + hash
-    parts = clean_id.split('-')
-    meaningful_part = parts[0] if parts else 'app'
-
-    # Limit meaningful part to reasonable length
-    meaningful_part = meaningful_part[:20]
-
-    # Create short app name: meaningful_part + hash
-    short_name = f"{meaningful_part}_{short_hash}"
-
-    # Ensure Modal compliance
-    short_name = re.sub(r'[^a-zA-Z0-9._-]', '_', short_name)
-    short_name = re.sub(r'[-_]+', '_', short_name)
-    short_name = short_name.strip('-_')
-
-    # Ensure it's under 40 characters for safety
-    short_name = short_name[:39]
-
-    return short_name
+# Import shared utility function
+from utils import generate_short_app_name
 
 
 
@@ -173,7 +143,7 @@ class BoilerplatePersistentGroq:
             print(f"🔵 DEBUG: Azure OpenAI client created with model: {self.model}")
         else:
             self.client = openai_client
-            self.model = 'google/gemini-2.5-flash'  # Use model path for OpenRouter
+            self.model = 'qwen/qwen3-coder'  # Use model path for OpenRouter
             self.is_azure_mode = False
             print(f"🟢 DEBUG: OpenRouter client created with model: {self.model}")
         self.conversation_history = []  # Store conversation messages
@@ -293,7 +263,7 @@ class BoilerplatePersistentGroq:
         """Load system prompt from file with project context"""
 
         # base_prompt = senior_engineer_prompt
-        base_prompt = gemini_prompt
+        base_prompt = simpler_prompt.prompt
 
         # any additions to system prompt based on project context, can be added here
 
@@ -2601,12 +2571,20 @@ Exit code: 0
                 print("✅ Update file handler initialized with diff support")
 
             # Use the handler to process the update
-            return self._update_handler.handle_update_file(action)
+            result = self._update_handler.handle_update_file(action)
+            
+            # Handle the new return format (dict with success/message)
+            if isinstance(result, dict):
+                return result
+            else:
+                # Fallback for legacy string return format
+                return {"success": True, "message": result}
 
         except Exception as e:
             print(f"❌ Error initializing update handler: {e}")
             print("🔄 Falling back to legacy update method")
-            return self._handle_legacy_update_file(action)
+            legacy_result = self._handle_legacy_update_file(action)
+            return {"success": False, "message": f"Handler error: {e}. Fallback result: {legacy_result}"}
 
     def _handle_legacy_update_file(self, action: dict) -> str:
         """Fallback legacy update file method"""

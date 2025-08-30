@@ -165,7 +165,7 @@ async def create_modal_secrets_standalone(request: ModalSecretsRequest) -> Modal
         return ModalSecretsResponse(
             status="success",
             secret_name=request.secret_name,
-            secret_count=len(request.secrets)
+            secret_count=len(request.secrets) if isinstance(request.secrets, (dict, list)) else 0
         )
 
     except subprocess.CalledProcessError as e:
@@ -253,39 +253,8 @@ def generate_modal_volume_name(app_name: str) -> str:
 
     return full_name
 
-def generate_short_app_name(project_id: str) -> str:
-    """Generate a short, Modal-compliant app name from project ID"""
-    import hashlib
-    import re
-
-    # Create a deterministic hash from project_id
-    hash_obj = hashlib.md5(project_id.encode())
-    short_hash = hash_obj.hexdigest()[:8]
-
-    # Extract meaningful parts from project_id
-    # Remove common prefixes and suffixes
-    clean_id = project_id.replace('emergency-really-nice-project-management-', '')
-    clean_id = clean_id.replace('-backend', '')
-
-    # Take first meaningful part + hash
-    parts = clean_id.split('-')
-    meaningful_part = parts[0] if parts else 'app'
-
-    # Limit meaningful part to reasonable length
-    meaningful_part = meaningful_part[:20]
-
-    # Create short app name: meaningful_part + hash
-    short_name = f"{meaningful_part}_{short_hash}"
-
-    # Ensure Modal compliance
-    short_name = re.sub(r'[^a-zA-Z0-9._-]', '_', short_name)
-    short_name = re.sub(r'[-_]+', '_', short_name)
-    short_name = short_name.strip('-_')
-
-    # Ensure it's under 40 characters for safety
-    short_name = short_name[:39]
-
-    return short_name
+# Import shared utility function
+from utils import generate_short_app_name
 
 def extract_modal_url(output: str, app_name: str) -> Optional[str]:
     """Extract the deployed URL from Modal's output"""
@@ -751,9 +720,13 @@ def create_app():
                                             self.files_created.append(file_path)
                                             print(f"📄 FILE TRACKING: Created {file_path}")
                                     elif action_type == "update_file":
-                                        if file_path not in self.files_updated:
+                                        # Only track as updated if the status indicates success
+                                        status = action_data.get("status", "completed")
+                                        if status == "success" and file_path not in self.files_updated:
                                             self.files_updated.append(file_path)
                                             print(f"📝 FILE TRACKING: Updated {file_path}")
+                                        elif status == "error":
+                                            print(f"❌ FILE TRACKING: Failed to update {file_path}")
                                     elif action_type == "file":
                                         # "file" action_type is typically used for creating files
                                         if file_path not in self.files_created:
@@ -1790,7 +1763,7 @@ def create_app():
             return ModalSecretsResponse(
                 status="success",
                 secret_name=request.secret_name,
-                secret_count=len(request.secrets)
+                secret_count=len(request.secrets) if isinstance(request.secrets, (dict, list)) else 0
             )
 
         except subprocess.CalledProcessError as e:

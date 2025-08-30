@@ -4,7 +4,7 @@ Handles V4A diff format with Azure storage integration
 """
 import os
 import sys
-from typing import Tuple, Optional, Dict, Callable
+from typing import Tuple, Optional, Dict, Callable, List
 
 class UpdateFileHandler:
     """Handles update_file actions with V4A diff format and Azure storage"""
@@ -32,7 +32,7 @@ class UpdateFileHandler:
             self.process_patch = None
             self.DiffError = Exception
 
-    def handle_update_file(self, action: dict) -> str:
+    def handle_update_file(self, action: dict) -> dict:
         """
         Main entry point for handling update_file actions using V4A diff format
 
@@ -40,7 +40,7 @@ class UpdateFileHandler:
             action: Dictionary containing 'path' and 'content' keys
 
         Returns:
-            String message describing the result
+            Dictionary with 'success' boolean and 'message' string
         """
         file_path = action.get('path') or action.get('filePath')
         update_content = action.get('content', '')
@@ -51,7 +51,7 @@ class UpdateFileHandler:
         # Check if update content is empty
         if not update_content or update_content.strip() == '':
             print(f"⚠️ Empty update content detected for: {file_path}")
-            return self._empty_content_warning(file_path)
+            return {"success": False, "message": self._empty_content_warning(file_path)}
 
         print(f"💾 Processing V4A diff update for: {file_path}")
 
@@ -63,7 +63,7 @@ class UpdateFileHandler:
             # Skip pre-validation for now - let apply_patch.py handle format validation
             # validation_error = self._validate_v4a_format(file_path, update_content)
             # if validation_error:
-            #     return validation_error
+            #     return {"success": False, "message": validation_error}
 
             print("✅ V4A format validation passed - processing with apply_patch")
             return self._handle_v4a_diff_update(file_path, update_content)
@@ -74,7 +74,7 @@ class UpdateFileHandler:
             print("📝 Detected legacy-style update (full file replacement)")
             return self._handle_legacy_style_update(file_path, update_content)
 
-    def _handle_v4a_diff_update(self, file_path: str, update_content: str) -> str:
+    def _handle_v4a_diff_update(self, file_path: str, update_content: str) -> dict:
         """Handle V4A diff format updates using apply_patch.py"""
         try:
             if not self.process_patch:
@@ -125,13 +125,15 @@ class UpdateFileHandler:
                 result = self.process_patch(patch_text, azure_read_fn, azure_write_fn, azure_remove_fn)
                 print(f"✅ V4A patch applied successfully: {file_path}")
 
-                return f"✅ SUCCESS: File '{file_path}' updated using V4A diff format.\n" \
-                       f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" \
-                       f"📊 V4A DIFF PROCESSING COMPLETE\n" \
-                       f"   • Used OpenAI V4A diff format with context-based matching\n" \
-                       f"   • Applied changes with 3-line context identification\n" \
-                       f"   • File successfully updated in Azure storage\n\n" \
-                       f"{self._add_backend_restart_warning(file_path)}"
+                success_msg = f"✅ SUCCESS: File '{file_path}' updated using V4A diff format.\n" \
+                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" \
+                             f"📊 V4A DIFF PROCESSING COMPLETE\n" \
+                             f"   • Used OpenAI V4A diff format with context-based matching\n" \
+                             f"   • Applied changes with 3-line context identification\n" \
+                             f"   • File successfully updated in Azure storage\n\n" \
+                             f"{self._add_backend_restart_warning(file_path)}"
+                
+                return {"success": True, "message": success_msg}
 
             except self.DiffError as e:
                 error_msg = f"❌ V4A DIFF PROCESSING FAILED for '{file_path}'\n" \
@@ -159,7 +161,7 @@ class UpdateFileHandler:
                            f"   • Context must match file content exactly (parser has fuzzy fallback)"
 
                 print(f"❌ V4A diff failed: {e}")
-                return error_msg
+                return {"success": False, "message": error_msg}
 
         except Exception as e:
             print(f"❌ Unexpected error in V4A processing: {e}")
@@ -167,13 +169,13 @@ class UpdateFileHandler:
             print("🔄 Falling back to legacy file replacement")
             return self._handle_legacy_style_update(file_path, update_content)
 
-    def _handle_legacy_diff_update(self, file_path: str, update_content: str) -> str:
+    def _handle_legacy_diff_update(self, file_path: str, update_content: str) -> dict:
         """Handle legacy diff-style search/replace blocks (deprecated)"""
         try:
             # Read current file content
             current_content = self.read_file(file_path)
             if current_content is None:
-                return f"❌ Could not read current content of '{file_path}' for diff processing"
+                return {"success": False, "message": f"❌ Could not read current content of '{file_path}' for diff processing"}
 
             print(f"📖 Read current file: {len(current_content)} characters")
 
@@ -222,20 +224,21 @@ class UpdateFileHandler:
                 failure_msg += f"   • Using content from different files or old versions\n"
                 failure_msg += f"   • Making search blocks too large (try smaller sections)\n"
 
-                return failure_msg
+                return {"success": False, "message": failure_msg}
 
             # Apply the changes
             update_result = self.update_file(file_path, final_content)
 
             if update_result and update_result.get('status') == 'updated':
                 print(f"✅ File updated successfully: {file_path}")
-                return self._build_detailed_success_message(file_path, successes, failures, update_result, "diff blocks")
+                success_msg = self._build_detailed_success_message(file_path, successes, failures, update_result, "diff blocks")
+                return {"success": True, "message": success_msg}
             else:
                 error_msg = f"Failed to update file '{file_path}' after diff processing"
                 if update_result:
                     error_msg += f": {update_result.get('error', 'Unknown error')}"
                 print(f"❌ {error_msg}")
-                return error_msg
+                return {"success": False, "message": error_msg}
 
         except Exception as e:
             error_msg = f"❌ Error during diff processing for '{file_path}': {str(e)}"
@@ -244,7 +247,7 @@ class UpdateFileHandler:
             print("🔄 Falling back to legacy file replacement")
             return self._handle_legacy_style_update(file_path, update_content)
 
-    def _handle_legacy_style_update(self, file_path: str, file_content: str) -> str:
+    def _handle_legacy_style_update(self, file_path: str, file_content: str) -> dict:
         """Handle legacy-style update (full file replacement)"""
         print(f"📄 Content length: {len(file_content)} characters")
 
@@ -253,13 +256,14 @@ class UpdateFileHandler:
 
         if update_result and update_result.get('status') == 'updated':
             print(f"✅ File updated successfully: {file_path}")
-            return self._build_success_message(file_path, ["Replaced entire file content"], [], update_result, "full replacement")
+            success_msg = self._build_success_message(file_path, ["Replaced entire file content"], [], update_result, "full replacement")
+            return {"success": True, "message": success_msg}
         else:
             error_msg = f"Failed to update file '{file_path}'"
             if update_result:
                 error_msg += f": {update_result.get('error', 'Unknown error')}"
             print(f"❌ {error_msg}")
-            return error_msg
+            return {"success": False, "message": error_msg}
 
     def _build_success_message(self, file_path: str, successes: list, failures: list,
                               update_result: dict, update_type: str) -> str:

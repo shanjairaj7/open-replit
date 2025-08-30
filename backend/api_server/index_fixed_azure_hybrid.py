@@ -1235,9 +1235,18 @@ Please continue with your next steps..
                     if update_result is not None:
                         file_path = interrupt_action.get('path')
 
-                        # Read the updated file content to include in the stream
+                        # Handle new dict format from update handler
+                        if isinstance(update_result, dict):
+                            success = update_result.get('success', False)
+                            result_message = update_result.get('message', str(update_result))
+                        else:
+                            # Legacy string format - assume success if contains "successfully"
+                            success = "successfully" in str(update_result).lower()
+                            result_message = str(update_result)
+
+                        # Read the updated file content to include in the stream (only if successful)
                         updated_content = None
-                        if "successfully" in str(update_result).lower():
+                        if success:
                             try:
                                 updated_content = self._read_file_via_api(file_path)
                                 print(f"📖 Read updated file content: {len(updated_content) if updated_content else 0} characters")
@@ -1248,23 +1257,23 @@ Please continue with your next steps..
                         emit_data = {
                             "action_type": "update_file",
                             "file_path": file_path,
-                            "status": "success" if "successfully" in str(update_result).lower() else "error",
-                            "result": str(update_result)
+                            "status": "success" if success else "error",
+                            "result": result_message
                         }
 
                         # Include updated content if available
                         if updated_content is not None:
                             emit_data["content"] = updated_content
 
-                        _emit_stream("action_result", f"Updated file: {file_path}", emit_data)
-                        # Check if this is an empty file warning
-                        if isinstance(update_result, str) and "File update blocked" in update_result:
-                            print(f"⚠️ File update blocked due to empty content")
-                            # Add the empty file warning to user messages
+                        _emit_stream("action_result", f"{'Updated' if success else 'Failed to update'} file: {file_path}", emit_data)
+                        # Check if this is an empty file warning or error
+                        if (isinstance(update_result, str) and "File update blocked" in update_result) or not success:
+                            print(f"⚠️ File update failed or blocked: {result_message[:100]}...")
+                            # Add the error message to user messages
                             assistant_msg = {"role": "assistant", "content": accumulated_content}
                             full_user_msg += f"""
 <action_result type=\"update_file\" path=\"{interrupt_action.get('path')}\">
-{update_result}
+{result_message}
 </action_result>
 """
                             messages.append(assistant_msg)
