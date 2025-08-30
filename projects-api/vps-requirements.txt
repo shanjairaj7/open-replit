@@ -1,9 +1,0 @@
-# VPS-specific requirements
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic
-docker==7.1.0
-aiofiles==23.2.1
-
-# Existing requirements from Railway version
-httpx==0.25.2

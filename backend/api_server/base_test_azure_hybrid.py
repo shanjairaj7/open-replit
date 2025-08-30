@@ -68,9 +68,9 @@ azure_client = AzureOpenAI(
 openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.environ.get('OPENAI_KEY', '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'), default_headers={"x-include-usage": 'true'})
 
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
-USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"
+USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "false").lower() == "true"
 
-from prompts import prompt
+from prompts import gemini_prompt, gpt_prompt
 
 # Custom exception for frontend command interrupts
 class FrontendCommandInterrupt(Exception):
@@ -118,6 +118,43 @@ def generate_project_name(user_request: str) -> str:
     return project_name
 
 
+
+def generate_short_app_name(project_id: str) -> str:
+    """Generate a short, Modal-compliant app name from project ID"""
+    import hashlib
+    import re
+
+    # Create a deterministic hash from project_id
+    hash_obj = hashlib.md5(project_id.encode())
+    short_hash = hash_obj.hexdigest()[:8]
+
+    # Extract meaningful parts from project_id
+    # Remove common prefixes and suffixes
+    clean_id = project_id.replace('emergency-really-nice-project-management-', '')
+    clean_id = clean_id.replace('-backend', '')
+
+    # Take first meaningful part + hash
+    parts = clean_id.split('-')
+    meaningful_part = parts[0] if parts else 'app'
+
+    # Limit meaningful part to reasonable length
+    meaningful_part = meaningful_part[:20]
+
+    # Create short app name: meaningful_part + hash
+    short_name = f"{meaningful_part}_{short_hash}"
+
+    # Ensure Modal compliance
+    short_name = re.sub(r'[^a-zA-Z0-9._-]', '_', short_name)
+    short_name = re.sub(r'[-_]+', '_', short_name)
+    short_name = short_name.strip('-_')
+
+    # Ensure it's under 40 characters for safety
+    short_name = short_name[:39]
+
+    return short_name
+
+
+
 class BoilerplatePersistentGroq:
     """
     Main orchestrator class for Groq-based project generation and updates.
@@ -136,7 +173,7 @@ class BoilerplatePersistentGroq:
             print(f"🔵 DEBUG: Azure OpenAI client created with model: {self.model}")
         else:
             self.client = openai_client
-            self.model = 'deepseek/deepseek-chat-v3.1'  # Use model path for OpenRouter
+            self.model = 'google/gemini-2.5-flash'  # Use model path for OpenRouter
             self.is_azure_mode = False
             print(f"🟢 DEBUG: OpenRouter client created with model: {self.model}")
         self.conversation_history = []  # Store conversation messages
@@ -256,7 +293,7 @@ class BoilerplatePersistentGroq:
         """Load system prompt from file with project context"""
 
         # base_prompt = senior_engineer_prompt
-        base_prompt = prompt
+        base_prompt = gemini_prompt
 
         # any additions to system prompt based on project context, can be added here
 
@@ -1797,7 +1834,7 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 backend_info = self._get_backend_deployment_info(project_id)
 
                 if backend_info['status'] == 'success':
-                    app_name = backend_info['app_name']
+                    app_name = generate_short_app_name(project_id)
 
                     if app_name:
                         print(f"✅ Found backend app name: {app_name}")
@@ -3615,46 +3652,46 @@ If you really want to create an empty file, please confirm by responding with th
     def _has_incomplete_todos(self):
         """Check if there are any incomplete todos (pending or in_progress)"""
         self._ensure_todos_loaded()
-        
+
         if not self.todos:
             return False
-        
+
         incomplete_todos = [t for t in self.todos if t['status'] in ['pending', 'in_progress']]
-        
+
         print(f"📋 Checking for incomplete todos: {len(incomplete_todos)} found")
         for todo in incomplete_todos:
             print(f"   - {todo['status']}: {todo['id']} - {todo['description'][:50]}...")
-        
+
         return len(incomplete_todos) > 0
 
     def _get_incomplete_todos_message(self):
         """Get a detailed message about incomplete todos"""
         self._ensure_todos_loaded()
-        
+
         if not self.todos:
             return ""
-        
+
         incomplete_todos = [t for t in self.todos if t['status'] in ['pending', 'in_progress']]
-        
+
         if not incomplete_todos:
             return ""
-        
+
         message = f"\n🚨 **WARNING: {len(incomplete_todos)} incomplete todos found!**\n\n"
         message += "The model attempted to complete the conversation, but there are still pending tasks:\n\n"
-        
+
         for todo in incomplete_todos:
             status_icon = "🔄" if todo['status'] == 'in_progress' else "⏳"
             priority_icon = "🔥" if todo.get('priority') == 'high' else "⚡" if todo.get('priority') == 'medium' else "📌"
             clean_desc = todo['description'].replace('\n', ' ').replace('\r', ' ').strip()
             message += f"{status_icon} {priority_icon} **{todo['id']}** ({todo['status']}): {clean_desc}\n"
-        
+
         message += "\n**The model needs to:**\n"
         message += "1. Complete all remaining todos by implementing the required functionality\n"
-        message += "2. Update each todo status to 'completed' using todo_update\n" 
+        message += "2. Update each todo status to 'completed' using todo_update\n"
         message += "3. Verify the implementation works by reading/testing the files\n"
         message += "4. Only then use attempt_completion to end the conversation\n\n"
         message += "**Continuing the conversation to complete these tasks...**\n"
-        
+
         return message
 
 def main():
