@@ -16,14 +16,18 @@ class DiffParser:
         Returns:
             List of (search_text, replace_text) tuples
         """
-        # Check if content contains diff blocks
-        if '<diff>' not in content:
+        # Check if content contains diff blocks or direct search/replace format
+        if '<diff>' not in content and '------- SEARCH' not in content:
             # Legacy format - treat entire content as replacement
             return [(None, content)]
         
         search_replace_pairs = []
         
-        # Find all diff blocks
+        # Handle direct search/replace format (without <diff> tags)
+        if '<diff>' not in content and '------- SEARCH' in content:
+            return DiffParser._parse_direct_search_replace(content)
+        
+        # Find all diff blocks (legacy format)
         diff_pattern = r'<diff>(.*?)</diff>'
         diff_blocks = re.findall(diff_pattern, content, re.DOTALL)
         
@@ -307,3 +311,41 @@ class DiffParser:
                     continue
         
         return None
+
+    @staticmethod 
+    def _parse_direct_search_replace(content: str) -> List[Tuple[str, str]]:
+        """
+        Parse direct search/replace format without <diff> tags
+        
+        Handles formats like:
+        ------- SEARCH
+        old content
+        =======
+        new content
+        +++++++ REPLACE
+        
+        Returns:
+            List of (search_text, replace_text) tuples
+        """
+        search_replace_pairs = []
+        
+        # Pattern for ------- SEARCH ... ======= ... +++++++ REPLACE format
+        pattern1 = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n\+{7}\s*REPLACE'
+        matches = re.findall(pattern1, content, re.DOTALL)
+        
+        for search_text, replace_text in matches:
+            search_text = search_text.rstrip('\n')
+            replace_text = replace_text.rstrip('\n')
+            search_replace_pairs.append((search_text, replace_text))
+        
+        # Pattern for ------- SEARCH ... ======= ... (without +++++++ REPLACE)
+        if not search_replace_pairs:
+            pattern2 = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)(?=\n-------\s*SEARCH|\Z)'
+            matches = re.findall(pattern2, content, re.DOTALL)
+            
+            for search_text, replace_text in matches:
+                search_text = search_text.rstrip('\n')
+                replace_text = replace_text.rstrip('\n')
+                search_replace_pairs.append((search_text, replace_text))
+        
+        return search_replace_pairs

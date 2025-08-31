@@ -35,19 +35,19 @@
 
 * Project Management App (Kanban-lite)
   - Acceptable MVP:
-    - single-user app with projects + tasks (18)
-    - Kanban columns (To Do / Doing / Done) (14)
-    - create/edit tasks (11)
-    - basic dashboard (13)
+    - single-user app with projects + tasks [18] (18)
+    - Kanban columns (To Do / Doing / Done) [14] (14)
+    - create/edit tasks [11] (11)
+    - basic dashboard [13] (13)
   - Full features:
-    - multi-project boards (14)
-    - drag/drop Kanban (18)
-    - user accounts & roles (22)
-    - file attachments (11)
-    - calendar view (13)
-    - activity logs (9)
-    - notifications (11)
-    - charts (16)
+    - multi-project boards [14] (14)
+    - drag/drop Kanban [0] (18)
+    - user accounts & roles [12] (22)
+    - file attachments [0] (11)
+    - calendar view [0] (13)
+    - activity logs [0] (9)
+    - notifications [0] (11)
+    - charts [0] (16)
   - Prompts:
     - Simple: "I'm juggling too many projects and losing track of everything. Need something like Trello where I can see all my stuff in one place and move tasks around."
     - Detailed: "Want to build something like Monday.com but focused on our workflow. Need Kanban boards with custom statuses, time tracking like Toggl, Gantt charts for project timelines, automated status updates when tasks move, team workload view, and those satisfying progress bars. Also want Slack integration for notifications."
@@ -170,3 +170,14 @@ Difficulty Distribution:
 - Simple/Foundation: 210 points (Todo, Landing)
 - Medium Complexity: 600 points (Project Mgmt, CRM, Trading, Analytics)
 - Advanced/AI: 390 points (AI Docs, RAG, Checkpoint)
+
+
+---
+
+Test project IDs
+
+- Project id: horizon-799-2237f
+  project management app, signup and login, sidebar with organisations and tasks and dashboard with detailed overview of tasks and other buttons
+
+- Project id: horizon-123-7101f
+  Project Management App - Multi-user kanban with signup/login, organization management, task creation/assignment, kanban board (todo/in-progress), functional dashboard and sidebar. Team invitation functionality partially implemented (missing email integration). Good initial MVP with nice UI.

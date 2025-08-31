@@ -43,6 +43,23 @@ class ModalSecretsRequest(BaseModel):
     secrets: Dict[str, str]
     overwrite: bool = True
 
+class ServerInfoRequest(BaseModel):
+    type: str  # "logs" or "network"
+    timestamp: int
+    time: str
+    # For logs
+    logType: Optional[str] = None
+    args: Optional[List[str]] = None
+    message: Optional[str] = None
+    # For network requests
+    method: Optional[str] = None
+    url: Optional[str] = None
+    status: Optional[int] = None
+    duration: Optional[int] = None
+    requestData: Optional[str] = None
+    responseData: Optional[str] = None
+    responseHeaders: Optional[str] = None
+
 class ModalDeploymentResponse(BaseModel):
     status: str
     app_name: str
@@ -51,6 +68,8 @@ class ModalDeploymentResponse(BaseModel):
     logs_command: Optional[str] = None
     error: Optional[str] = None
     deployment_output: Optional[str] = None
+    stdout: Optional[str] = None  # Add STDOUT capture
+    stderr: Optional[str] = None  # Add STDERR capture
 
 class ModalSecretsResponse(BaseModel):
     status: str
@@ -274,6 +293,10 @@ def extract_modal_url(output: str, app_name: str) -> Optional[str]:
 
 async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDeploymentResponse:
     """Execute the actual Modal deployment (extracted from original function)"""
+    # Initialize stdout/stderr variables to capture deployment output
+    deployment_stdout = ""
+    deployment_stderr = ""
+    
     try:
         from cloud_storage import get_cloud_storage
         import tempfile
@@ -424,6 +447,10 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 minutes
                     stdout = stdout.decode('utf-8') if stdout else ""
                     stderr = stderr.decode('utf-8') if stderr else ""
+                    
+                    # Capture for return to LLM
+                    deployment_stdout = stdout
+                    deployment_stderr = stderr
 
                     if proc.returncode != 0:
                         print(f"❌ Modal deploy failed with exit code {proc.returncode}")
@@ -459,6 +486,10 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                                         retry_stdout, retry_stderr = await asyncio.wait_for(retry_proc.communicate(), timeout=600)
                                         retry_stdout = retry_stdout.decode('utf-8') if retry_stdout else ""
                                         retry_stderr = retry_stderr.decode('utf-8') if retry_stderr else ""
+                                        
+                                        # Update captured output with retry results
+                                        deployment_stdout = retry_stdout
+                                        deployment_stderr = retry_stderr
 
                                         if retry_proc.returncode != 0:
                                             print(f"❌ Modal deploy retry failed with exit code {retry_proc.returncode}")
@@ -537,7 +568,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
 
                         # Update frontend .env file with backend URL (only on first deployment)
                         if not request.redeployment:
-                            env_content = f"VITE_APP_BACKEND_URL={deployed_url}\n"
+                            env_content = f"VITE_APP_BACKEND_URL={deployed_url}\nVITE_APP_PROJECT_ID={request.project_id}\n"
                             env_success = cloud_storage.upload_file(request.project_id, "frontend/.env", env_content)
                             if env_success:
                                 print(f"✅ Updated frontend .env with backend URL")
@@ -560,7 +591,9 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             url=deployed_url,
             docs_url=f"{deployed_url}/docs",
             logs_command=f"modal logs {request.app_name}",
-            deployment_output=f"Successfully deployed {request.app_name} with {len(backend_files)} backend files"
+            deployment_output=f"Successfully deployed {request.app_name} with {len(backend_files)} backend files",
+            stdout=deployment_stdout,  # Include captured STDOUT
+            stderr=deployment_stderr   # Include captured STDERR
         )
 
     except subprocess.CalledProcessError as e:
@@ -569,13 +602,17 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
         return ModalDeploymentResponse(
             status="error",
             app_name=request.app_name,
-            error=error_details
+            error=error_details,
+            stdout=deployment_stdout,  # Include captured STDOUT
+            stderr=deployment_stderr   # Include captured STDERR
         )
     except Exception as e:
         return ModalDeploymentResponse(
             status="error",
             app_name=request.app_name,
-            error=str(e)
+            error=str(e),
+            stdout=deployment_stdout,  # Include captured STDOUT  
+            stderr=deployment_stderr   # Include captured STDERR
         )
 
 
@@ -1831,14 +1868,18 @@ def create_app():
                     "url": result.url,
                     "docs_url": result.docs_url,
                     "logs_command": result.logs_command,
-                    "message": "Deployment completed successfully"
+                    "message": "Deployment completed successfully",
+                    "stdout": result.stdout,  # Pass STDOUT to LLM
+                    "stderr": result.stderr   # Pass STDERR to LLM
                 }
             else:
                 return {
                     "status": "error",
                     "app_name": result.app_name,
                     "error": result.error,
-                    "message": "Deployment failed"
+                    "message": "Deployment failed",
+                    "stdout": result.stdout,  # Pass STDOUT to LLM
+                    "stderr": result.stderr   # Pass STDERR to LLM
                 }
 
         except Exception as e:
@@ -1847,7 +1888,9 @@ def create_app():
                 "status": "error",
                 "app_name": request.app_name,
                 "error": str(e),
-                "message": "Deployment failed with exception"
+                "message": "Deployment failed with exception",
+                "stdout": "",  # No STDOUT available in this case
+                "stderr": str(e)  # Exception as STDERR
             }
 
     @app.get("/modal/deploy/status/{deployment_id}")
@@ -2181,6 +2224,125 @@ def create_app():
                     "project_id": project_id
                 }
 
+    @app.post("/{project_id}/server_info")
+    async def handle_server_info(project_id: str, request: Request, info_request: ServerInfoRequest):
+        """
+        Handle frontend logs and network requests for a specific project
+        ULTRA-FAST: Queues data immediately and returns, processes in background
+        """
+        try:
+            from log_queue import get_log_queue
+
+            # Get the fast queue (no DB connection needed here)
+            log_queue = get_log_queue()
+
+            # Prepare the data entry
+            entry_data = {
+                "timestamp": info_request.timestamp,
+                "time": info_request.time,
+                "type": info_request.type,
+            }
+
+            # Add type-specific data
+            if info_request.type == "logs":
+                entry_data.update({
+                    "logType": info_request.logType,
+                    "args": info_request.args,
+                    "message": info_request.message
+                })
+            elif info_request.type == "network":
+                entry_data.update({
+                    "method": info_request.method,
+                    "url": info_request.url,
+                    "status": info_request.status,
+                    "duration": info_request.duration,
+                    "requestData": info_request.requestData,
+                    "responseData": info_request.responseData,
+                    "responseHeaders": info_request.responseHeaders
+                })
+
+            # Queue for background processing (immediate return)
+            queued = log_queue.add_entry(project_id, info_request.type, entry_data)
+
+            # Return immediately (no waiting for DB operations)
+            return {
+                "status": "success",
+                "message": f"Queued {info_request.type} data for processing",
+                "project_id": project_id,
+                "queued": queued,
+                "storage": "background_queue"
+            }
+
+        except Exception as e:
+            print(f"❌ Error queuing server_info for project {project_id}: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "project_id": project_id
+            }
+
+    @app.get("/{project_id}/logs/{log_type}")
+    async def get_project_logs(project_id: str, log_type: str, limit: int = 100):
+        """
+        Retrieve stored logs or network requests for a specific project
+
+        Args:
+            project_id: Project identifier
+            log_type: Either "logs" or "network"
+            limit: Maximum number of entries to return (default: 100)
+        """
+        try:
+            from cosmos_db import get_cosmos_client
+
+            # Validate log_type
+            if log_type not in ["logs", "network"]:
+                raise HTTPException(status_code=400, detail="log_type must be 'logs' or 'network'")
+
+            print(f"📋 Retrieving {log_type} data for project {project_id} (limit: {limit})")
+
+            # Get Cosmos DB client
+            cosmos = get_cosmos_client()
+
+            # Retrieve entries
+            entries = cosmos.get_entries(project_id, log_type, limit)
+            entry_count = cosmos.get_entry_count(project_id, log_type)
+
+            print(f"📊 Found {len(entries)} {log_type} entries for project {project_id}")
+
+            return {
+                "status": "success",
+                "project_id": project_id,
+                "log_type": log_type,
+                "entries": entries,
+                "returned_count": len(entries),
+                "total_count": entry_count,
+                "storage": "cosmos_db"
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"❌ Error retrieving {log_type} for project {project_id}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/queue/status")
+    async def get_queue_status():
+        """Get background queue status and statistics"""
+        try:
+            from log_queue import get_log_queue
+
+            log_queue = get_log_queue()
+            stats = log_queue.get_stats()
+
+            return {
+                "status": "success",
+                "queue_stats": stats,
+                "queue_health": "healthy" if stats["worker_alive"] else "unhealthy"
+            }
+
+        except Exception as e:
+            print(f"❌ Error getting queue status: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     return app
 
@@ -2195,6 +2357,9 @@ if __name__ == "__main__":
     print("  GET /conversations - List all conversations")
     print("  GET /conversations/{id}/info - Get conversation details")
     print("  DELETE /conversations/{id} - Delete conversation")
+    print("  POST /{project_id}/server_info - Queue logs/network (ULTRA-FAST)")
+    print("  GET /{project_id}/logs/{type} - Retrieve stored logs/network data")
+    print("  GET /queue/status - Background queue statistics")
     print("=" * 50)
 
     app = create_app()

@@ -32,6 +32,14 @@ class UpdateFileHandler:
             self.process_patch = None
             self.DiffError = Exception
 
+        # Import search/replace diff parser
+        try:
+            from diff_parser import DiffParser
+            self.diff_parser = DiffParser()
+        except ImportError as e:
+            print(f"❌ Warning: Could not import DiffParser module: {e}")
+            self.diff_parser = None
+
     def handle_update_file(self, action: dict) -> dict:
         """
         Main entry point for handling update_file actions using V4A diff format
@@ -53,11 +61,16 @@ class UpdateFileHandler:
             print(f"⚠️ Empty update content detected for: {file_path}")
             return {"success": False, "message": self._empty_content_warning(file_path)}
 
-        print(f"💾 Processing V4A diff update for: {file_path}")
+        print(f"💾 Processing file update for: {file_path}")
 
+        # Check for search/replace format (new preferred format)
+        if ('------- SEARCH' in update_content and '+++++++ REPLACE' in update_content) or \
+           ('------- SEARCH' in update_content and '=======' in update_content):
+            print("🔍 Detected search/replace format - processing with DiffParser")
+            return self._handle_search_replace_update(file_path, update_content)
         # Check if this is V4A diff format (OpenAI official format)
-        if (update_content.strip().startswith('*** Begin Patch') or
-            update_content.strip().startswith('*** Update File:')):
+        elif (update_content.strip().startswith('*** Begin Patch') or
+              update_content.strip().startswith('*** Update File:')):
             print("🔍 Detected V4A diff format - validating before processing")
 
             # Skip pre-validation for now - let apply_patch.py handle format validation
@@ -165,6 +178,105 @@ class UpdateFileHandler:
 
         except Exception as e:
             print(f"❌ Unexpected error in V4A processing: {e}")
+            # Fall back to legacy update
+            print("🔄 Falling back to legacy file replacement")
+            return self._handle_legacy_style_update(file_path, update_content)
+
+    def _handle_search_replace_update(self, file_path: str, update_content: str) -> dict:
+        """Handle search/replace format updates using DiffParser"""
+        try:
+            if not self.diff_parser:
+                print("❌ DiffParser not available, falling back to legacy")
+                return self._handle_legacy_style_update(file_path, update_content)
+
+            # Read current file content
+            current_content = self.read_file(file_path)
+            if current_content is None:
+                return {"success": False, "message": f"❌ Could not read current content of '{file_path}' for search/replace processing"}
+
+            print(f"📖 Read current file: {len(current_content)} characters")
+            print(f"🔧 Processing search/replace blocks for: {file_path}")
+
+            # Process the search/replace content using DiffParser
+            final_content, successes, failures = self.diff_parser.process_update_file(
+                current_content, update_content
+            )
+
+            # Report results
+            print(f"📝 Search/replace processing results:")
+            print(f"   ✅ Successes: {len(successes)}")
+            for success in successes:
+                print(f"      • {success}")
+
+            if failures:
+                print(f"   ❌ Failures: {len(failures)}")
+                for failure in failures:
+                    print(f"      • {failure}")
+
+            # If no successful replacements, provide detailed error feedback
+            if not successes:
+                failure_msg = f"❌ SEARCH/REPLACE UPDATE FAILED: No search patterns matched in '{file_path}'\n"
+                failure_msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+                if failures:
+                    failure_msg += f"\n📋 DETAILED ERROR ANALYSIS:\n"
+                    for i, failure in enumerate(failures, 1):
+                        failure_msg += f"\n{i}. {failure}\n"
+
+                failure_msg += f"\n🎯 NEXT STEPS TO FIX THIS:\n"
+                failure_msg += f"   1. First, use read_file action on '{file_path}' to see current content\n"
+                failure_msg += f"   2. Identify the exact text section you want to modify\n"
+                failure_msg += f"   3. Copy the EXACT text including all whitespace and indentation\n"
+                failure_msg += f"   4. Use that exact text in your SEARCH block\n"
+                failure_msg += f"   5. Use the correct search/replace format:\n"
+                failure_msg += f"      ------- SEARCH\n"
+                failure_msg += f"      [exact text to find]\n"
+                failure_msg += f"      =======\n"
+                failure_msg += f"      [replacement text]\n"
+                failure_msg += f"      +++++++ REPLACE\n"
+                failure_msg += f"\n⚠️  CRITICAL SEARCH/REPLACE RULES:\n"
+                failure_msg += f"   • SEARCH content must match file content EXACTLY (character-for-character)\n"
+                failure_msg += f"   • Include all whitespace, indentation, and line endings\n"
+                failure_msg += f"   • Keep SEARCH blocks small and unique\n"
+                failure_msg += f"   • Use multiple blocks for multiple changes\n"
+                failure_msg += f"   • Process changes in file order (top to bottom)\n"
+
+                return {"success": False, "message": failure_msg}
+
+            # Apply the changes
+            update_result = self.update_file(file_path, final_content)
+
+            if update_result and update_result.get('status') == 'updated':
+                print(f"✅ File updated successfully: {file_path}")
+                success_msg = f"✅ SUCCESS: File '{file_path}' updated using search/replace format.\n" \
+                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" \
+                             f"📊 SEARCH/REPLACE PROCESSING COMPLETE\n" \
+                             f"   • Used precise search/replace block format\n" \
+                             f"   • Applied {len(successes)} successful replacements\n" \
+                             f"   • File successfully updated in Azure storage\n\n"
+                
+                if successes:
+                    success_msg += f"📋 APPLIED CHANGES:\n"
+                    for success in successes:
+                        success_msg += f"   • {success}\n"
+                
+                if failures:
+                    success_msg += f"\n⚠️ SKIPPED CHANGES ({len(failures)} failures):\n"
+                    for failure in failures:
+                        success_msg += f"   • {failure}\n"
+
+                success_msg += f"\n{self._add_backend_restart_warning(file_path)}"
+                return {"success": True, "message": success_msg}
+            else:
+                error_msg = f"Failed to update file '{file_path}' after search/replace processing"
+                if update_result:
+                    error_msg += f": {update_result.get('error', 'Unknown error')}"
+                print(f"❌ {error_msg}")
+                return {"success": False, "message": error_msg}
+
+        except Exception as e:
+            error_msg = f"❌ Error during search/replace processing for '{file_path}': {str(e)}"
+            print(error_msg)
             # Fall back to legacy update
             print("🔄 Falling back to legacy file replacement")
             return self._handle_legacy_style_update(file_path, update_content)
@@ -294,9 +406,8 @@ class UpdateFileHandler:
 
         # Add backend restart instruction if this is a backend file
         if self._is_backend_file(file_path):
-            success_msg += f"\n\n🚨 IMPORTANT: Backend file updated! You MUST restart the backend to apply these changes:"
-            success_msg += f"\n   Use <action type=\"restart_backend\"/> to redeploy the backend with the latest changes."
-            success_msg += f"\n   The backend will not reflect these changes until redeployed."
+            success_msg += f"\n\n🔄 Backend file updated - restart required to apply changes:"
+            success_msg += f"\n   Use <action type=\"restart_backend\"/> to redeploy with the new code."
 
         return success_msg
 
@@ -313,9 +424,8 @@ class UpdateFileHandler:
 
             # Add backend restart instruction if this is a backend file
             if self._is_backend_file(file_path):
-                message += f"\n\n🚨 IMPORTANT: Backend file updated! You MUST restart the backend to apply these changes:"
-                message += f"\n   Use <action type=\"restart_backend\"/> to redeploy the backend with the latest changes."
-                message += f"\n   The backend will not reflect these changes until redeployed."
+                message += f"\n\n🔄 Backend file updated - restart required to apply changes:"
+                message += f"\n   Use <action type=\"restart_backend\"/> to redeploy with the new code."
 
             return message
         else:
@@ -391,11 +501,10 @@ def updated_function():
 If you really want to update the file to be empty, please confirm by responding with the action again and explicitly stating it should be empty."""
 
     def _add_backend_restart_warning(self, file_path: str) -> str:
-        """Add backend restart warning if this is a backend file"""
+        """Add backend restart instruction if this is a backend file"""
         if self._is_backend_file(file_path):
-            return "🚨 IMPORTANT: Backend file updated! You MUST restart the backend to apply these changes:\n" \
-                   "   Use <action type=\"restart_backend\"/> to redeploy the backend with the latest changes.\n" \
-                   "   The backend will not reflect these changes until redeployed."
+            return "🔄 Backend file updated - restart required to apply changes:\n" \
+                   "   Use <action type=\"restart_backend\"/> to redeploy with the new code."
         return ""
 
     def _is_backend_file(self, file_path: str) -> bool:

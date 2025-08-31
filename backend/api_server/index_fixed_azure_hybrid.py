@@ -813,6 +813,20 @@ Please use the correct action tags to perform actions based on your plan and the
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for check_logs")
                             break
+                        elif action_type == 'check_network':
+                            print(f"\n🚨 CODER: INTERRUPT - Detected check_network action")
+
+                            # Emit streaming event for check_network action  
+                            _emit_stream("action_start", f"Checking network requests for frontend service", {
+                                "action_type": "check_network",
+                                "service": "frontend",
+                                "action_details": action
+                            })
+
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for check_network")
+                            break
                         elif action_type == 'web_search':
                             print(f"\n🚨 CODER: INTERRUPT - Detected web_search action")
                             should_interrupt = True
@@ -1926,6 +1940,87 @@ Great! You've completed a todo. Please continue with the next highest priority t
                     else:
                         print(f"❌ Failed to check logs, stopping generation")
                         break
+                elif interrupt_action.get('type') == 'check_network':
+                    # Handle check_network action for frontend network requests
+                    print(f"📋 CODER: Processing check_network interrupt")
+                    
+                    network_result = self._handle_check_network_interrupt(interrupt_action)
+                    if network_result is not None:
+                        # Add the network result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        requests_content = network_result.get('requests', '')
+                        request_count = network_result.get('request_count', 0)
+                        error_count = network_result.get('error_count', 0)
+                        warning_count = network_result.get('warning_count', 0)
+                        success_count = network_result.get('success_count', 0)
+                        total_stored = network_result.get('total_stored', 0)
+                        recent_errors = network_result.get('recent_errors', [])
+                        recent_warnings = network_result.get('recent_warnings', [])
+                        
+                        result_text = f"""Frontend Network Requests:
+
+📊 **Request Summary:**
+- Total requests retrieved: {request_count}
+- Total stored in database: {total_stored}
+- Success responses (2xx): {success_count}
+- Client errors (4xx): {error_count} 
+- Redirects (3xx): {warning_count}
+
+📝 **Network Requests:**
+```
+{requests_content.strip() if requests_content.strip() else 'No network requests found'}
+```
+
+💡 **Analysis Tips:**
+- 4xx errors indicate client-side issues (bad requests, authentication, etc.)
+- 5xx errors indicate server-side issues
+- Look for patterns in failed requests to identify systemic issues
+- Check response times for performance bottlenecks
+- Use this information to debug API integration problems
+"""
+
+                        if recent_errors:
+                            result_text += f"""
+
+🚨 **Recent Errors:**
+```
+{chr(10).join(recent_errors)}
+```
+"""
+
+                        if recent_warnings:
+                            result_text += f"""
+
+⚠️ **Recent Warnings:**
+```
+{chr(10).join(recent_warnings)}
+```
+"""
+
+                        full_user_msg += f"""
+<action_result type="check_network" service="frontend">
+{result_text}
+</action_result>
+"""
+
+                        messages.append(assistant_msg)
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_history()  # Save after each iteration
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        print(f"📋 CODER: Retrieved {request_count} network requests from frontend service")
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to check network requests, stopping generation")
+                        break
                 elif interrupt_action.get('type') == 'attempt_completion':
                     # Handle attempt completion action - CHECK TODOS FIRST BEFORE ENDING
                     print(f"🎯 CODER: Processing attempt_completion interrupt - CHECKING TODOS FIRST")
@@ -2766,8 +2861,8 @@ def _detect_invalid_xml_tags(content):
 
     # Valid action tag patterns that we expect
     valid_action_patterns = [
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list)"[^>]*>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list)"[^>]*/?>',
         r'<artifact\s+[^>]*>',
         r'<thinking>'
     ]

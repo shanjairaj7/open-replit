@@ -1946,22 +1946,201 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                     }
 
             elif service == 'frontend':
-                # Frontend logs are still handled locally since frontend runs in WebContainer
-                print("📡 Frontend logs - WebContainer handles this locally")
-                return {
-                    'status': 'info',
-                    'service': service,
-                    'message': 'Frontend logs are handled by WebContainer locally. Check browser console or WebContainer terminal.',
-                    'logs': 'Frontend runs in WebContainer - logs available in browser console'
-                }
+                # Frontend logs from browser console (stored in Cosmos DB via server_info API)
+                print(f"🔍 Getting frontend console logs for project: {project_id}")
+
+                try:
+                    import requests
+                    import time
+
+                    # Call our server_info API to get stored frontend logs
+                    api_url = f"http://localhost:8084/{project_id}/logs/logs?limit=50"
+
+                    print(f"📡 Fetching frontend logs from: {api_url}")
+                    response = requests.get(api_url, timeout=10)
+
+                    if response.status_code == 200:
+                        data = response.json()
+
+                        if data.get('status') == 'success':
+                            entries = data.get('entries', [])
+                            total_count = data.get('total_count', 0)
+
+                            print(f"✅ Retrieved {len(entries)} frontend console logs")
+
+                            # Format logs for display
+                            formatted_logs = []
+                            error_count = 0
+                            warning_count = 0
+
+                            for entry in entries:
+                                log_type = entry.get('logType', 'log')
+                                message = entry.get('message', '')
+                                time_str = entry.get('time', '')
+
+                                # Count errors and warnings
+                                if log_type == 'error':
+                                    error_count += 1
+                                elif log_type == 'warn':
+                                    warning_count += 1
+
+                                # Format log line
+                                formatted_logs.append(f"[{time_str}] {log_type.upper()}: {message}")
+
+                            logs_output = '\n'.join(formatted_logs) if formatted_logs else "No console logs found"
+
+                            # Extract recent errors for quick diagnosis
+                            recent_errors = [log for log in formatted_logs if 'ERROR:' in log][-5:]
+                            recent_warnings = [log for log in formatted_logs if 'WARN:' in log][-3:]
+
+                            return {
+                                'status': 'success',
+                                'service': service,
+                                'logs': logs_output,
+                                'line_count': len(entries),
+                                'error_count': error_count,
+                                'warning_count': warning_count,
+                                'total_stored': total_count,
+                                'recent_errors': recent_errors,
+                                'recent_warnings': recent_warnings,
+                                'source': 'cosmos_db_console_logs'
+                            }
+                        else:
+                            error_msg = data.get('error', 'Unknown error from logs API')
+                            print(f"❌ Logs API returned error: {error_msg}")
+                            return {
+                                'status': 'error',
+                                'error': f"Logs API error: {error_msg}",
+                                'service': service
+                            }
+                    else:
+                        print(f"❌ HTTP error getting frontend logs: {response.status_code}")
+                        return {
+                            'status': 'error',
+                            'error': f"HTTP {response.status_code} from logs API",
+                            'service': service
+                        }
+
+                except Exception as e:
+                    print(f"❌ Error getting frontend logs: {e}")
+                    return {
+                        'status': 'error',
+                        'error': f"Error getting frontend logs: {str(e)}",
+                        'service': service
+                    }
+
             else:
+                print(f"❌ Unknown service type: {service}")
                 return {
                     'status': 'error',
-                    'error': f"Unknown service: {service}. Use 'backend' or 'frontend'",
+                    'error': f"Unknown service type: {service}. Use 'backend' or 'frontend'",
                     'service': service
                 }
         except Exception as e:
             print(f"❌ CODER: Exception during log check: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _handle_check_network_interrupt(self, action: dict) -> dict:
+        """Handle check_network action for frontend network requests from Cosmos DB"""
+        print(f"📋 CODER: Handling check_network interrupt for frontend")
+        try:
+            project_id = getattr(self, 'project_id', None)
+            if not project_id:
+                print("❌ CODER: No project_id found for network checking")
+                return None
+            
+            # Frontend network requests from browser (stored in Cosmos DB via server_info API)
+            print(f"🔍 Getting frontend network requests for project: {project_id}")
+            try:
+                import requests
+                # Call our server_info API to get stored frontend network requests
+                api_url = f"http://localhost:8084/{project_id}/logs/network?limit=50"
+                print(f"📡 Fetching network requests from: {api_url}")
+                response = requests.get(api_url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('status') == 'success':
+                        entries = data.get('entries', [])
+                        total_count = data.get('total_count', 0)
+                        print(f"✅ Retrieved {len(entries)} frontend network requests")
+                        
+                        # Format network requests for display
+                        formatted_requests = []
+                        error_count = 0
+                        warning_count = 0
+                        success_count = 0
+                        
+                        for entry in entries:
+                            method = entry.get('method', 'GET')
+                            url = entry.get('url', '')
+                            status = entry.get('status', 0)
+                            response_time = entry.get('responseTime', 0)
+                            time_str = entry.get('time', '')
+                            
+                            # Count by status codes
+                            if status >= 400:
+                                error_count += 1
+                                status_indicator = "❌"
+                            elif status >= 300:
+                                warning_count += 1
+                                status_indicator = "⚠️"
+                            elif status >= 200:
+                                success_count += 1
+                                status_indicator = "✅"
+                            else:
+                                status_indicator = "❓"
+                            
+                            formatted_requests.append(
+                                f"[{time_str}] {status_indicator} {method} {url} - {status} ({response_time}ms)"
+                            )
+                        
+                        requests_output = '\n'.join(formatted_requests) if formatted_requests else "No network requests found"
+                        
+                        # Extract recent errors for quick diagnosis
+                        recent_errors = [req for req in formatted_requests if '❌' in req][-5:]
+                        recent_warnings = [req for req in formatted_requests if '⚠️' in req][-3:]
+                        
+                        return {
+                            'status': 'success',
+                            'service': 'frontend',
+                            'requests': requests_output,
+                            'request_count': len(entries),
+                            'error_count': error_count,
+                            'warning_count': warning_count,
+                            'success_count': success_count,
+                            'total_stored': total_count,
+                            'recent_errors': recent_errors,
+                            'recent_warnings': recent_warnings,
+                            'source': 'cosmos_db_network_requests'
+                        }
+                    else:
+                        error_msg = data.get('error', 'Unknown error from network API')
+                        print(f"❌ Network API returned error: {error_msg}")
+                        return {
+                            'status': 'error',
+                            'error': f"Network API error: {error_msg}",
+                            'service': 'frontend'
+                        }
+                else:
+                    print(f"❌ HTTP error getting frontend network requests: {response.status_code}")
+                    return {
+                        'status': 'error',
+                        'error': f"HTTP {response.status_code} from network API",
+                        'service': 'frontend'
+                    }
+            except Exception as e:
+                print(f"❌ Error getting frontend network requests: {e}")
+                return {
+                    'status': 'error',
+                    'error': f"Error getting frontend network requests: {str(e)}",
+                    'service': 'frontend'
+                }
+                
+        except Exception as e:
+            print(f"❌ CODER: Exception during network check: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -2572,7 +2751,7 @@ Exit code: 0
 
             # Use the handler to process the update
             result = self._update_handler.handle_update_file(action)
-            
+
             # Handle the new return format (dict with success/message)
             if isinstance(result, dict):
                 return result
@@ -2891,9 +3070,17 @@ If you really want to create an empty file, please confirm by responding with th
 
                 if result.status == "success":
                     backend_url = result.url
+                    stdout = result.stdout or ''
+                    stderr = result.stderr or ''
 
                     print(f"✅ Backend deployed successfully!")
                     print(f"🔗 Backend URL: {backend_url}")
+                    
+                    # Print STDOUT/STDERR for visibility
+                    if stdout:
+                        print(f"📤 DEPLOYMENT STDOUT:\n{stdout}")
+                    if stderr:
+                        print(f"📥 DEPLOYMENT STDERR:\n{stderr}")
 
                     # Update backend URL in state
                     self.backend_url = backend_url
@@ -2905,12 +3092,34 @@ If you really want to create an empty file, please confirm by responding with th
                         except Exception as e:
                             print(f"⚠️  Warning: Could not save backend deployment info: {e}")
 
-                    return {"status": "success", "result": {"backend_url": backend_url, "app_name": app_name}}
+                    return {
+                        "status": "success", 
+                        "result": {
+                            "backend_url": backend_url, 
+                            "app_name": app_name,
+                            "stdout": stdout,  # Include STDOUT in result
+                            "stderr": stderr   # Include STDERR in result
+                        }
+                    }
                 else:
                     error_msg = result.error or 'Unknown deployment error'
+                    stdout = result.stdout or ''
+                    stderr = result.stderr or ''
+                    
                     print(f"❌ Deployment failed: {error_msg}")
-                    # Pass through the detailed error from deployment (already contains STDOUT/STDERR)
-                    return {"status": "error", "error": error_msg}
+                    
+                    # Print STDOUT/STDERR for debugging
+                    if stdout:
+                        print(f"📤 DEPLOYMENT STDOUT:\n{stdout}")
+                    if stderr:
+                        print(f"📥 DEPLOYMENT STDERR:\n{stderr}")
+                    
+                    return {
+                        "status": "error", 
+                        "error": error_msg,
+                        "stdout": stdout,  # Include STDOUT in error response
+                        "stderr": stderr   # Include STDERR in error response
+                    }
 
             except ImportError as e:
                 print(f"❌ Could not import deployment functions: {e}")
@@ -3042,10 +3251,18 @@ If you really want to create an empty file, please confirm by responding with th
                 elif result.get('status') == 'success':
                     new_url = result.get('url')
                     docs_url = result.get('docs_url')
+                    stdout = result.get('stdout', '')
+                    stderr = result.get('stderr', '')
 
                     print(f"✅ Backend redeployed successfully!")
                     print(f"🔗 Backend URL: {new_url}")
                     print(f"📚 API Docs: {docs_url}")
+                    
+                    # Print STDOUT/STDERR for visibility
+                    if stdout:
+                        print(f"📤 DEPLOYMENT STDOUT:\n{stdout}")
+                    if stderr:
+                        print(f"📥 DEPLOYMENT STDERR:\n{stderr}")
 
                     # Update backend URL in state
                     self.backend_url = new_url
@@ -3057,15 +3274,29 @@ If you really want to create an empty file, please confirm by responding with th
                             "docs_url": docs_url,
                             "app_name": app_name,
                             "redeployed": True,
-                            "deployment_output": result.get('deployment_output', 'Backend redeployed successfully')
+                            "deployment_output": result.get('deployment_output', 'Backend redeployed successfully'),
+                            "stdout": stdout,  # Include STDOUT in result
+                            "stderr": stderr   # Include STDERR in result
                         }
                     }
                 else:
                     error_msg = result.get('error', 'Unknown deployment error')
+                    stdout = result.get('stdout', '')
+                    stderr = result.get('stderr', '')
+                    
                     print(f"❌ Backend redeploy failed: {error_msg}")
+                    
+                    # Print STDOUT/STDERR for debugging
+                    if stdout:
+                        print(f"📤 DEPLOYMENT STDOUT:\n{stdout}")
+                    if stderr:
+                        print(f"📥 DEPLOYMENT STDERR:\n{stderr}")
+                    
                     return {
                         "status": "error",
-                        "error": f"Modal redeploy failed: {error_msg}"
+                        "error": f"Modal redeploy failed: {error_msg}",
+                        "stdout": stdout,  # Include STDOUT in error response
+                        "stderr": stderr   # Include STDERR in error response
                     }
             else:
                 error_details = f"HTTP {response.status_code}: {response.text}"
