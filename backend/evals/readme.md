@@ -1,6 +1,7 @@
 * Backend and frontend requirements
 * Projects to test
 * Fixes from tests
+* Models that perform well
 
 Set of projects that the model should be able to fully implement:
 
@@ -55,3 +56,8 @@ Changes
     - you must make the change the user request, and then think of all these things and ask the user if they want you to make all these changes so that the entire product works properly with the given change and then once they accept do it
   - always use trailing slash in all routes, in backend and frontend. make sure you are consistent in everything. [added to prompt]
   - when handling signup, login must be called to get the token. token must always be stored in zustand and everything in the app must get the token from the zustand store. [added to prompt]
+
+
+Models that perform well
+  - qwen3coder
+  - gemini 2.5 flash
