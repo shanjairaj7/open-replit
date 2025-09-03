@@ -253,6 +253,8 @@ class StreamingXMLParser:
                     'integration': attrs.get('integration', ''),
                     'status': attrs.get('status', ''),
                     'integration_tested': attrs.get('integration_tested', ''),
+                    'operation': attrs.get('operation', ''),
+                    'doc_name': attrs.get('doc_name', ''),
                     'query': attrs.get('query', ''),
                     'content': '',
                     'raw_attrs': attrs
@@ -298,6 +300,8 @@ class StreamingXMLParser:
                 'integration': attrs.get('integration', ''),
                 'status': attrs.get('status', ''),
                 'integration_tested': attrs.get('integration_tested', ''),
+                'operation': attrs.get('operation', ''),
+                'doc_name': attrs.get('doc_name', ''),
                 'query': attrs.get('query', ''),
                 'content': content,
                 'raw_attrs': attrs

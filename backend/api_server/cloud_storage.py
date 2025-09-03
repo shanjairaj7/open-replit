@@ -30,12 +30,22 @@ class AzureBlobStorage:
         self.container_name = os.getenv('AZURE_STORAGE_CONTAINER', 'codebase-projects')
         self.container_client = self.blob_service_client.get_container_client(self.container_name)
         
-        # Ensure container exists
+        # Setup docs container
+        self.docs_container_name = 'codebase-docs'
+        self.docs_container_client = self.blob_service_client.get_container_client(self.docs_container_name)
+        
+        # Ensure containers exist
         try:
             self.container_client.get_container_properties()
         except ResourceNotFoundError:
             print(f"🔧 Creating Azure container: {self.container_name}")
             self.container_client.create_container()
+        
+        try:
+            self.docs_container_client.get_container_properties()
+        except ResourceNotFoundError:
+            print(f"📚 Creating docs container: {self.docs_container_name}")
+            self.docs_container_client.create_container()
     
     def _get_blob_path(self, project_id: str, file_path: str) -> str:
         """Convert project file path to Azure blob path"""
@@ -366,6 +376,136 @@ class AzureBlobStorage:
         except Exception as e:
             print(f"❌ Failed to get project structure: {str(e)}")
             return {"error": str(e)}
+    
+    # DOCS METHODS
+    def list_docs(self) -> List[str]:
+        """List all available documentation files"""
+        try:
+            print("📚 Listing all docs in codebase-docs container")
+            blobs = self.docs_container_client.list_blobs()
+            
+            doc_files = []
+            for blob in blobs:
+                doc_files.append(blob.name)
+            
+            print(f"📋 Found {len(doc_files)} documentation files")
+            return sorted(doc_files)
+            
+        except Exception as e:
+            print(f"❌ Failed to list docs: {str(e)}")
+            return []
+    
+    def search_docs(self, query: str) -> List[str]:
+        """Search documentation by content/title matching"""
+        print(f"🔍 Searching docs for: '{query}'")
+        try:
+            query_lower = query.lower()
+            matching_docs = []
+            
+            blobs = self.docs_container_client.list_blobs()
+            for blob in blobs:
+                doc_name = blob.name
+                
+                # Check if query matches filename
+                if query_lower in doc_name.lower():
+                    matching_docs.append(doc_name)
+                    continue
+                
+                # Check content (simple implementation)
+                try:
+                    blob_client = self.docs_container_client.get_blob_client(doc_name)
+                    content = blob_client.download_blob().readall().decode('utf-8')
+                    if query_lower in content.lower():
+                        matching_docs.append(doc_name)
+                except:
+                    pass  # Skip files that can't be read
+            
+            print(f"🎯 Found {len(matching_docs)} matching docs")
+            return sorted(matching_docs)
+            
+        except Exception as e:
+            print(f"❌ Failed to search docs: {str(e)}")
+            return []
+    
+    def download_doc(self, doc_name: str) -> Optional[str]:
+        """Download specific documentation file"""
+        try:
+            print(f"📖 Downloading doc: {doc_name}")
+            blob_client = self.docs_container_client.get_blob_client(doc_name)
+            
+            content = blob_client.download_blob().readall().decode('utf-8')
+            print(f"✅ Downloaded doc: {len(content)} characters")
+            return content
+            
+        except ResourceNotFoundError:
+            print(f"📄 Doc not found: {doc_name}")
+            return None
+        except Exception as e:
+            print(f"❌ Failed to download doc {doc_name}: {str(e)}")
+            return None
+    
+    def upload_doc(self, doc_name: str, content: str) -> bool:
+        """Upload documentation file to docs container"""
+        try:
+            print(f"📤 Uploading doc: {doc_name}")
+            blob_client = self.docs_container_client.get_blob_client(doc_name)
+            
+            # Upload with UTF-8 encoding and proper content type
+            from azure.storage.blob import ContentSettings
+            blob_client.upload_blob(
+                content.encode('utf-8'), 
+                overwrite=True,
+                content_settings=ContentSettings(content_type='text/markdown; charset=utf-8')
+            )
+            
+            print(f"✅ Uploaded doc: {doc_name} ({len(content)} characters)")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to upload doc {doc_name}: {str(e)}")
+            return False
+    
+    def delete_doc(self, doc_name: str) -> bool:
+        """Delete specific documentation file"""
+        try:
+            print(f"🗑️ Deleting doc: {doc_name}")
+            blob_client = self.docs_container_client.get_blob_client(doc_name)
+            blob_client.delete_blob()
+            
+            print(f"✅ Deleted doc: {doc_name}")
+            return True
+            
+        except ResourceNotFoundError:
+            print(f"📄 Doc not found (already deleted): {doc_name}")
+            return True  # Consider it success if already deleted
+        except Exception as e:
+            print(f"❌ Failed to delete doc {doc_name}: {str(e)}")
+            return False
+    
+    def delete_all_docs(self) -> bool:
+        """Delete all documentation files from docs container"""
+        try:
+            print("🗑️ Deleting all docs from container")
+            
+            # List all blobs and delete them
+            blobs = self.docs_container_client.list_blobs()
+            deleted_count = 0
+            
+            for blob in blobs:
+                try:
+                    blob_client = self.docs_container_client.get_blob_client(blob.name)
+                    blob_client.delete_blob()
+                    deleted_count += 1
+                    print(f"  ✅ Deleted: {blob.name}")
+                except Exception as e:
+                    print(f"  ❌ Failed to delete {blob.name}: {str(e)}")
+            
+            print(f"✅ Deleted {deleted_count} documentation files")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to delete all docs: {str(e)}")
+            return False
 
 # Global instance for easy access (lazy initialization)
 cloud_storage = None

@@ -11,9 +11,14 @@ import queue
 import threading
 import shutil
 import subprocess
+import time
 from datetime import datetime
-from typing import Dict, List, Optional, AsyncGenerator
+from typing import Dict, List, Optional, AsyncGenerator, Any
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # Import the model system and project pool
-from base_test_azure_hybrid import BoilerplatePersistentGroq, FrontendCommandInterrupt
+from agent_class import BoilerplatePersistentGroq, FrontendCommandInterrupt
 from project_pool_manager import get_pool_manager
 
 
@@ -296,7 +301,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
     # Initialize stdout/stderr variables to capture deployment output
     deployment_stdout = ""
     deployment_stderr = ""
-    
+
     try:
         from cloud_storage import get_cloud_storage
         import tempfile
@@ -382,7 +387,9 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
                     "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
                     "APP_TITLE": request.app_title or "AI Generated Backend",
-                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend"
+                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
+                    "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
+                    "EXA_API_KEY": "16fe8779-7264-44c1-a911-e8187cb629c6"
                 }
 
                 final_secrets = {**default_secrets}
@@ -418,7 +425,9 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
                     "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
                     "APP_TITLE": request.app_title or "AI Generated Backend",
-                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend"
+                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
+                    "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
+                    "EXA_API_KEY": "16fe8779-7264-44c1-a911-e8187cb629c6"
                 }
 
                 final_secrets = {**default_secrets}
@@ -447,7 +456,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 minutes
                     stdout = stdout.decode('utf-8') if stdout else ""
                     stderr = stderr.decode('utf-8') if stderr else ""
-                    
+
                     # Capture for return to LLM
                     deployment_stdout = stdout
                     deployment_stderr = stderr
@@ -486,7 +495,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                                         retry_stdout, retry_stderr = await asyncio.wait_for(retry_proc.communicate(), timeout=600)
                                         retry_stdout = retry_stdout.decode('utf-8') if retry_stdout else ""
                                         retry_stderr = retry_stderr.decode('utf-8') if retry_stderr else ""
-                                        
+
                                         # Update captured output with retry results
                                         deployment_stdout = retry_stdout
                                         deployment_stderr = retry_stderr
@@ -611,7 +620,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             status="error",
             app_name=request.app_name,
             error=str(e),
-            stdout=deployment_stdout,  # Include captured STDOUT  
+            stdout=deployment_stdout,  # Include captured STDOUT
             stderr=deployment_stderr   # Include captured STDERR
         )
 
@@ -1169,7 +1178,7 @@ def create_app():
                     else:
                         # Fallback: create project normally (emergency case)
                         print(f"⚠️ No pooled projects available, creating emergency project")
-                        from base_test_azure_hybrid import generate_project_name
+                        from agent_class import generate_project_name
 
                         base_project_name = generate_project_name(request.message)
                         timestamp = datetime.now().strftime("%H%M%S")
@@ -1391,7 +1400,7 @@ def create_app():
     async def create_project_for_webcontainer(request: dict):
         """Create a new project for webcontainer using the same flow as streaming chat"""
         try:
-            from base_test_azure_hybrid import BoilerplatePersistentGroq, generate_project_name
+            from agent_class import BoilerplatePersistentGroq, generate_project_name
 
             # Get initial message to generate project name, default to generic name
             initial_message = request.get('initial_message', 'New WebContainer Project')
@@ -1457,7 +1466,7 @@ def create_app():
                     frontend_files.append(file_path)
 
             # Convert to WebContainer format
-            webcontainer_files = convert_to_webcontainer_format(project_id, frontend_files, cloud_storage)
+            webcontainer_files = await convert_to_webcontainer_format(project_id, frontend_files, cloud_storage)
 
             print(f"✅ Project ready for WebContainer: {project_id} with {len(frontend_files)} frontend files")
 
@@ -1547,8 +1556,11 @@ def create_app():
                 if not file_path or file_path.startswith('backend/'):
                     continue
 
-                # Skip excluded patterns
-                should_exclude = any(pattern in file_path for pattern in exclude_patterns)
+                # Always include .env files from frontend folder
+                is_env_file = file_path.endswith('.env') or file_path.endswith('/.env')
+
+                # Skip excluded patterns except .env files
+                should_exclude = any(pattern in file_path for pattern in exclude_patterns) and not is_env_file
                 if should_exclude:
                     continue
 
@@ -1563,7 +1575,7 @@ def create_app():
             print(f"📁 Found {len(frontend_files)} frontend files for project {project_id}")
 
             # Convert to WebContainer mount format
-            webcontainer_files = convert_to_webcontainer_format(project_id, frontend_files, cloud_storage)
+            webcontainer_files = await convert_to_webcontainer_format(project_id, frontend_files, cloud_storage)
 
             return {"files": webcontainer_files, "project_id": project_id}
 
@@ -1650,7 +1662,13 @@ def create_app():
             successful_count = 0
             failed_count = 0
 
-            for file_path in request.file_paths:
+            # Always include frontend's .env file
+            file_paths_to_retrieve = list(request.file_paths)
+            if "frontend/.env" not in file_paths_to_retrieve:
+                file_paths_to_retrieve.append("frontend/.env")
+                print(f"📧 Added frontend/.env to bulk request")
+
+            for file_path in file_paths_to_retrieve:
                 try:
                     # Download file content from cloud storage
                     content = cloud_storage.download_file(project_id, file_path)
@@ -1695,7 +1713,7 @@ def create_app():
                 status=status,
                 project_id=project_id,
                 files=files_result,
-                total_files=len(request.file_paths),
+                total_files=len(file_paths_to_retrieve),
                 successful_files=successful_count,
                 failed_files=failed_count
             )
@@ -1704,20 +1722,46 @@ def create_app():
             print(f"❌ Error in bulk file retrieval for {project_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
 
-    def convert_to_webcontainer_format(project_id: str, files_list: list, cloud_storage) -> dict:
-        """Convert cloud files to WebContainer mount format"""
+    async def convert_to_webcontainer_format(project_id: str, files_list: list, cloud_storage) -> dict:
+        """Convert cloud files to WebContainer mount format (async with thread pool)"""
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
         try:
             webcontainer_files = {}
 
-            for file_path in files_list:
-                # For downloading, we need the original path with frontend/ prefix
-                original_path = f"frontend/{file_path}" if not file_path.startswith('frontend/') else file_path
-
-                # Download file content from cloud using original path
-                content = cloud_storage.download_file(project_id, original_path)
-                if content is None:
-                    print(f"⚠️ Could not download content for {original_path}")
+            # Download files using thread pool to avoid blocking the event loop
+            def download_single_file(file_path):
+                try:
+                    # For downloading, we need the original path with frontend/ prefix
+                    original_path = f"frontend/{file_path}" if not file_path.startswith('frontend/') else file_path
+                    
+                    # Download file content from cloud using original path
+                    content = cloud_storage.download_file(project_id, original_path)
+                    if content is None:
+                        print(f"⚠️ Could not download content for {original_path}")
+                        return None
+                    return (file_path, content)
+                except Exception as e:
+                    print(f"❌ Error downloading {file_path}: {e}")
+                    return None
+            
+            # Use ThreadPoolExecutor to run downloads in parallel without blocking
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                loop = asyncio.get_event_loop()
+                download_tasks = [
+                    loop.run_in_executor(executor, download_single_file, file_path) 
+                    for file_path in files_list
+                ]
+                
+                # Wait for all downloads to complete
+                download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+            
+            # Process all results
+            for result in download_results:
+                if result is None or isinstance(result, Exception):
                     continue
+                
+                file_path, content = result
 
                 # Build nested structure for WebContainer
                 path_parts = file_path.split('/')
@@ -2125,6 +2169,473 @@ def create_app():
                     "project_id": project_id
                 }
 
+    # Global cache for database inspection to prevent stream interference
+    _database_inspection_cache = {}
+    _db_cache_timeout = 10  # 10 seconds cache for database inspection
+
+    @app.get("/projects/{project_id}/backend/database/inspect")
+    async def inspect_deployed_backend_database(project_id: str):
+        """
+        Call the deployed backend's /_internal/db/inspect endpoint to get database contents
+        CACHED to prevent interference with streaming operations
+        """
+        try:
+            from datetime import datetime
+            import aiohttp
+            import asyncio
+
+            # Check cache first to avoid Azure storage contention with streaming
+            now = datetime.now()
+            cache_key = f"db_inspect_{project_id}"
+
+            if cache_key in _database_inspection_cache:
+                cached_data, cached_time = _database_inspection_cache[cache_key]
+                age_seconds = (now - cached_time).total_seconds()
+
+                if age_seconds < _db_cache_timeout:
+                    print(f"🔍 Database inspection CACHE HIT for {project_id} (age: {age_seconds:.1f}s)")
+                    return cached_data
+                else:
+                    print(f"🔍 Database inspection cache expired for {project_id} (age: {age_seconds:.1f}s)")
+
+            # Use dedicated general Azure client (separate from streaming)
+            cloud_storage = get_general_azure_client()
+
+            # Load project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata:
+                return {
+                    "status": "error",
+                    "error": "Project metadata not found",
+                    "project_id": project_id
+                }
+
+            backend_deployment = metadata.get("backend_deployment")
+            if not backend_deployment:
+                return {
+                    "status": "not_deployed",
+                    "message": "Backend not deployed yet - cannot inspect database",
+                    "project_id": project_id,
+                    "suggestion": "Deploy the backend first using the deploy API endpoint"
+                }
+
+            # Get backend URL for database inspection
+            backend_url = backend_deployment.get("url")
+            if not backend_url:
+                return {
+                    "status": "error",
+                    "error": "Backend URL not found in deployment metadata",
+                    "project_id": project_id,
+                    "suggestion": "Redeploy the backend to regenerate the URL"
+                }
+
+            # Call the deployed backend's internal database inspection endpoint
+            call_start_time = datetime.now()
+            database_inspection_data = None
+            call_error = None
+            call_status = None
+
+            try:
+                # Use short timeout to avoid interfering with streaming operations
+                timeout = aiohttp.ClientTimeout(total=5)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    inspect_url = f"{backend_url}/_internal/db/inspect"
+                    print(f"🔍 Calling database inspection: {inspect_url}")
+
+                    async with session.get(inspect_url) as response:
+                        call_duration = (datetime.now() - call_start_time).total_seconds() * 1000
+
+                        if response.status == 200:
+                            database_inspection_data = await response.json()
+                            call_status = "success"
+                            print(f"✅ Database inspection successful ({call_duration:.1f}ms)")
+
+                            # Add response metadata
+                            if isinstance(database_inspection_data, dict):
+                                database_inspection_data["_call_metadata"] = {
+                                    "called_from": "streaming_api",
+                                    "response_time_ms": round(call_duration, 1),
+                                    "called_at": call_start_time.isoformat(),
+                                    "backend_url": backend_url
+                                }
+
+                        else:
+                            call_status = "error"
+                            try:
+                                error_response = await response.json()
+                                call_error = f"Backend returned HTTP {response.status}: {error_response.get('error', 'Unknown error')}"
+                            except:
+                                call_error = f"Backend returned HTTP {response.status}"
+                            print(f"❌ Database inspection failed: {call_error} ({call_duration:.1f}ms)")
+
+            except asyncio.TimeoutError:
+                call_duration = (datetime.now() - call_start_time).total_seconds() * 1000
+                call_status = "timeout"
+                call_error = f"Database inspection timeout after 5 seconds"
+                print(f"⏰ Database inspection timeout ({call_duration:.1f}ms)")
+            except Exception as e:
+                call_duration = (datetime.now() - call_start_time).total_seconds() * 1000
+                call_status = "error"
+                call_error = f"Connection error: {str(e)}"
+                print(f"❌ Database inspection connection error: {e} ({call_duration:.1f}ms)")
+
+            # Prepare result
+            result = {
+                "status": call_status,
+                "project_id": project_id,
+                "backend_url": backend_url,
+                "backend_deployment": {
+                    "app_name": backend_deployment.get("app_name"),
+                    "deployed_at": backend_deployment.get("deployed_at"),
+                    "status": backend_deployment.get("status")
+                },
+                "call_info": {
+                    "response_time_ms": round(call_duration, 1) if 'call_duration' in locals() else None,
+                    "called_at": call_start_time.isoformat(),
+                    "inspect_endpoint": f"{backend_url}/_internal/db/inspect"
+                }
+            }
+
+            if call_status == "success" and database_inspection_data:
+                result["database_inspection"] = database_inspection_data
+                result["message"] = "Database inspection successful"
+            else:
+                result["error"] = call_error
+                if call_status == "timeout":
+                    result["suggestion"] = "Backend may be slow or unresponsive. Try redeploying the backend."
+                elif call_status == "error":
+                    result["suggestion"] = "Backend may be down or unreachable. Check backend deployment status and redeploy if needed."
+
+            # Cache the result to prevent future calls from interfering with streaming
+            _database_inspection_cache[cache_key] = (result, now)
+            print(f"🔍 Database inspection cached for {project_id} (expires in {_db_cache_timeout}s)")
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Database inspection API error for {project_id}: {e}")
+            return {
+                "status": "error",
+                "error": f"Database inspection failed: {str(e)}",
+                "project_id": project_id,
+                "suggestion": "Check backend deployment status and try again"
+            }
+
+    @app.get("/projects/{project_id}/backend/database/tables/{table_name}")
+    async def get_deployed_backend_table(project_id: str, table_name: str):
+        """
+        Get specific table data from deployed backend in structured format
+        """
+        try:
+            from datetime import datetime
+            import aiohttp
+            import asyncio
+
+            # Check cache first
+            now = datetime.now()
+            cache_key = f"table_view_{project_id}_{table_name}"
+
+            if cache_key in _database_inspection_cache:
+                cached_data, cached_time = _database_inspection_cache[cache_key]
+                age_seconds = (now - cached_time).total_seconds()
+
+                if age_seconds < _db_cache_timeout:
+                    print(f"📋 Table view CACHE HIT for {project_id}/{table_name} (age: {age_seconds:.1f}s)")
+                    return cached_data
+
+            # Use dedicated general Azure client
+            cloud_storage = get_general_azure_client()
+
+            # Load project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata:
+                return {
+                    "status": "error",
+                    "error": "Project metadata not found",
+                    "project_id": project_id
+                }
+
+            backend_deployment = metadata.get("backend_deployment")
+            if not backend_deployment:
+                return {
+                    "status": "not_deployed",
+                    "message": "Backend not deployed yet - cannot view table",
+                    "project_id": project_id,
+                    "table_name": table_name
+                }
+
+            backend_url = backend_deployment.get("url")
+            if not backend_url:
+                return {
+                    "status": "error",
+                    "error": "Backend URL not found in deployment metadata",
+                    "project_id": project_id,
+                    "table_name": table_name
+                }
+
+            # Call the deployed backend's table management endpoint for GET operation
+            call_start_time = datetime.now()
+
+            try:
+                timeout = aiohttp.ClientTimeout(total=5)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    manage_url = f"{backend_url}/_internal/db/tables/{table_name}/manage"
+                    request_payload = {"operation": "get"}
+
+                    print(f"📋 Getting table data: {manage_url}")
+
+                    async with session.post(manage_url, json=request_payload) as response:
+                        call_duration = (datetime.now() - call_start_time).total_seconds() * 1000
+
+                        if response.status == 200:
+                            table_response = await response.json()
+
+                            if table_response.get("status") == "success":
+                                table_data = table_response.get("data", [])
+
+                                # Extract column information from the data
+                                columns = []
+                                if table_data:
+                                    # Get all unique column names from all records
+                                    all_columns = set()
+                                    for record in table_data:
+                                        if isinstance(record, dict):
+                                            all_columns.update(record.keys())
+                                    columns = sorted(list(all_columns))
+
+                                result = {
+                                    "status": "success",
+                                    "project_id": project_id,
+                                    "table_name": table_name,
+                                    "columns": columns,
+                                    "rows": table_data,
+                                    "metadata": {
+                                        "row_count": len(table_data),
+                                        "column_count": len(columns),
+                                        "primary_key": "id" if "id" in columns else None
+                                    },
+                                    "call_info": {
+                                        "response_time_ms": round(call_duration, 1),
+                                        "backend_url": backend_url
+                                    }
+                                }
+
+                                # Cache the result
+                                _database_inspection_cache[cache_key] = (result, now)
+                                print(f"📋 Table view cached for {project_id}/{table_name}")
+
+                                return result
+                            else:
+                                return {
+                                    "status": "error",
+                                    "error": table_response.get("error", "Unknown error from backend"),
+                                    "project_id": project_id,
+                                    "table_name": table_name
+                                }
+                        else:
+                            return {
+                                "status": "error",
+                                "error": f"Backend returned HTTP {response.status}",
+                                "project_id": project_id,
+                                "table_name": table_name
+                            }
+
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout",
+                    "error": "Table view request timed out",
+                    "project_id": project_id,
+                    "table_name": table_name
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": f"Connection error: {str(e)}",
+                    "project_id": project_id,
+                    "table_name": table_name
+                }
+
+        except Exception as e:
+            print(f"❌ Table view API error for {project_id}/{table_name}: {e}")
+            return {
+                "status": "error",
+                "error": f"Table view failed: {str(e)}",
+                "project_id": project_id,
+                "table_name": table_name
+            }
+
+    # Pydantic models for table operations
+    class TableOperationRequest(BaseModel):
+        operation: str  # "insert", "update", "delete"
+        data: Dict[str, Any] = None  # Record data for insert/update
+        row_id: Optional[int] = None  # Required for update/delete
+
+    @app.post("/projects/{project_id}/backend/database/tables/{table_name}/manage")
+    async def manage_deployed_backend_table(project_id: str, table_name: str, request: TableOperationRequest):
+        """
+        Unified table operations endpoint for deployed backend (insert/update/delete)
+        """
+        try:
+            from datetime import datetime
+            import aiohttp
+            import asyncio
+
+            # Use dedicated general Azure client
+            cloud_storage = get_general_azure_client()
+
+            # Load project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata:
+                return {
+                    "status": "error",
+                    "error": "Project metadata not found",
+                    "project_id": project_id
+                }
+
+            backend_deployment = metadata.get("backend_deployment")
+            if not backend_deployment:
+                return {
+                    "status": "not_deployed",
+                    "message": f"Backend not deployed yet - cannot perform {request.operation}",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+            backend_url = backend_deployment.get("url")
+            if not backend_url:
+                return {
+                    "status": "error",
+                    "error": "Backend URL not found in deployment metadata",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+            # Validate operation
+            valid_operations = ["insert", "update", "delete"]
+            if request.operation not in valid_operations:
+                return {
+                    "status": "error",
+                    "error": f"Invalid operation: {request.operation}. Valid operations: {valid_operations}",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+            # Validate required fields
+            if request.operation in ["update", "delete"] and request.row_id is None:
+                return {
+                    "status": "error",
+                    "error": f"row_id is required for {request.operation} operation",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+            if request.operation in ["insert", "update"] and not request.data:
+                return {
+                    "status": "error",
+                    "error": f"data is required for {request.operation} operation",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+            # Call the deployed backend's table management endpoint
+            call_start_time = datetime.now()
+
+            try:
+                timeout = aiohttp.ClientTimeout(total=10)  # Longer timeout for write operations
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    manage_url = f"{backend_url}/_internal/db/tables/{table_name}/manage"
+
+                    # Prepare request payload for backend
+                    request_payload = {
+                        "operation": request.operation,
+                        "data": request.data,
+                        "row_id": request.row_id
+                    }
+
+                    print(f"🔧 Table operation {request.operation} on {table_name}: {manage_url}")
+
+                    async with session.post(manage_url, json=request_payload) as response:
+                        call_duration = (datetime.now() - call_start_time).total_seconds() * 1000
+
+                        if response.status == 200:
+                            operation_response = await response.json()
+
+                            # Add streaming API metadata to response
+                            operation_response["project_id"] = project_id
+                            operation_response["call_info"] = {
+                                "response_time_ms": round(call_duration, 1),
+                                "called_at": call_start_time.isoformat(),
+                                "backend_url": backend_url
+                            }
+
+                            # Clear relevant cache entries after successful write operations
+                            if operation_response.get("status") == "success":
+                                # Clear table view cache for this table
+                                table_cache_key = f"table_view_{project_id}_{table_name}"
+                                if table_cache_key in _database_inspection_cache:
+                                    del _database_inspection_cache[table_cache_key]
+                                    print(f"🧹 Cleared table view cache for {project_id}/{table_name}")
+
+                                # Clear database inspection cache for this project
+                                db_cache_key = f"db_inspect_{project_id}"
+                                if db_cache_key in _database_inspection_cache:
+                                    del _database_inspection_cache[db_cache_key]
+                                    print(f"🧹 Cleared database inspection cache for {project_id}")
+
+                            print(f"✅ Table operation {request.operation} completed ({call_duration:.1f}ms)")
+                            return operation_response
+                        else:
+                            try:
+                                error_response = await response.json()
+                                error_msg = error_response.get("error", f"HTTP {response.status}")
+                            except:
+                                error_msg = f"Backend returned HTTP {response.status}"
+
+                            return {
+                                "status": "error",
+                                "error": error_msg,
+                                "project_id": project_id,
+                                "table_name": table_name,
+                                "operation": request.operation,
+                                "call_info": {
+                                    "response_time_ms": round(call_duration, 1),
+                                    "backend_url": backend_url
+                                }
+                            }
+
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout",
+                    "error": f"Table {request.operation} operation timed out",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation,
+                    "suggestion": "Operation may be slow or backend unresponsive"
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": f"Connection error: {str(e)}",
+                    "project_id": project_id,
+                    "table_name": table_name,
+                    "operation": request.operation
+                }
+
+        except Exception as e:
+            print(f"❌ Table operation API error for {project_id}/{table_name}: {e}")
+            return {
+                "status": "error",
+                "error": f"Table operation failed: {str(e)}",
+                "project_id": project_id,
+                "table_name": table_name,
+                "operation": getattr(request, 'operation', 'unknown')
+            }
+
     # Add secrets and redeploy backend
     @app.post("/projects/{project_id}/backend/secrets/update")
     async def update_backend_secrets_and_redeploy(project_id: str, secrets: Dict[str, str]):
@@ -2223,6 +2734,30 @@ def create_app():
                     "error": str(e),
                     "project_id": project_id
                 }
+
+    @app.get("/{project_id}/server_info")
+    async def get_server_info(project_id: str):
+        """
+        Get basic server information for a project (for testing/debugging)
+        """
+        try:
+            return {
+                "status": "success",
+                "message": "Server info endpoint is working",
+                "project_id": project_id,
+                "timestamp": int(time.time() * 1000),
+                "server": "streaming_api",
+                "methods": {
+                    "POST": "Submit logs/network data",
+                    "GET": "Get server status"
+                }
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "project_id": project_id
+            }
 
     @app.post("/{project_id}/server_info")
     async def handle_server_info(project_id: str, request: Request, info_request: ServerInfoRequest):
@@ -2357,6 +2892,10 @@ if __name__ == "__main__":
     print("  GET /conversations - List all conversations")
     print("  GET /conversations/{id}/info - Get conversation details")
     print("  DELETE /conversations/{id} - Delete conversation")
+    print("  GET /projects/{id}/backend/info - Get backend deployment info & health")
+    print("  GET /projects/{id}/backend/database/inspect - Inspect deployed backend database")
+    print("  GET /projects/{id}/backend/database/tables/{table} - View specific table data")
+    print("  POST /projects/{id}/backend/database/tables/{table}/manage - Manage table (insert/update/delete)")
     print("  POST /{project_id}/server_info - Queue logs/network (ULTRA-FAST)")
     print("  GET /{project_id}/logs/{type} - Retrieve stored logs/network data")
     print("  GET /queue/status - Background queue statistics")

@@ -35,7 +35,9 @@ class DiffParser:
             # Try multiple diff formats the model might use
             
             # Format 1: ------- SEARCH\ncontent\n=======\nreplacement
-            search_pattern_1 = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)(?=\n</diff>|\Z)'
+            # Fixed: Use exactly 7 equals to avoid capturing additional ======= lines in requirements.txt
+            # This prevents confusion with package version specifiers like package===1.0.0
+            search_pattern_1 = r'-------\s*SEARCH\s*\n(.*?)\n={7}\s*\n(.*?)(?=\n={7}\s*(?:\n|$)|\n-------\s*SEARCH|\n</diff>|\Z)'
             matches = re.findall(search_pattern_1, diff_block, re.DOTALL)
             
             if matches:

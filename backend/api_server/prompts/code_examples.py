@@ -1,3 +1,75 @@
+terminal_command_codebase_search = """
+Codebase Search Commands
+
+### Rule 1: Use rg (ripgrep) for fast pattern-based searches
+
+When to use: Finding functions, variables, imports, specific code patterns, or text across
+files.
+
+*Basic Command Structure:*
+
+rg "pattern" --type filetype -n -C 2
+
+Examples:
+
+A. Find Error Handling Patterns:
+# Find all try-catch blocks with context
+rg "try\s*\{.*catch\s*\(" --type js --type ts -n -C 3
+
+# Find specific error types being thrown
+rg "throw\s+new\s+(\w+Error)" --type js --type ts -n -C 2
+
+B. Find Function Definitions:
+# Find all async functions
+rg "async\s+function\s+(\w+)" --type js --type ts -n -C 2
+
+# Find React component definitions
+rg "(const|function)\s+(\w+)\s*=.*=>" --type tsx --type jsx -n -C 2
+
+Rule 2: Use find + xargs + grep for file-based searches with complex conditions
+
+When to use: Searching within specific file types, directories, or when you need to combine
+multiple conditions.
+
+Basic Command Structure:
+
+find . -name "*.ext" | xargs grep -n "pattern"
+
+Examples:
+
+A. Debug Import/Export Issues:
+# Find all imports of a specific module across TypeScript files
+find ./src -name "*.ts" -o -name "*.tsx" | xargs grep -n "import.*from.*['\"]\./.*auth"
+
+# Find unused exports (exports that aren't imported anywhere)
+find ./src -name "*.ts" | xargs grep -n "export.*function.*getUserById"
+
+B. Find API Endpoints and Route Handlers:
+# Find all API route definitions in backend
+find ./backend -name "*.py" -o -name "*.js" | xargs grep -n "@app\.\(get\|post\|put\|delete\)"
+
+# Find database query patterns
+find ./backend -name "*.py" | xargs grep -n "\.\(select\|insert\|update\|delete\)\("
+
+Quick Reference Flags:
+
+ripgrep (rg) flags:
+- -n: Show line numbers
+- -C 2: Show 2 lines of context before/after
+- --type js: Search only JavaScript files
+- -i: Case insensitive search
+- -w: Match whole words only
+
+grep flags:
+- -n: Show line numbers
+- -r: Recursive search
+- -i: Case insensitive
+- -l: Show only filenames with matches
+
+These two methods give you speed (ripgrep) and flexibility (find+grep) to handle 90% of
+codebase search needs efficiently.
+"""
+
 json_db = """
 from json_db import db, get_db, JsonDBSession
 from fastapi import Depends
@@ -12,12 +84,13 @@ def get_item(item_id: int):
 def update_item(item_id: int, updates: dict):
     return db.update_one('table_name', {'id': item_id}, updates)
 
-# FastAPI endpoint pattern
+# FastAPI endpoint pattern - SAFE CODE approach
 @router.post("/items")
-def create_item_endpoint(data: ItemCreate, db_session: JsonDBSession = Depends(get_db)):
-    if db_session.db.exists("items", name=data.name):
+async def create_item_endpoint(request: Request):
+    data = await request.json()
+    if db.exists("items", name=data.get("name")):
         raise HTTPException(status_code=400, detail="Item already exists")
-    return db_session.db.insert("items", data.dict())
+    return db.insert("items", data)
 """
 
 toast_error_handling = """
@@ -40,12 +113,22 @@ try {
 """
 
 tailwind_design_system = """
+/* Tailwind v4 CSS-First Example */
+
 @import "tailwindcss";
 
 @theme {
-  --color-primary: hsl(220 14% 96%);     /* Actual HSL values */
-  --color-background: hsl(0 0% 100%);   /* NOT bg-background */
+  /* Define colors as HSL values */
+  --color-primary: hsl(220 14% 96%);
+  --color-background: hsl(0 0% 100%);
+  --color-foreground: hsl(222 84% 5%);
+  --color-border: hsl(214 32% 91%);
   --font-sans: Inter, system-ui, sans-serif;
+}
+
+/* Custom utilities for complex patterns only */
+.app-gradient {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-foreground) 100%);
 }
 """
 
@@ -68,7 +151,7 @@ def initialize_json_databases():
         "contacts",   # Example: CRM app
         # Add your specific app tables here
     ]
-    
+
     # Create tables using the json_db.py create_tables function
     create_tables(table_names)
     print(f"✅ JSON database initialized with tables: {table_names}")
@@ -77,37 +160,103 @@ def initialize_json_databases():
 @modal.asgi_app()
 def fastapi_app():
     # ... existing FastAPI setup code ...
-    
+
     # CRITICAL: Initialize database AFTER volume is mounted
     initialize_json_databases()
-    
+
     # ... rest of FastAPI setup ...
     return app
 """
 
 json_database_complete_example = """
-# Complete Working Example from backend-boilerplate-clone:
+# SAFE CODE: Complete Working FastAPI + JsonDB Example
+
+# 1. Route File (backend/routes/contacts.py) - SAFE PATTERNS ONLY:
+from fastapi import APIRouter, Request, HTTPException
+from json_db import db  # Direct import - NO JsonDBSession!
+from datetime import datetime
+
+router = APIRouter(prefix="/contacts", tags=["contacts"])
+
+@router.post("/")
+async def create_contact(request: Request):
+    \"\"\"SAFE PATTERN: async + request.json() + direct db\"\"\"
+    data = await request.json()
+
+    # Simple validation - only check required fields
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    # Create contact with optional fields
+    contact = {
+        "name": data["name"],
+        "email": data.get("email", ""),
+        "phone": data.get("phone", ""),
+        "company": data.get("company", ""),
+        "notes": data.get("notes", ""),
+        "created_at": datetime.now().isoformat()
+    }
+
+    # Direct db access - NO dependency injection
+    result = db.insert("contacts", contact)
+
+    # Return clean dict
+    return {
+        "id": result,
+        "name": contact["name"],
+        "email": contact["email"]
+    }
+
+@router.get("/")
+def get_contacts():
+    \"\"\"SAFE PATTERN: Direct db access\"\"\"
+    contacts = db.find_all("contacts")
+    return contacts
+
+@router.get("/{contact_id}")
+def get_contact(contact_id: int):
+    \"\"\"SAFE PATTERN: Simple path parameter\"\"\"
+    contact = db.find_one("contacts", id=contact_id)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return contact
+
+@router.put("/{contact_id}")
+async def update_contact(contact_id: int, request: Request):
+    \"\"\"SAFE PATTERN: async + request.json() + direct db\"\"\"
+    data = await request.json()
+
+    # Check if exists
+    if not db.exists("contacts", id=contact_id):
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    # Update with timestamp
+    data["updated_at"] = datetime.now().isoformat()
+
+    success = db.update_one("contacts", {"id": contact_id}, data)
+    if not success:
+        raise HTTPException(status_code=500, detail="Update failed")
+
+    return {"message": "Contact updated"}
+
+# 2. App Setup (backend/app.py) - Database Initialization:
 @modal.asgi_app()
 def fastapi_app():
-    # Import dependencies inside function for Modal compatibility
     from fastapi import FastAPI
-    from fastapi.middleware.cors import CORSMiddleware
     from routes import api_router
-    from json_db import create_tables  # Import create_tables function
-    
-    # Initialize JSON database with your app's tables
+    from json_db import create_tables
+
+    # Initialize JSON database
     def initialize_json_databases():
-        table_names = ["users", "todos", "projects"]  # Your app's tables
+        table_names = ["users", "contacts", "tasks", "projects"]
         create_tables(table_names)
         print(f"✅ JSON database initialized: {table_names}")
-    
-    # Call database initialization
+
     initialize_json_databases()
-    
-    # Create FastAPI app
-    app = FastAPI(title=APP_TITLE, version="1.0.0")
-    
-    # ... rest of setup ...
+
+    app = FastAPI(title="My App", version="1.0.0")
+    app.include_router(api_router)
+
     return app
 """
 
@@ -120,10 +269,10 @@ create_tables(["users"])  # Module-level call fails
 @modal.asgi_app()
 def fastapi_app():
     from json_db import create_tables
-    
+
     def initialize_json_databases():
         create_tables(["users"])  # Called after volume mount
-    
+
     initialize_json_databases()  # Inside function only
 """
 
@@ -137,7 +286,7 @@ from ..models import User  # Relative imports
 
 # ✅ CORRECT - Import from project root (backend/ is the working directory):
 from models import User
-from models.user import User  
+from models.user import User
 from routes.auth import router
 from json_db import db, create_tables
 
@@ -179,7 +328,7 @@ interface TodoStore {
   todos: Todo[];
   loading: boolean;
   priorityFilter: string;
-  
+
   // Actions
   fetchTodos: () => Promise<void>;
   addTodo: (todoData: Partial<Todo>) => Promise<void>;
@@ -194,7 +343,7 @@ export const useTodoStore = create<TodoStore>()(
       todos: [],
       loading: false,
       priorityFilter: 'all',
-      
+
       fetchTodos: async () => {
         try {
           const todos = await todoApi.getTodos(get().priorityFilter);
@@ -203,7 +352,7 @@ export const useTodoStore = create<TodoStore>()(
           toast.error('Failed to fetch todos');
         }
       },
-      
+
       addTodo: async (todoData) => {
         try {
           const newTodo = await todoApi.createTodo(todoData);
@@ -213,12 +362,12 @@ export const useTodoStore = create<TodoStore>()(
           toast.error('Failed to add todo');
         }
       },
-      
+
       updateTodo: async (id, updates) => {
         try {
           const updatedTodo = await todoApi.updateTodo(id, updates);
           set(state => ({
-            todos: state.todos.map(todo => 
+            todos: state.todos.map(todo =>
               todo.id === id ? updatedTodo : todo
             )
           }));
@@ -227,7 +376,7 @@ export const useTodoStore = create<TodoStore>()(
           toast.error('Failed to update todo');
         }
       },
-      
+
       deleteTodo: async (id) => {
         try {
           await todoApi.deleteTodo(id);
@@ -239,7 +388,7 @@ export const useTodoStore = create<TodoStore>()(
           toast.error('Failed to delete todo');
         }
       },
-      
+
       setPriorityFilter: (priority) => {
         set({ priorityFilter: priority });
       }
@@ -275,7 +424,7 @@ export const useAnalyticsStore = create<AnalyticsStore>((set, get) => ({
   analytics: null,
   loading: false,
   error: null,
-  
+
   fetchAnalytics: async () => {
     set({ loading: true, error: null });
     try {
@@ -285,7 +434,7 @@ export const useAnalyticsStore = create<AnalyticsStore>((set, get) => ({
       set({ error: 'Failed to fetch analytics', loading: false });
     }
   },
-  
+
   refreshMetrics: async () => {
     return get().fetchAnalytics();
   }
@@ -331,11 +480,11 @@ import { Trash2, Check } from 'lucide-react';
 
 export function TodoList() {
   const { todos, updateTodo, deleteTodo } = useTodoStore();
-  
+
   const toggleComplete = (id: number, completed: boolean) => {
     updateTodo(id, { completed: !completed });
   };
-  
+
   const getPriorityVariant = (priority: string) => {
     switch (priority) {
       case 'High': return 'destructive';
@@ -344,7 +493,7 @@ export function TodoList() {
       default: return 'default';
     }
   };
-  
+
   return (
     <div className="space-y-2">
       {todos.map(todo => (
@@ -371,7 +520,7 @@ export function TodoList() {
           </div>
         </div>
       ))}
-      
+
       {todos.length === 0 && (
         <div className="text-center py-8 text-gray-500">
           No todos yet. Add your first task above!
@@ -395,11 +544,11 @@ export function HomePage() {
   const [newTodoTitle, setNewTodoTitle] = useState('');
   const [newTodoPriority, setNewTodoPriority] = useState('Medium');
   const { fetchTodos, addTodo, setPriorityFilter, priorityFilter } = useTodoStore();
-  
+
   useEffect(() => {
     fetchTodos();
   }, [fetchTodos]);
-  
+
   const handleAddTodo = () => {
     if (newTodoTitle.trim()) {
       addTodo({
@@ -411,14 +560,14 @@ export function HomePage() {
       setNewTodoPriority('Medium');
     }
   };
-  
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl">
       <div className="mb-8">
         <h1 className="text-4xl font-bold mb-2">TaskMaster</h1>
         <p className="text-gray-600">Organize your tasks with priority-based productivity</p>
       </div>
-      
+
       {/* Add Todo Form */}
       <div className="bg-white rounded-lg border p-6 mb-6">
         <h2 className="text-xl font-semibold mb-4">Add New Task</h2>
@@ -445,7 +594,7 @@ export function HomePage() {
           </Button>
         </div>
       </div>
-      
+
       {/* Priority Filter */}
       <div className="mb-6">
         <Select value={priorityFilter || 'all'} onValueChange={(value) => setPriorityFilter(value === 'all' ? null : value)}>
@@ -460,7 +609,7 @@ export function HomePage() {
           </SelectContent>
         </Select>
       </div>
-      
+
       {/* Todo List */}
       <TodoList />
     </div>
@@ -484,12 +633,12 @@ async def get_analytics_overview(current_user: User = Depends(get_current_user))
         db = JsonDB()
         contacts = db.find_all("contacts", {"user_id": current_user.id})
         deals = db.find_all("deals", {"user_id": current_user.id})
-        
+
         # Calculate metrics from existing data
         total_contacts = len(contacts)
         total_deals = len(deals)
         conversion_rate = (total_deals / total_contacts * 100) if total_contacts > 0 else 0
-        
+
         return {
             "total_contacts": total_contacts,
             "total_deals": total_deals,
@@ -546,7 +695,7 @@ export const AnalyticsPage: React.FC = () => {
   return (
     <div className="p-6 space-y-6">
       <h1 className="text-2xl font-bold">Analytics Dashboard</h1>
-      
+
       {analytics && (
         <>
           {/* Key Metrics Cards */}
@@ -564,18 +713,18 @@ export const AnalyticsPage: React.FC = () => {
               <p className="text-2xl font-bold">{analytics.conversion_rate}%</p>
             </Card>
           </div>
-          
+
           {/* Charts */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <AnalyticsChart 
-              data={analytics.monthly_trends} 
-              title="Sales Trends" 
-              type="line" 
+            <AnalyticsChart
+              data={analytics.monthly_trends}
+              title="Sales Trends"
+              type="line"
             />
-            <AnalyticsChart 
-              data={[]} 
-              title="Conversion Funnel" 
-              type="bar" 
+            <AnalyticsChart
+              data={[]}
+              title="Conversion Funnel"
+              type="bar"
             />
           </div>
         </>
@@ -584,4 +733,3 @@ export const AnalyticsPage: React.FC = () => {
   );
 };
 """
-

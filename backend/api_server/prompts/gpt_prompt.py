@@ -263,25 +263,26 @@ def delete_user(user_id: int):
     return db.delete_one('users', id=user_id)
 
 # FastAPI route example using JsonDB with dependency injection:
-@router.post("/users", response_model=UserResponse)
-def create_user_endpoint(user_data: UserCreate, db_session: JsonDBSession = Depends(get_db)):
-    \"\"\"Create user endpoint using JsonDB dependency\"\"\"
+@router.post("/users")
+async def create_user_endpoint(request: Request):
+    \"\"\"Create user endpoint using SAFE CODE pattern\"\"\"
+    
+    user_data = await request.json()
 
     # Check if email exists
-    if db_session.db.exists("users", email=user_data.email):
+    if db.exists("users", email=user_data.get("email")):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # Create user with automatic ID and timestamp
-    user_dict = user_data.dict()
-    user_dict["hashed_password"] = hash_password(user_data.password)
+    user_data["hashed_password"] = hash_password(user_data["password"])
 
-    created_user = db_session.db.insert("users", user_dict)
+    created_user = db.insert("users", user_data)
     return created_user
 
-@router.get("/users/{user_id}", response_model=UserResponse)
-def get_user_endpoint(user_id: int, db_session: JsonDBSession = Depends(get_db)):
-    \"\"\"Get user endpoint using JsonDB dependency\"\"\"
-    user = db_session.db.find_one("users", id=user_id)
+@router.get("/users/{user_id}")
+def get_user_endpoint(user_id: int):
+    \"\"\"Get user endpoint using SAFE CODE pattern\"\"\"
+    user = db.find_one("users", id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user

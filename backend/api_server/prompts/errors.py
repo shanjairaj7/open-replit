@@ -15,7 +15,7 @@ common_errors = [
     "Implement proper unique ID management with get_next_id() function for each entity to prevent duplicate records",
     "Read entire file, modify in memory, write back atomically to prevent concurrent access issues and data corruption",
 
-    # Modal.com Deployment - MOST COMMON DEPLOYMENT FAILURES  
+    # Modal.com Deployment - MOST COMMON DEPLOYMENT FAILURES
     "Create the initialize_json_databases() function yourself - it does NOT exist in json_db.py, you must define it in app.py",
     "Call initialize_json_databases() INSIDE @modal.asgi_app() function only, NEVER at module level - module-level code runs during build but /root/json_data volume only exists after Modal container starts",
     "Use create_tables(table_names) from json_db.py with a list of your app's table names like ['users', 'todos', 'projects'] to initialize empty JSON files",
@@ -53,5 +53,13 @@ common_errors = [
     "Make the entire user experience coherent for the specific app type being built",
 
     # V4A Diff Format
-    "Always wrap all V4A diffs in action tags to prevent the V4A patch bug where raw patch content gets written to files as literal text instead of being applied as code changes"
+    "Always wrap all V4A diffs in action tags to prevent the V4A patch bug where raw patch content gets written to files as literal text instead of being applied as code changes",
+
+    # Tailwind v4 Migration - Common Mistakes
+    "Tailwind v4 uses CSS-first configuration - NEVER modify tailwind.config.ts or create tailwind.config.js files",
+    "In Tailwind v4, semantic color utilities like 'bg-background', 'border-border', 'text-foreground' DON'T exist - use actual colors like 'bg-white', 'border-gray-200', 'text-gray-900'",
+    "index.css should only contain @import, @theme, and custom utilities - NEVER add Tailwind utility classes like 'bg-blue-500' or 'p-4'",
+    "Define all colors as HSL values in @theme directive, not as arbitrary values or in separate files",
+    "Use @import 'tailwindcss' instead of @tailwind directives in v4",
+    "Custom utilities in index.css should use CSS variables defined in @theme, not duplicate Tailwind functionality"
 ]
