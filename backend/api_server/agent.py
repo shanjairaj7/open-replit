@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime
 import re
+from utils.token_tracking import OpenRouterTokenTracker, create_token_tracker
 
 class StreamingXMLFilter:
     """Smart filter to exclude XML action tags from streaming content"""
@@ -355,6 +356,22 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             except Exception as e:
                 print(f"⚠️ CODER: Streaming callback error: {e}")
 
+    def _timing_checkpoint(checkpoint_name: str, start_time: float, last_checkpoint_time: float = None):
+        """Create a timing checkpoint and return current time"""
+        import time
+        current_time = time.time()
+        
+        # Time since iteration start
+        total_elapsed = current_time - start_time
+        
+        # Time since last checkpoint
+        if last_checkpoint_time is not None:
+            checkpoint_elapsed = current_time - last_checkpoint_time
+            print(f"⏱️ CHECKPOINT: {checkpoint_name} | +{checkpoint_elapsed:.3f}s | Total: {total_elapsed:.3f}s")
+        else:
+            print(f"⏱️ CHECKPOINT: {checkpoint_name} | Total: {total_elapsed:.3f}s")
+        
+        return current_time
 
     max_iterations = 200  # Prevent infinite loops
     iteration = 0
@@ -367,6 +384,12 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
 
     while iteration < max_iterations:
         iteration += 1
+        
+        # Checkpoint: Iteration start
+        import time
+        iteration_start_time = time.time()
+        last_checkpoint = _timing_checkpoint("ITERATION_START", iteration_start_time)
+        
         print(f"\n{'='*60}")
         print(f"📝 CODER: Generation iteration {iteration}/{max_iterations}")
         print(f"📊 CODER: Current full_response length: {len(full_response)} chars")
@@ -377,15 +400,20 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             print(f"📤 CODER: Adding accumulated context from previous iteration ({len(full_user_msg)} chars)")
             messages.append({"role": "user", "content": full_user_msg})
             self.conversation_history.append({"role": "user", "content": full_user_msg})
-            self._save_conversation_history()  # Save after each iteration
+            self._save_conversation_background()  # Save after each iteration (async)
             full_user_msg = ""  # Reset for this iteration
-
-
+            
+        # Checkpoint: Message accumulation complete
+        last_checkpoint = _timing_checkpoint("MESSAGE_ACCUMULATION", iteration_start_time, last_checkpoint)
 
         print(f"📤 CODER: Sending {len(messages)} messages to API")
 
         try:
             print("🔌 CODER: Creating streaming completion...")
+            
+            # Checkpoint: Start API setup
+            last_checkpoint = _timing_checkpoint("API_SETUP_START", iteration_start_time, last_checkpoint)
+            
             # Create streaming response
             # Azure-compatible completion creation
             # GPT-5 only supports temperature=1, other models can use 0.1
@@ -405,11 +433,21 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             else:
                 completion_params["max_tokens"] = 16000
 
+            # Checkpoint: Parameters ready, making API call
+            last_checkpoint = _timing_checkpoint("API_CALL_START", iteration_start_time, last_checkpoint)
+            
             completion = self.client.chat.completions.create(**completion_params)
+            
+            # Checkpoint: API call completed
+            last_checkpoint = _timing_checkpoint("API_CALL_COMPLETE", iteration_start_time, last_checkpoint)
             print("✅ CODER: Streaming completion created successfully")
 
             # Process stream with interrupt detection
             print("🔍 CODER: Initializing streaming parser and state variables")
+            
+            # Checkpoint: Starting streaming setup
+            last_checkpoint = _timing_checkpoint("STREAMING_SETUP_START", iteration_start_time, last_checkpoint)
+            
             parser = StreamingXMLParser()
             accumulated_content = ""
             should_interrupt = False
@@ -435,6 +473,9 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             final_chunk = None
             generation_id = None  # Track generation ID for usage query
 
+            # Checkpoint: Streaming setup complete, starting chunk processing
+            last_checkpoint = _timing_checkpoint("CHUNK_PROCESSING_START", iteration_start_time, last_checkpoint)
+            
             print("🌊 CODER: Starting to process streaming chunks...")
             chunk_count = 0
 
@@ -443,9 +484,13 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
                 final_chunk = chunk  # Keep track of last chunk for token usage
 
                 # Capture generation ID from first chunk for separate usage query
-                if generation_id is None and hasattr(chunk, 'id') and chunk.id:
-                    generation_id = chunk.id
-                    print(f"🆔 CODER: Captured generation ID: {generation_id}")
+                if generation_id is None:
+                    # Use token tracker to extract generation ID
+                    if hasattr(self, '_token_tracker'):
+                        generation_id = self._token_tracker.extract_generation_id(chunk)
+                    elif hasattr(chunk, 'id') and chunk.id:
+                        generation_id = chunk.id
+                        print(f"🆔 CODER: Captured generation ID: {generation_id}")
 
                 # if chunk_count % 10 == 0:  # Every 10th chunk
                 #     # print(f"📊 CODER: Processed {chunk_count} chunks, accumulated: {len(accumulated_content)} chars")
@@ -465,14 +510,22 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
                         if hasattr(usage, 'cost'):
                             print(f"Cost: {usage.cost} credits")
 
-                        # Update internal tracking
-                        print("💾 CODER: Updating internal token tracking...")
-                        old_total = self.token_usage.get('total_tokens', 0)
-                        self.token_usage['prompt_tokens'] += usage.prompt_tokens
-                        self.token_usage['completion_tokens'] += usage.completion_tokens
-                        self.token_usage['total_tokens'] += usage.total_tokens
-
-                        print(f"💰 Running Total: {old_total:,} → {self.token_usage['total_tokens']:,} tokens")
+                        # Update internal tracking using token tracker
+                        if hasattr(self, '_token_tracker'):
+                            self._token_tracker.update_token_usage(
+                                usage.prompt_tokens, 
+                                usage.completion_tokens, 
+                                usage.total_tokens
+                            )
+                            # Sync token_usage for backward compatibility
+                            self.token_usage = self._token_tracker.get_token_usage()
+                        else:
+                            print("💾 CODER: Updating internal token tracking...")
+                            old_total = self.token_usage.get('total_tokens', 0)
+                            self.token_usage['prompt_tokens'] += usage.prompt_tokens
+                            self.token_usage['completion_tokens'] += usage.completion_tokens
+                            self.token_usage['total_tokens'] += usage.total_tokens
+                            print(f"💰 Running Total: {old_total:,} → {self.token_usage['total_tokens']:,} tokens")
 
 
                 if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
@@ -902,6 +955,9 @@ Please use the correct action tags to perform actions based on your plan and the
                         print("🛑 CODER: Interrupt flag set, breaking from chunk processing loop")
                         break
 
+            # Checkpoint: Chunk processing complete
+            last_checkpoint = _timing_checkpoint("CHUNK_PROCESSING_COMPLETE", iteration_start_time, last_checkpoint)
+            
             print(f"\n🏁 CODER: Finished processing chunks. Total chunks: {chunk_count}")
             print(f"📊 CODER: Accumulated content length: {len(accumulated_content)} chars")
 
@@ -969,13 +1025,59 @@ Please use the correct action tags to perform actions based on your plan and the
                             completion_message = '\n'.join(captured_lines)
                             print(f"📝 CODER: Pattern 4 - Extracted from line-by-line parsing ({len(completion_message)} chars)")
 
-                    # Clean up the message
+                    # Parse suggest_next_tasks if present and clean up the message
                     if completion_message:
+                        # Check for suggest_next_tasks before cleaning XML tags
+                        suggest_next_tasks = None
+                        if '<suggest_next_tasks>' in completion_message:
+                            print(f"🎯 CODER: Found suggest_next_tasks in completion message - parsing")
+                            
+                            # Extract suggest_next_tasks content
+                            suggest_match = re.search(r'<suggest_next_tasks>(.*?)</suggest_next_tasks>', completion_message, re.DOTALL)
+                            if suggest_match:
+                                suggest_content = suggest_match.group(1)
+                                print(f"📋 CODER: Extracted suggest_next_tasks content ({len(suggest_content)} chars)")
+                                
+                                # Parse individual suggestions
+                                suggestions = []
+                                suggestion_matches = re.findall(r'<suggestion\s+for="([^"]*)"(?:\s+goto="([^"]*)")?[^>]*>(.*?)</suggestion>', suggest_content, re.DOTALL)
+                                
+                                for match in suggestion_matches:
+                                    for_attr, goto_attr, content = match
+                                    suggestion = {
+                                        "for": for_attr.strip(),
+                                        "content": content.strip()
+                                    }
+                                    if goto_attr:
+                                        suggestion["goto"] = goto_attr.strip()
+                                    
+                                    suggestions.append(suggestion)
+                                    print(f"📌 CODER: Parsed suggestion - for: {for_attr}, goto: {goto_attr or 'none'}, content: {content.strip()[:50]}...")
+                                
+                                if suggestions:
+                                    suggest_next_tasks = suggestions
+                                    print(f"✅ CODER: Successfully parsed {len(suggestions)} suggestions")
+                            
+                            # Remove suggest_next_tasks from completion message
+                            completion_message = re.sub(r'<suggest_next_tasks>.*?</suggest_next_tasks>', '', completion_message, flags=re.DOTALL)
+                        
                         # Remove any remaining XML tags
                         completion_message = re.sub(r'<[^>]*>', '', completion_message)
 
                         print(f"📝 CODER: Final cleaned completion message ({len(completion_message)} chars): {completion_message[:100]}...")
-                        _emit_stream("assistant_message", completion_message)
+                        
+                        # Structure the attempt_completion data
+                        completion_data = {
+                            "message": completion_message
+                        }
+                        
+                        # Add suggest_next_tasks if parsed
+                        if suggest_next_tasks:
+                            completion_data["suggest_next_tasks"] = suggest_next_tasks
+                            print(f"📤 CODER: Including suggest_next_tasks with {len(suggest_next_tasks)} suggestions in attempt_completion")
+                        
+                        # Emit structured attempt_completion
+                        _emit_stream("attempt_completion", completion_data)
                     else:
                         print(f"⚠️ CODER: Could not extract completion message from attempt_completion action")
                         print(f"🐛 DEBUG: assistant_buffer preview: {assistant_buffer[:500]}...")
@@ -988,9 +1090,57 @@ Please use the correct action tags to perform actions based on your plan and the
             full_response += accumulated_content
             print(f"📈 CODER: New full_response length: {len(full_response)} chars")
 
-            # Query usage statistics using generation ID (OpenRouter only)
+            # Query usage statistics using generation ID (OpenRouter only) - async background with state update
             if generation_id and not (hasattr(self, 'is_azure_mode') and self.is_azure_mode):
-                query_generation_usage(self, generation_id)
+                # Use centralized token tracker for usage queries
+                if hasattr(self, '_token_tracker'):
+                    # Run token usage query in background thread but ensure state gets updated
+                    import threading
+                    
+                    def _query_and_update_usage_existing():
+                        try:
+                            print("🌥️ Background: Starting token usage query (existing tracker)...")
+                            result = self._token_tracker.query_generation_usage(generation_id)
+                            if result:
+                                # Update self.token_usage with tracker's current state (critical for state sync)
+                                self.token_usage = self._token_tracker.get_token_usage()
+                                print("✅ Background: Token usage state updated successfully (existing tracker)")
+                            else:
+                                print("⚠️ Background: Token usage query returned no result (existing tracker)")
+                        except Exception as e:
+                            print(f"❌ Background: Token usage query failed (existing tracker): {e}")
+                    
+                    # Start background thread for token usage query
+                    usage_thread = threading.Thread(target=_query_and_update_usage_existing, daemon=True)
+                    usage_thread.start()
+                    print("🚀 Background token usage query initiated (existing tracker) - state will be updated when complete")
+                else:
+                    # Create token tracker if it doesn't exist
+                    api_key = getattr(self.client, 'api_key', None)
+                    if api_key:
+                        self._token_tracker = OpenRouterTokenTracker(api_key)
+                        self._token_tracker.load_token_usage(self.token_usage)
+                        
+                        # Run token usage query in background thread but ensure state gets updated
+                        import threading
+                        
+                        def _query_and_update_usage_new():
+                            try:
+                                print("🌥️ Background: Starting token usage query (new tracker)...")
+                                result = self._token_tracker.query_generation_usage(generation_id)
+                                if result:
+                                    # Update self.token_usage with tracker's current state (critical for state sync)
+                                    self.token_usage = self._token_tracker.get_token_usage()
+                                    print("✅ Background: Token usage state updated successfully (new tracker)")
+                                else:
+                                    print("⚠️ Background: Token usage query returned no result (new tracker)")
+                            except Exception as e:
+                                print(f"❌ Background: Token usage query failed (new tracker): {e}")
+                        
+                        # Start background thread for token usage query
+                        usage_thread = threading.Thread(target=_query_and_update_usage_new, daemon=True)
+                        usage_thread.start()
+                        print("🚀 Background token usage query initiated (new tracker) - state will be updated when complete")
             elif hasattr(self, 'is_azure_mode') and self.is_azure_mode:
                 print("✅ CODER: Azure mode - usage already captured from streaming response")
             else:
@@ -1003,6 +1153,9 @@ Please use the correct action tags to perform actions based on your plan and the
 
             # If we detected a read_file or run_command action, process it and continue
             if should_interrupt and interrupt_action:
+                # Checkpoint: Start interrupt handling
+                last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_START", iteration_start_time, last_checkpoint)
+                
                 action_type = interrupt_action.get('type')
                 print(f"\n🚨 CODER: PROCESSING INTERRUPT - Action type: {action_type}")
                 if interrupt_action.get('type') == 'read_file':
@@ -1053,7 +1206,7 @@ These components are already installed and ready to use:
                         # Also add to conversation history for persistence
                         print("💾 CODER: Adding messages to conversation history")
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         full_user_msg = _add_context_to_message(self, full_user_msg)
 
@@ -1084,7 +1237,7 @@ These components are already installed and ready to use:
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
                         self.conversation_history.append(error_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1118,7 +1271,7 @@ These components are already installed and ready to use:
 """
                             messages.append(assistant_msg)
                             self.conversation_history.append(assistant_msg)
-                            self._save_conversation_history()  # Save after each iteration
+                            self._save_conversation_background()  # Save after each iteration (async)
 
                             # Add todo and service context before continuing
                             full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1254,13 +1407,16 @@ Use `<action type="restart_backend"/>` for changes to reflect."""
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
 
                         # Accumulated messages will be added at the start of next iteration
                         print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+
+                        # Checkpoint: End interrupt handling  
+                        last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_COMPLETE", iteration_start_time, last_checkpoint)
 
                         continue
                 elif interrupt_action.get('type') == 'run_command':
@@ -1293,7 +1449,7 @@ Please continue with your next steps..
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1301,9 +1457,16 @@ Please continue with your next steps..
                         # Accumulated messages will be added at the start of next iteration
                         print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
 
+                        # Checkpoint: End interrupt handling
+                        last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_COMPLETE", iteration_start_time, last_checkpoint)
+
                         continue
                     else:
                         print(f"❌ Failed to run command {interrupt_action.get('command')}, stopping generation")
+                        
+                        # Checkpoint: End interrupt handling (failed case)
+                        last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_FAILED", iteration_start_time, last_checkpoint)
+                        
                         break
                 elif interrupt_action.get('type') == 'update_file':
                     update_result = self._handle_update_file_interrupt(interrupt_action)
@@ -1353,7 +1516,7 @@ Please continue with your next steps..
 """
                             messages.append(assistant_msg)
                             self.conversation_history.append(assistant_msg)
-                            self._save_conversation_history()  # Save after each iteration
+                            self._save_conversation_background()  # Save after each iteration (async)
 
                             # Add todo and service context before continuing
                             full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1374,7 +1537,7 @@ File '{interrupt_action.get('path')}' has been updated successfully.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1403,7 +1566,7 @@ File '{old_path}' has been renamed to '{new_name}' successfully.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1431,7 +1594,7 @@ File '{file_path}' has been deleted successfully.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1458,7 +1621,7 @@ Backend service started successfully on port {backend_result.get('backend_port')
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1487,7 +1650,7 @@ Please fix the issues and try starting the backend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1512,7 +1675,7 @@ Frontend service started successfully on port {frontend_result.get('frontend_por
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1542,7 +1705,7 @@ Please fix the issues and try starting the frontend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1567,7 +1730,7 @@ Backend service restarted successfully on port {backend_result.get('backend_port
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1596,7 +1759,7 @@ Please fix the issues and try restarting the backend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1621,7 +1784,7 @@ Frontend service restarted successfully on port {frontend_result.get('frontend_p
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1650,7 +1813,7 @@ Please fix the issues and try restarting the frontend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1696,7 +1859,7 @@ Please fix the issues and try restarting the frontend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1729,7 +1892,7 @@ Please fix the issues and try restarting the frontend again.
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1755,7 +1918,7 @@ No todos have been created yet. Use the following actions to manage todos:
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1783,7 +1946,7 @@ Great! You've completed a todo. Please continue with the next highest priority t
 
                     # Also add to conversation history for persistence
                     self.conversation_history.append(assistant_msg)
-                    self._save_conversation_history()  # Save after each iteration
+                    self._save_conversation_background()  # Save after each iteration (async)
 
                     # Add todo and service context before continuing
                     full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1850,7 +2013,7 @@ Great! You've completed a todo. Please continue with the next highest priority t
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -1991,7 +2154,7 @@ Great! You've completed a todo. Please continue with the next highest priority t
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -2072,7 +2235,7 @@ Great! You've completed a todo. Please continue with the next highest priority t
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -2166,7 +2329,7 @@ Error with docs operation: {error_msg}
                         # Add the incomplete todos warning to conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()
+                        self._save_conversation_background()  # Save async
 
                         # Continue the conversation instead of ending
                         full_user_msg += f"""
@@ -2190,7 +2353,7 @@ Error with docs operation: {error_msg}
                         # Add the completion message to conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()
+                        self._save_conversation_background()  # Save async
 
                         # Session will end after this return - completion message already handled in streaming buffer
 
@@ -2259,7 +2422,7 @@ Error with docs operation: {error_msg}
                         # Add the incomplete todos warning to conversation history
                         assistant_msg = {"role": "assistant", "content": accumulated_content}
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()
+                        self._save_conversation_background()  # Save async
 
                         # Continue the conversation instead of ending
                         full_user_msg += f"""
@@ -2358,7 +2521,7 @@ The previous response was cut off. Please continue from where you left off to co
 
                     # Also add to conversation history for persistence
                     self.conversation_history.append(assistant_msg)
-                    self._save_conversation_history()  # Save after each iteration
+                    self._save_conversation_background()  # Save after each iteration (async)
 
                     # Store accumulated messages for next iteration
                     unified_user_message = full_user_msg
@@ -2384,7 +2547,7 @@ Good! You've created the todos. Here's the current status:\n\n{todo_status}\n\nN
 
                     # Also add to conversation history for persistence
                     self.conversation_history.append(assistant_msg)
-                    self._save_conversation_history()  # Save after each iteration
+                    self._save_conversation_background()  # Save after each iteration (async)
 
                     # Store accumulated messages for next iteration
                     unified_user_message = full_user_msg
@@ -2407,7 +2570,7 @@ Good planning! Now please proceed with the actual implementation. Start creating
 
                     # Also add to conversation history for persistence
                     self.conversation_history.append(assistant_msg)
-                    self._save_conversation_history()  # Save after each iteration
+                    self._save_conversation_background()  # Save after each iteration (async)
 
                     # Store accumulated messages for next iteration
                     unified_user_message = full_user_msg
@@ -2450,7 +2613,7 @@ Please continue working on the next highest priority todo. Remember to:
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -2476,7 +2639,7 @@ If there's more work to be done, please continue with additional implementation 
 
                         # Also add to conversation history for persistence
                         self.conversation_history.append(assistant_msg)
-                        self._save_conversation_history()  # Save after each iteration
+                        self._save_conversation_background()  # Save after each iteration (async)
 
                         # Add todo and service context before continuing
                         full_user_msg = _add_context_to_message(self, full_user_msg)
@@ -2490,8 +2653,14 @@ If there's more work to be done, please continue with additional implementation 
 
             # Accumulated messages (action results + todo status + service status) will be added at start of next iteration
             print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of full context for next iteration")
+            
+            # Checkpoint: End of iteration (normal completion)
+            last_checkpoint = _timing_checkpoint("ITERATION_COMPLETE_NORMAL", iteration_start_time, last_checkpoint)
 
         except Exception as e:
+            # Checkpoint: End of iteration (exception case)
+            last_checkpoint = _timing_checkpoint("ITERATION_COMPLETE_EXCEPTION", iteration_start_time, last_checkpoint)
+            
             print(f"❌ CODER: Exception during generation in iteration {iteration}: {e}")
             print(f"🔍 CODER: Exception type: {type(e).__name__}")
 
@@ -2516,7 +2685,7 @@ If there's more work to be done, please continue with additional implementation 
         print(f"📊 CODER: Final message with context: {len(full_user_msg)} chars")
         messages.append({"role": "user", "content": full_user_msg})
         self.conversation_history.append({"role": "user", "content": full_user_msg})
-        self._save_conversation_history()  # Save after each iteration
+        self._save_conversation_background()  # Save async  # Save after each iteration
 
     print(f"🎉 CODER: Returning full_response with {len(full_response)} chars")
     return full_response
@@ -2807,169 +2976,6 @@ Frontend: {frontend_running} ・ {frontend_status}{frontend_error_indicator}
     return full_user_msg
 
 
-def query_generation_usage(self, generation_id):
-    """
-    Query usage statistics for a generation using OpenRouter API.
-    Implements retry logic with exponential backoff since OpenRouter has a delay
-    before generations are recorded in their system.
-    """
-    if not generation_id:
-        print(f"⚠️ CODER: No generation ID provided for usage query")
-        return None
-
-    # Configurable pricing (can be updated based on actual OpenRouter rates)
-    INPUT_PRICE_PER_MILLION = 0.20   # $0.20 per 1M input tokens
-    OUTPUT_PRICE_PER_MILLION = 0.80  # $0.80 per 1M output tokens
-
-    try:
-        import requests
-        import time
-
-        print(f"💰 CODER: Querying usage for generation ID: {generation_id}")
-        print(f"📊 CODER: Using pricing - Input: ${INPUT_PRICE_PER_MILLION}/M, Output: ${OUTPUT_PRICE_PER_MILLION}/M")
-
-        # Retry logic with exponential backoff
-        max_retries = 1
-        base_delay = 2  # Start with 2 seconds
-        max_delay = 5  # Cap at 60 seconds
-
-        for attempt in range(max_retries):
-            if attempt > 0:
-                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-                print(f"🔄 CODER: Retry attempt {attempt + 1}/{max_retries}, waiting {delay}s...")
-                time.sleep(delay)
-
-            headers = {
-                "Authorization": f"Bearer {self.client.api_key}"
-            }
-
-            try:
-                response = requests.get(
-                    f"https://openrouter.ai/api/v1/generation?id={generation_id}",
-                    headers=headers,
-                    timeout=15  # Increased timeout for retries
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'data' in data:
-                        gen_data = data['data']
-                        prompt_tokens = gen_data.get('tokens_prompt', 0) or 0
-                        completion_tokens = gen_data.get('tokens_completion', 0) or 0
-                        total_tokens = prompt_tokens + completion_tokens
-
-                        # Calculate cost estimates using configurable pricing
-                        input_cost = (prompt_tokens / 1_000_000) * INPUT_PRICE_PER_MILLION
-                        output_cost = (completion_tokens / 1_000_000) * OUTPUT_PRICE_PER_MILLION
-                        iteration_cost = input_cost + output_cost
-
-                        print(f"\n📈 Usage Statistics (Generation {generation_id}):")
-                        print(f"Total Tokens: {total_tokens}")
-                        print(f"Prompt Tokens: {prompt_tokens}")
-                        print(f"Completion Tokens: {completion_tokens}")
-                        print(f"💰 This Iteration Cost (Our Estimate): ${iteration_cost:.6f}")
-                        print(f"   - Input cost: ${input_cost:.6f} ({prompt_tokens:,} × ${INPUT_PRICE_PER_MILLION}/M)")
-                        print(f"   - Output cost: ${output_cost:.6f} ({completion_tokens:,} × ${OUTPUT_PRICE_PER_MILLION}/M)")
-                        if gen_data.get('total_cost'):
-                            print(f"💳 OpenRouter Actual Cost: ${gen_data.get('total_cost'):.6f}")
-                            print(f"📊 Cost Comparison: Our ${iteration_cost:.6f} vs OpenRouter ${gen_data.get('total_cost'):.6f}")
-
-                        # Update internal tracking
-                        print("💾 CODER: Updating internal token tracking...")
-                        old_total = self.token_usage.get('total_tokens', 0)
-                        old_prompt = self.token_usage.get('prompt_tokens', 0)
-                        old_completion = self.token_usage.get('completion_tokens', 0)
-
-                        self.token_usage['prompt_tokens'] += prompt_tokens
-                        self.token_usage['completion_tokens'] += completion_tokens
-                        self.token_usage['total_tokens'] += total_tokens
-
-                        # Calculate running cost totals using configurable pricing
-                        total_input_cost = (self.token_usage['prompt_tokens'] / 1_000_000) * INPUT_PRICE_PER_MILLION
-                        total_output_cost = (self.token_usage['completion_tokens'] / 1_000_000) * OUTPUT_PRICE_PER_MILLION
-                        total_cost = total_input_cost + total_output_cost
-
-                        print(f"💰 Running Totals:")
-                        print(f"   Tokens: {old_total:,} → {self.token_usage['total_tokens']:,}")
-                        print(f"   Input: {old_prompt:,} → {self.token_usage['prompt_tokens']:,}")
-                        print(f"   Output: {old_completion:,} → {self.token_usage['completion_tokens']:,}")
-                        print(f"   💲 Total Cost: ${total_cost:.6f}")
-                        print(f"      - Input: ${total_input_cost:.6f}")
-                        print(f"      - Output: ${total_output_cost:.6f}")
-
-                        return {
-                            'prompt_tokens': prompt_tokens,
-                            'completion_tokens': completion_tokens,
-                            'total_tokens': total_tokens,
-                            'iteration_cost': iteration_cost,
-                            'total_cost_estimate': total_cost,
-                            'openrouter_cost': gen_data.get('total_cost')
-                        }
-                    else:
-                        print(f"⚠️ CODER: Unexpected response format: {data}")
-                        if attempt == max_retries - 1:
-                            break
-                        continue
-
-                elif response.status_code == 404:
-                    if attempt == max_retries - 1:
-                        print(f"❌ CODER: Generation not found after {max_retries} attempts")
-                        print(f"💡 This usually means the generation ID is invalid or expired")
-                        print(f"🔍 Generation ID: {generation_id}")
-                        break
-                    else:
-                        print(f"⏳ CODER: Generation not found yet (attempt {attempt + 1}), will retry...")
-                        continue
-
-                else:
-                    print(f"⚠️ CODER: Usage query failed ({response.status_code}): {response.text[:200]}")
-                    if attempt == max_retries - 1:
-                        break
-                    continue
-
-            except requests.Timeout:
-                print(f"⏰ CODER: Request timed out (attempt {attempt + 1})")
-                if attempt == max_retries - 1:
-                    print(f"❌ CODER: All attempts timed out")
-                    break
-                continue
-
-            except requests.RequestException as e:
-                print(f"🌐 CODER: Request error (attempt {attempt + 1}): {e}")
-                if attempt == max_retries - 1:
-                    break
-                continue
-
-        # If we get here, all retries failed
-        print(f"❌ CODER: Failed to query usage after {max_retries} attempts")
-        print(f"💡 The generation may not be recorded yet, or there's an API issue")
-
-        # Fallback: try to estimate tokens from the response content
-        print(f"🔄 CODER: Attempting fallback token estimation...")
-        try:
-            # This is a rough estimate - 1 token ≈ 4 characters
-            estimated_tokens = len(self.last_response_content or "") // 4
-            if estimated_tokens > 0:
-                print(f"📊 CODER: Fallback estimate: ~{estimated_tokens} tokens")
-                # Don't update token tracking with estimates, just log it
-                return {
-                    'prompt_tokens': 0,
-                    'completion_tokens': estimated_tokens,
-                    'total_tokens': estimated_tokens,
-                    'iteration_cost': 0,
-                    'total_cost_estimate': 0,
-                    'openrouter_cost': None,
-                    'note': 'Fallback estimation used'
-                }
-        except Exception as e:
-            print(f"⚠️ CODER: Fallback estimation also failed: {e}")
-
-    except Exception as e:
-        print(f"❌ CODER: Unexpected error in usage query: {e}")
-        import traceback
-        traceback.print_exc()
-
-    return None
 
 
 def _detect_invalid_xml_tags(content):
@@ -3204,7 +3210,8 @@ def _check_and_summarize_conversation_method(self, is_mid_task=False):
         print(f"✅ Added detailed summary to conversation ({len(summary_content)} characters)")
 
         # Reset token counter to start fresh count from this point
-        self._reset_token_tracking_after_summary()
+        if hasattr(self, '_token_tracker'):
+            self._token_tracker.reset_token_tracking()
     else:
         print(f"❌ Failed to generate conversation summary")
 
@@ -3307,13 +3314,19 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # Track token usage for summary generation
         if hasattr(response, 'usage') and response.usage:
             usage = response.usage
-            if not hasattr(self, 'token_usage'):
-                self.token_usage = {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0}
-
-            self.token_usage['prompt_tokens'] += usage.prompt_tokens
-            self.token_usage['completion_tokens'] += usage.completion_tokens
-            self.token_usage['total_tokens'] += usage.total_tokens
-
+            if hasattr(self, '_token_tracker'):
+                self._token_tracker.update_token_usage(
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens
+                )
+            else:
+                if not hasattr(self, 'token_usage'):
+                    self.token_usage = {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0}
+                self.token_usage['prompt_tokens'] += usage.prompt_tokens
+                self.token_usage['completion_tokens'] += usage.completion_tokens
+                self.token_usage['total_tokens'] += usage.total_tokens
+            
             print(f"📊 Summary generation used: {usage.total_tokens} tokens")
 
         return summary_content
@@ -3329,17 +3342,6 @@ def _is_valid_summary_method(self, content: str) -> bool:
 
     return True
 
-def _reset_token_tracking_after_summary_method(self):
-    """Reset token tracking to start fresh count after summary"""
-    if not hasattr(self, 'token_usage'):
-        self.token_usage = {'total_tokens': 0, 'prompt_tokens': 0, 'completion_tokens': 0}
-
-    print(f"🔄 Resetting token count from {self.token_usage['total_tokens']:,} to 0")
-    self.token_usage = {
-        'total_tokens': 0,
-        'prompt_tokens': 0,
-        'completion_tokens': 0
-    }
 
 # Local storage removed - using cloud storage only
 

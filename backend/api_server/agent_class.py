@@ -24,9 +24,11 @@ from queue import Queue
 from datetime import datetime
 from pathlib import Path
 from cloud_storage import AzureBlobStorage
+from vm_api import vm_api
 import sys
 
-from utils import generate_user_message_plan
+# Removed enhance_user_message import - using raw user messages now
+from utils.token_tracking import OpenRouterTokenTracker, create_token_tracker
 
 # Add the parent directory to sys.path to enable imports
 backend_dir = Path(__file__).parent.parent
@@ -39,8 +41,8 @@ from openai import OpenAI, AzureOpenAI
 
 # Azure OpenAI - GPT-4.1 deployment
 gpt_endpoint = "https://rajsu-m9qoo96e-eastus2.services.ai.azure.com"
-gpt_model_name = "gpt-5"
-gpt_deployment = "gpt-5"
+gpt_model_name = "gpt-4.1"
+gpt_deployment = "gpt-4.1-2"
 gpt_api_version = "2024-12-01-preview"
 
 # Azure OpenAI - DeepSeek R1 deployment
@@ -74,7 +76,7 @@ azure_client = AzureOpenAI(
 openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.environ.get('OPENAI_KEY', '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'), default_headers={"x-include-usage": 'true'})
 
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
-USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "false").lower() == "true"
+USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"
 
 from prompts import gemini_prompt, gpt_prompt, fundamental_prompt, simpler_prompt, gpt5_prompt
 
@@ -126,7 +128,7 @@ def generate_project_name(user_request: str) -> str:
 
 
 # Import shared utility function
-from utils import generate_short_app_name
+from utils.basic import generate_short_app_name
 
 
 
@@ -153,7 +155,7 @@ class BoilerplatePersistentGroq:
             print(f"🔵 DEBUG: Azure OpenAI client created with model: {self.model}")
         else:
             self.client = openai_client
-            self.model = 'qwen/qwen3-coder:free'  # Use model path for OpenRouter
+            self.model = 'qwen/qwen3-coder'  # Use model path for OpenRouter
             self.is_azure_mode = False
             print(f"🟢 DEBUG: OpenRouter client created with model: {self.model}")
         self.conversation_history = []  # Store conversation messages
@@ -182,12 +184,15 @@ class BoilerplatePersistentGroq:
         # Initialize persistent todo storage
         self._ensure_todos_loaded()
 
-        # Simplified token tracking - just 3 variables
-        self.token_usage = {
-            "total_tokens": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0
-        }
+        # Initialize token tracking using centralized module
+        api_key = None
+        if hasattr(self.client, 'api_key'):
+            api_key = self.client.api_key
+
+        self._token_tracker = create_token_tracker(api_key)
+
+        # Keep backward compatibility with existing token_usage references
+        self.token_usage = self._token_tracker.get_token_usage()
 
         # Paths (for local boilerplate reference)
         print("🐛 DEBUG: Setting up paths")
@@ -319,7 +324,9 @@ class BoilerplatePersistentGroq:
                     # Try to load token usage from cloud metadata
                     project_metadata = self.cloud_storage.load_project_metadata(self.project_id)
                     if project_metadata and 'token_usage' in project_metadata:
-                        self.token_usage = project_metadata['token_usage']
+                        self._token_tracker.load_token_usage(project_metadata['token_usage'])
+                        # Update backward compatibility reference
+                        self.token_usage = self._token_tracker.get_token_usage()
                         print(f"💰 Loaded token usage from cloud metadata: {self.token_usage['total_tokens']:,} total tokens")
 
                     # Load todos from cloud storage
@@ -347,19 +354,27 @@ class BoilerplatePersistentGroq:
         conversation_file = conversations_dir / f"{self.project_id}_messages.json"
 
         # Check if we need to summarize conversation
-        if self.token_usage['total_tokens'] >= 500000:
+        should_summarize_tokens = False
+        if hasattr(self, '_token_tracker'):
+            should_summarize_tokens = self._token_tracker.should_summarize()
+            # Sync token usage for accurate logging
+            self.token_usage = self._token_tracker.get_token_usage()
+        else:
+            should_summarize_tokens = self.token_usage['total_tokens'] >= 500000
+
+        if should_summarize_tokens:
             # Mid-task summarization (token limit reached)
             print(f"🔄 Triggering summarization: {self.token_usage['total_tokens']:,} total tokens")
             self._check_and_summarize_conversation(is_mid_task=True)
-        elif self.token_usage['total_tokens'] >= 500000 and len(self.conversation_history) > 50:
-            # Optional summarization for completed tasks (lower threshold)
-            print(f"🔄 Optional summarization for completed task: {self.token_usage['total_tokens']:,} total tokens")
-            self._check_and_summarize_conversation(is_mid_task=False)
         # if length of conversation is more than 60 messages from the point of last summary
         elif len(self._get_filtered_conversation_history()) > 120:
             # Check if conversation has grown large
             print(f"🔄 Conversation has grown large: More than 60 messages from latest summary")
             self._check_and_summarize_conversation(is_mid_task=True)
+
+        # Sync token usage from tracker for accurate saving
+        if hasattr(self, '_token_tracker'):
+            self.token_usage = self._token_tracker.get_token_usage()
 
         conversation_data = {
             "project_id": self.project_id,
@@ -573,9 +588,14 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             # Track token usage for summary generation
             if hasattr(response, 'usage') and response.usage:
                 usage = response.usage
-                self.token_usage['prompt_tokens'] = usage.prompt_tokens
-                self.token_usage['completion_tokens'] = usage.completion_tokens
-                self.token_usage['total_tokens'] = usage.total_tokens
+                if hasattr(self, '_token_tracker'):
+                    self._token_tracker.process_usage_from_response(response)
+                    # Update backward compatibility reference
+                    self.token_usage = self._token_tracker.get_token_usage()
+                else:
+                    self.token_usage['prompt_tokens'] = usage.prompt_tokens
+                    self.token_usage['completion_tokens'] = usage.completion_tokens
+                    self.token_usage['total_tokens'] = usage.total_tokens
 
                 print(f"📊 Summary generation used: {usage.total_tokens} tokens")
 
@@ -594,12 +614,17 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
 
     def _reset_token_tracking_after_summary(self):
         """Reset token tracking to start fresh count after summary"""
-        print(f"🔄 Resetting token count from {self.token_usage['total_tokens']:,} to 0")
-        self.token_usage = {
-            'total_tokens': 0,
-            'prompt_tokens': 0,
-            'completion_tokens': 0
-        }
+        if hasattr(self, '_token_tracker'):
+            self._token_tracker.reset_token_tracking()
+            # Update backward compatibility reference
+            self.token_usage = self._token_tracker.get_token_usage()
+        else:
+            print(f"🔄 Resetting token count from {self.token_usage['total_tokens']:,} to 0")
+            self.token_usage = {
+                'total_tokens': 0,
+                'prompt_tokens': 0,
+                'completion_tokens': 0
+            }
 
     def _get_filtered_conversation_history(self) -> list:
         """Get conversation history from latest summary point onwards for model context"""
@@ -946,17 +971,19 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                     "status": "initialized"
                 }
 
-                # Save project metadata
-                metadata_success = self.cloud_storage.save_project_metadata(project_id, metadata)
+                # Save project metadata (async background)
+                self._run_cloud_operation_background(
+                    "Save project metadata",
+                    self.cloud_storage.save_project_metadata,
+                    project_id,
+                    metadata.copy()  # Make a copy to avoid race conditions
+                )
 
-                if metadata_success:
-                    print(f"✅ Project created successfully in cloud storage")
-                    print(f"📁 Frontend: Cloned from {frontend_repo}")
-                    print(f"📁 Backend: Cloned from {backend_repo}")
-                    return project_id
-                else:
-                    print(f"⚠️ Project files created but metadata save failed")
-                    return project_id
+                print(f"✅ Project created successfully in cloud storage")
+                print(f"📁 Frontend: Cloned from {frontend_repo}")
+                print(f"📁 Backend: Cloned from {backend_repo}")
+                print(f"🌥️ Background save of project metadata initiated")
+                return project_id
             else:
                 print(f"❌ Failed to clone repositories, falling back to API method")
                 return self.create_project_via_api(project_name)
@@ -1105,7 +1132,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         try:
             # Use cloud storage if available, fallback to API
             if self.cloud_storage and self.project_id:
-                success = self.cloud_storage.upload_file(self.project_id, file_path, content)
+                # For write operations, treat as new file (will overwrite if exists)
+                success = self.cloud_storage.upload_file(self.project_id, file_path, content, is_new_file=True)
 
                 if success:
                     print(f"☁️ Successfully wrote to cloud storage: {file_path}")
@@ -1179,7 +1207,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         try:
             # Use cloud storage if available, fallback to API
             if self.cloud_storage and self.project_id:
-                success = self.cloud_storage.upload_file(self.project_id, file_path, content)
+                # This is an update operation, so is_new_file = False
+                success = self.cloud_storage.upload_file(self.project_id, file_path, content, is_new_file=False)
 
                 if success:
                     print(f"☁️ Successfully updated via cloud storage: {file_path}")
@@ -1575,9 +1604,14 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             # Track token usage for non-streaming call
             if hasattr(response, 'usage'):
                 usage = response.usage
-                self.token_usage['prompt_tokens'] = usage.prompt_tokens
-                self.token_usage['completion_tokens'] = usage.completion_tokens
-                self.token_usage['total_tokens'] = usage.total_tokens
+                if hasattr(self, '_token_tracker'):
+                    self._token_tracker.process_usage_from_response(response)
+                    # Update backward compatibility reference
+                    self.token_usage = self._token_tracker.get_token_usage()
+                else:
+                    self.token_usage['prompt_tokens'] = usage.prompt_tokens
+                    self.token_usage['completion_tokens'] = usage.completion_tokens
+                    self.token_usage['total_tokens'] = usage.total_tokens
 
                 print(f"📊 Token usage for summary: {usage.total_tokens} tokens")
 
@@ -1589,10 +1623,16 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return None
 
     def _query_generation_usage(self, generation_id):
-        """Query usage statistics for a generation using OpenRouter API - placeholder"""
-        print(f"💰 CODER: Would query generation ID: {generation_id} for usage stats")
-        # This is a placeholder - the real implementation is in index_fixed.py
-        return None
+        """Query usage statistics for a generation using OpenRouter API via token tracker"""
+        if hasattr(self, '_token_tracker') and hasattr(self._token_tracker, 'query_generation_usage'):
+            result = self._token_tracker.query_generation_usage(generation_id)
+            if result:
+                # Update backward compatibility reference
+                self.token_usage = self._token_tracker.get_token_usage()
+            return result
+        else:
+            print(f"💰 CODER: Would query generation ID: {generation_id} for usage stats")
+            return None
 
     async def _async_http_get(self, url, timeout=30):
         """Async HTTP GET request"""
@@ -1652,12 +1692,14 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         else:
             print(f"\n📝 UPDATE MODE: Processing modification request with read-before-write enforcement")
 
+        # Use raw user message directly without enhancement
         print('====')
-        print('Generating plan --->')
+        print('Using raw user message directly')
         print('====')
-        planned_user_message = generate_user_message_plan(user_message)
-        print(planned_user_message)
+        print(user_message)
         print('=========')
+
+        # user_message stays as original
 
         # Start with system prompt with runtime environment info
         system_prompt = self._load_system_prompt()
@@ -1708,10 +1750,63 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             enhanced_user_message = f"{user_message}\n\n{service_status}\n\n<project_files>\n{file_tree}\n</project_files>"
         else:
             enhanced_user_message = f"{user_message}\n\n<project_files>\n{file_tree}\n</project_files>"
-        messages.append({"role": "user", "content": enhanced_user_message})
+
+        # Parse images if present in message
+        image_data = None
+        if "[IMAGE_DATA]" in enhanced_user_message and "[/IMAGE_DATA]" in enhanced_user_message:
+            # Extract image data from message
+            start_marker = "[IMAGE_DATA]"
+            end_marker = "[/IMAGE_DATA]"
+            start_idx = enhanced_user_message.find(start_marker) + len(start_marker)
+            end_idx = enhanced_user_message.find(end_marker)
+
+            if start_idx < end_idx:
+                image_data_str = enhanced_user_message[start_idx:end_idx]
+                # Remove image data from text message
+                enhanced_user_message = enhanced_user_message.replace(f"{start_marker}{image_data_str}{end_marker}", "")
+
+                try:
+                    import json
+                    parsed_data = json.loads(image_data_str)
+                    # Handle nested format from streaming_api
+                    if "image_urls" in parsed_data:
+                        image_data = parsed_data["image_urls"]
+                    else:
+                        image_data = parsed_data  # Fallback for direct array
+                    print(f"📷 Parsed {len(image_data)} images for LLM")
+                except Exception as e:
+                    print(f"⚠️ Failed to parse image data: {e}")
+                    image_data = None
+
+        # Create message with images if present
+        if image_data and len(image_data) > 0:
+            # Create content array with text and images
+            content = [{"type": "text", "text": enhanced_user_message}]
+
+            # Add each image to content
+            for image_url in image_data:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_url}
+                })
+
+            messages.append({"role": "user", "content": content})
+            print(f"📷 Added message with {len(image_data)} images to LLM")
+        else:
+            messages.append({"role": "user", "content": enhanced_user_message})
 
         # Add current user message to conversation history and save in real-time
-        self.conversation_history.append({"role": "user", "content": enhanced_user_message})
+        if image_data and len(image_data) > 0:
+            # Store with images in conversation history
+            content = [{"type": "text", "text": enhanced_user_message}]
+            for image_url in image_data:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_url}
+                })
+            self.conversation_history.append({"role": "user", "content": content})
+        else:
+            self.conversation_history.append({"role": "user", "content": enhanced_user_message})
         self._save_conversation_history()  # Real-time save - triggers summarization if needed
 
         print(f"🔍 Sending {len(messages)} messages to model:")
@@ -2195,49 +2290,98 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             return None
 
     def _handle_run_command_interrupt(self, action: dict) -> str:
-        """Handle run_command action with cloud storage integration and frontend interrupt flow"""
+        """Handle run_command action with VM API integration"""
         command = action.get('command')
-        cwd = action.get('cwd')
+        working_dir = action.get('working_dir') or action.get('cwd')
 
         print(f"💻 Processing terminal command: {command}")
-        if cwd:
-            print(f"   Working directory: {cwd}")
+        if working_dir:
+            print(f"   Working directory: {working_dir}")
 
-        # Normalize cwd: treat '.', '', or None as 'frontend' (project root)
-        if cwd in ['.', '', None]:
-            cwd = 'frontend'
+        # Normalize working_dir: treat '.', '', or None as None (project root)
+        if working_dir in ['.', '']:
+            working_dir = None
 
-        if cwd not in ['frontend', 'backend']:
-            return f"`cwd` must be 'frontend' or 'backend'. It cannot be {cwd}. Do you want to run the test for the frontend or backend?"
+        # Validate working_dir if specified
+        if working_dir and working_dir not in ['frontend', 'backend']:
+            return f"`working_dir` must be 'frontend', 'backend', or null for root. It cannot be {working_dir}."
 
-        # Phase 6: ALL Terminal Commands (Interrupt Flow)
-        # Both frontend and backend commands should interrupt for user control
-        if cwd == 'frontend':
-            return self._handle_frontend_command_interrupt(command, cwd, action)
-        elif cwd == 'backend':
-            return self._handle_backend_command_interrupt(command, cwd, action)
+        # Unescape JSON in curl commands (LLM often escapes quotes)
+        if command and 'curl' in command and '\\"' in command:
+            # Unescape JSON quotes in curl commands for proper execution
+            original_command = command
+            command = command.replace('\\"', '"')
+            print(f"🔧 Unescaped curl command JSON quotes")
+            print(f"   Original: {original_command[:100]}...")
+            print(f"   Fixed: {command[:100]}...")
 
-        return "Invalid working directory. Use 'frontend' or 'backend'."
+        # # Prepend cd command if working_dir is specified
+        # if working_dir:
+        #     original_command = command
+        #     command = f"cd {working_dir} && {command}"
+        #     print(f"🔧 Prepended cd command for working directory")
+        #     print(f"   Original: {original_command}")
+        #     print(f"   Modified: {command}")
+
+        # Execute command using VM API
+        return self._execute_command_on_vm(command, working_dir, action)
+
+    def _execute_command_on_vm(self, command: str, working_dir: str, action: dict) -> str:
+        """Execute command on VM using the VM API"""
+        try:
+            # Run async VM API call in sync context
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(vm_api.execute_command(self.project_id, command, working_dir))
+            finally:
+                loop.close()
+
+            # The VM API returns format: {stdout, stderr, return_code, working_directory}
+            # Check if command succeeded (return_code 0 means success)
+            success = result["return_code"] == 0
+            output = result["stdout"]
+            stderr = result["stderr"]
+
+            if stderr:
+                output += f"\n[stderr]: {stderr}"
+
+            if success:
+                print(f"✅ VM Command completed successfully (return code {result['return_code']})")
+                print(f"📄 Output: {len(output)} characters")
+            else:
+                print(f"❌ VM Command failed (return code {result['return_code']})")
+                if stderr:
+                    print(f"📄 Error: {stderr}")
+
+            # Return the command output directly
+            return output
+
+        except Exception as e:
+            error_msg = f"VM API Error: {str(e)}"
+            print(f"❌ {error_msg}")
+
+            # Return error message directly
+            return error_msg
 
     def _handle_frontend_command_interrupt(self, command: str, cwd: str, action: dict) -> str:
         """Handle frontend commands with ACTUAL interrupt and cloud storage flow"""
         print(f"🌐 FRONTEND COMMAND DETECTED: {command}")
         print(f"📤 INTERRUPTING STREAM - Frontend will execute this command...")
 
-        # Save current conversation state to cloud storage before interrupt
+        # Save current conversation state to cloud storage before interrupt (async background)
         if self.cloud_storage and self.project_id:
             try:
-                print(f"☁️ Saving conversation state to cloud storage before frontend interrupt...")
-                save_success = self.cloud_storage.save_conversation_history(
+                print(f"☁️ Starting background save of conversation state before frontend interrupt...")
+                self._run_cloud_operation_background(
+                    "Save conversation history before interrupt",
+                    self.cloud_storage.save_conversation_history,
                     self.project_id,
-                    self.conversation_history
+                    self.conversation_history.copy()  # Make a copy to avoid race conditions
                 )
-                if save_success:
-                    print(f"✅ Conversation state saved to cloud storage")
-                else:
-                    print(f"⚠️ Warning: Failed to save conversation state to cloud")
+                print(f"✅ Background save of conversation state initiated")
             except Exception as e:
-                print(f"⚠️ Error saving conversation state: {e}")
+                print(f"⚠️ Error initiating background save of conversation state: {e}")
 
         # CRITICAL: Raise special exception to interrupt the stream
         # This will break out of the coder iteration loop and end streaming
@@ -2432,9 +2576,9 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
                 'deployed_at': datetime.now().isoformat()
             }
 
-            # Save updated metadata
-            self.cloud_storage.save_project_metadata(project_id, project_metadata)
-            print(f"✅ Backend deployment info saved for project {project_id}")
+            # Save updated metadata in background
+            future = self._save_metadata_background(project_metadata)
+            print(f"🌥️ Started background save of backend deployment info for project {project_id}")
 
         except Exception as e:
             print(f"❌ Error saving backend deployment info: {str(e)}")
@@ -3504,11 +3648,45 @@ If you really want to create an empty file, please confirm by responding with th
                     if completion_message:
                         print(f"📄 Method 6 - Found in raw attributes: {len(completion_message)} chars")
 
+            # Parse suggest_next_tasks if present and clean up the completion message
+            suggest_next_tasks = None
+            if completion_message and '<suggest_next_tasks>' in completion_message:
+                print(f"🎯 Found suggest_next_tasks in completion message - parsing")
+
+                # Extract suggest_next_tasks content
+                import re
+                suggest_match = re.search(r'<suggest_next_tasks>(.*?)</suggest_next_tasks>', completion_message, re.DOTALL)
+                if suggest_match:
+                    suggest_content = suggest_match.group(1)
+                    print(f"📋 Extracted suggest_next_tasks content ({len(suggest_content)} chars)")
+
+                    # Parse individual suggestions
+                    suggestions = []
+                    suggestion_matches = re.findall(r'<suggestion\s+for="([^"]*)"(?:\s+goto="([^"]*)")?[^>]*>(.*?)</suggestion>', suggest_content, re.DOTALL)
+
+                    for match in suggestion_matches:
+                        for_attr, goto_attr, content = match
+                        suggestion = {
+                            "for": for_attr.strip(),
+                            "content": content.strip()
+                        }
+                        if goto_attr:
+                            suggestion["goto"] = goto_attr.strip()
+
+                        suggestions.append(suggestion)
+                        print(f"📌 Parsed suggestion - for: {for_attr}, goto: {goto_attr or 'none'}, content: {content.strip()[:50]}...")
+
+                    if suggestions:
+                        suggest_next_tasks = suggestions
+                        print(f"✅ Successfully parsed {len(suggestions)} suggestions")
+
+                # Remove suggest_next_tasks from completion message
+                completion_message = re.sub(r'<suggest_next_tasks>.*?</suggest_next_tasks>', '', completion_message, flags=re.DOTALL)
+
             # Clean up the completion message
             if completion_message:
-                # Remove XML tags if they're still present
+                # Remove any remaining XML tags
                 completion_message = re.sub(r'<[^>]+>', '', completion_message)
-                # Content is already clean from XML removal above
 
             # Fallback to default message
             if not completion_message:
@@ -3524,6 +3702,11 @@ If you really want to create an empty file, please confirm by responding with th
                 'session_ended': True,
                 'timestamp': datetime.now().isoformat()
             }
+
+            # Add suggest_next_tasks if parsed
+            if suggest_next_tasks:
+                result['suggest_next_tasks'] = suggest_next_tasks
+                print(f"📤 Including suggest_next_tasks with {len(suggest_next_tasks)} suggestions in result")
 
             print(f"✅ Attempt completion processed successfully")
             return result
@@ -3649,8 +3832,9 @@ If you really want to create an empty file, please confirm by responding with th
             project_metadata['todos'] = todos
             project_metadata['todos_last_updated'] = datetime.now().isoformat()
 
-            # Save updated metadata
-            success = self.cloud_storage.save_project_metadata(self.project_id, project_metadata)
+            # Save updated metadata in background
+            future = self._save_metadata_background(project_metadata)
+            success = True  # Assume success since it's background
 
             if success:
                 print(f"✅ Saved {len(todos)} todos to cloud storage")
@@ -4023,10 +4207,9 @@ def main():
         return
 
     print('====')
-    print('Generating plan --->')
+    print('Using raw user message directly')
     print('====')
-    planned_user_message = generate_user_message_plan(args.message)
-    print(planned_user_message)
+    print(args.message)
     print('=========')
 
     # Determine mode and prepare message

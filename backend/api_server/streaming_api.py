@@ -29,6 +29,9 @@ from pydantic import BaseModel
 from agent_class import BoilerplatePersistentGroq, FrontendCommandInterrupt
 from project_pool_manager import get_pool_manager
 
+# Import deployment modules
+from api.netlify_deployment import deploy_frontend_to_netlify
+
 
 # =============================================================================
 # MODAL.COM BACKEND DEPLOYMENT API
@@ -110,6 +113,23 @@ class FileUpdateResponse(BaseModel):
     project_id: str
     file_path: str
     message: str
+    error: Optional[str] = None
+
+# =============================================================================
+# NETLIFY FRONTEND DEPLOYMENT API
+# =============================================================================
+
+class NetlifyDeploymentRequest(BaseModel):
+    project_id: str
+
+class NetlifyDeploymentResponse(BaseModel):
+    status: str
+    project_id: str
+    netlify_url: Optional[str] = None
+    site_name: Optional[str] = None
+    backend_url: Optional[str] = None
+    env_vars: Optional[int] = None
+    deployed_at: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -278,7 +298,7 @@ def generate_modal_volume_name(app_name: str) -> str:
     return full_name
 
 # Import shared utility function
-from utils import generate_short_app_name
+from utils.basic import generate_short_app_name
 
 def extract_modal_url(output: str, app_name: str) -> Optional[str]:
     """Extract the deployed URL from Modal's output"""
@@ -653,6 +673,7 @@ def create_app():
         conversation_id: Optional[str] = None
         project_id: Optional[str] = None
         action_result: Optional[bool] = False
+        images: Optional[List[str]] = None  # Base64 encoded images from frontend
 
     class StreamChunk(BaseModel):
         type: str  # "text", "action_start", "action_content", "action_result", "error"
@@ -1118,6 +1139,49 @@ def create_app():
             del conversation_metadata[conversation_id]
         return {"status": "deleted", "conversation_id": conversation_id}
 
+    async def process_request_with_images(request: ConversationRequest, conversation_id: str) -> str:
+        """Process images and format message for LLM consumption"""
+        if not request.images or len(request.images) == 0:
+            # No images, return original message
+            return request.message
+
+        print(f"🖼️ Processing {len(request.images)} images for conversation {conversation_id}")
+
+        # Upload images to Azure storage and get public URLs
+        cloud_storage = get_cloud_storage()
+        image_urls = []
+
+        for i, base64_image in enumerate(request.images):
+            try:
+                public_url = cloud_storage.upload_image(base64_image, conversation_id)
+                if public_url:
+                    image_urls.append(public_url)
+                    print(f"✅ Image {i+1} uploaded: {public_url[:50]}...")
+                else:
+                    print(f"❌ Failed to upload image {i+1}")
+            except Exception as e:
+                print(f"❌ Error uploading image {i+1}: {str(e)}")
+
+        if not image_urls:
+            # No images uploaded successfully, return original message
+            return request.message
+
+        # Format message with proper structure for LLM
+        # The agent will receive this and parse it properly for the messages array
+        formatted_content = {
+            "text": request.message,
+            "images": image_urls
+        }
+
+        # Convert to a format the agent can understand
+        # We'll use a special marker that the agent can detect and format properly
+        import json
+        image_data = json.dumps({"image_urls": image_urls})
+        formatted_message = f"[IMAGE_DATA]{image_data}[/IMAGE_DATA]{request.message}"
+
+        print(f"📝 Formatted message with {len(image_urls)} images")
+        return formatted_message
+
     @app.post("/chat/stream")
     async def stream_chat(request: ConversationRequest):
         """Main streaming chat endpoint"""
@@ -1208,7 +1272,9 @@ def create_app():
                 try:
                     from cloud_storage import AzureBlobStorage
 
-                    project_id = getattr(model_system, 'project_id', None)
+                    # Use request.project_id if available (update mode), otherwise get from model_system
+                    project_id = request.project_id or getattr(model_system, 'project_id', None)
+                    
                     if project_id:
                         user_message_chunk = {
                             "type": "user_message",
@@ -1223,8 +1289,14 @@ def create_app():
                         }
 
                         cloud_storage = get_streaming_azure_client()
-                        cloud_storage.append_streaming_chunk(project_id, user_message_chunk)
-                        print(f"💾 Saved user message to streaming history")
+                        # Save user message chunk in background thread to avoid blocking
+                        import threading
+                        save_thread = threading.Thread(
+                            target=lambda: cloud_storage.append_streaming_chunk(project_id, user_message_chunk),
+                            daemon=True
+                        )
+                        save_thread.start()
+                        print(f"💾 Background save of user message to streaming history initiated")
 
                 except Exception as e:
                     print(f"⚠️ Failed to save user message to streaming history: {e}")
@@ -1248,8 +1320,14 @@ def create_app():
                         }
 
                         cloud_storage = get_streaming_azure_client()
-                        cloud_storage.append_streaming_chunk(project_id, command_result_chunk)
-                        print(f"💾 Saved command result to streaming history")
+                        # Save command result chunk in background thread to avoid blocking
+                        import threading
+                        save_thread = threading.Thread(
+                            target=lambda: cloud_storage.append_streaming_chunk(project_id, command_result_chunk),
+                            daemon=True
+                        )
+                        save_thread.start()
+                        print(f"💾 Background save of command result to streaming history initiated")
 
                 except Exception as e:
                     print(f"⚠️ Failed to save command result to streaming history: {e}")
@@ -1260,9 +1338,12 @@ def create_app():
             # Add timing context to wrapper
             streaming_wrapper.request_start_time = start_time
 
+            # Process images if present and create formatted message
+            formatted_message = await process_request_with_images(request, conversation_id)
+
             # Return streaming response
             return StreamingResponse(
-                streaming_wrapper.stream_response(request.message),
+                streaming_wrapper.stream_response(formatted_message),
                 media_type="text/plain",
                 headers={
                     "Cache-Control": "no-cache",
@@ -1734,7 +1815,7 @@ def create_app():
                 try:
                     # For downloading, we need the original path with frontend/ prefix
                     original_path = f"frontend/{file_path}" if not file_path.startswith('frontend/') else file_path
-                    
+
                     # Download file content from cloud using original path
                     content = cloud_storage.download_file(project_id, original_path)
                     if content is None:
@@ -1744,23 +1825,23 @@ def create_app():
                 except Exception as e:
                     print(f"❌ Error downloading {file_path}: {e}")
                     return None
-            
+
             # Use ThreadPoolExecutor to run downloads in parallel without blocking
             with ThreadPoolExecutor(max_workers=5) as executor:
                 loop = asyncio.get_event_loop()
                 download_tasks = [
-                    loop.run_in_executor(executor, download_single_file, file_path) 
+                    loop.run_in_executor(executor, download_single_file, file_path)
                     for file_path in files_list
                 ]
-                
+
                 # Wait for all downloads to complete
                 download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-            
+
             # Process all results
             for result in download_results:
                 if result is None or isinstance(result, Exception):
                     continue
-                
+
                 file_path, content = result
 
                 # Build nested structure for WebContainer
@@ -1952,6 +2033,36 @@ def create_app():
             **deployment_status[deployment_id]
         }
 
+    @app.post("/netlify/deploy", response_model=NetlifyDeploymentResponse)
+    async def deploy_frontend_to_netlify_api(request: NetlifyDeploymentRequest):
+        """Deploy frontend to Netlify"""
+        try:
+            print(f"🚀 Starting Netlify deployment for project: {request.project_id}")
+            
+            # Call the deployment function
+            result = deploy_frontend_to_netlify(request.project_id)
+            
+            print(f"✅ Netlify deployment completed successfully")
+            
+            return NetlifyDeploymentResponse(
+                status="success",
+                project_id=request.project_id,
+                netlify_url=result.get("netlify_url"),
+                site_name=result.get("site_name"),
+                backend_url=result.get("backend_url"),
+                env_vars=result.get("env_vars"),
+                deployed_at=result.get("deployed_at")
+            )
+            
+        except Exception as e:
+            error_msg = f"Netlify deployment failed: {str(e)}"
+            print(f"❌ {error_msg}")
+            
+            return NetlifyDeploymentResponse(
+                status="error",
+                project_id=request.project_id,
+                error=error_msg
+            )
 
     @app.get("/modal/apps")
     async def list_modal_apps():

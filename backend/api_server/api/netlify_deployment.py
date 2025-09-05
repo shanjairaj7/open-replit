@@ -1,8 +1,7 @@
 """
-Netlify Deployment System for Azure-Stored Frontend Applications
+Netlify Deployment API Module
 
-Automatically downloads ViteJS frontend from Azure Storage and deploys to Netlify
-with zero configuration - just provide project_id and everything is auto-detected.
+Handles frontend deployment to Netlify for projects stored in Azure Storage.
 """
 
 import os
@@ -300,12 +299,7 @@ def build_project(frontend_dir: str):
         )
         
         if result.returncode != 0:
-            error_details = f"Build failed with exit code {result.returncode}:\n"
-            if result.stdout:
-                error_details += f"STDOUT:\n{result.stdout}\n"
-            if result.stderr:
-                error_details += f"STDERR:\n{result.stderr}"
-            raise Exception(error_details)
+            raise Exception(f"Build failed with exit code {result.returncode}:\n{result.stderr}")
         
         # Verify dist directory was created
         dist_path = Path(frontend_dir) / 'dist'
@@ -383,34 +377,30 @@ def deploy_to_netlify(dist_dir: str, site_name: str, env: dict) -> dict:
         # Now deploy to production
         prod_result = subprocess.run([
             'netlify', 'deploy',
-            '--prod',
-            '--dir', dist_dir
+            '--prod'
         ], capture_output=True, text=True, env=env, timeout=300)
         
         if prod_result.returncode != 0:
             raise Exception(f"Production deployment failed: {prod_result.stderr}\n\nOutput: {prod_result.stdout}")
         
-        print("🔍 Netlify production output:")
-        print(f"STDOUT: {prod_result.stdout}")
-        print(f"STDERR: {prod_result.stderr}")
-        
         # Parse the production output to extract the URL
         output_lines = prod_result.stdout.split('\n') + prod_result.stderr.split('\n')
         deploy_url = None
         
-        import re
-        # Look for any netlify.app URL in the output
+        # Look for production URL patterns
         for line in output_lines:
-            url_match = re.search(r'https://[^\s]+\.netlify\.app[^\s]*', line)
-            if url_match:
-                deploy_url = url_match.group(0)
-                print(f"🔗 Found URL in output: {deploy_url}")
-                break
+            if 'Production deploy is live' in line or 'Deployed to production URL:' in line:
+                continue
+            elif f'https://{site_name}.netlify.app' in line:
+                import re
+                url_match = re.search(r'https://[^\s]+\.netlify\.app[^\s]*', line)
+                if url_match:
+                    deploy_url = url_match.group(0)
+                    break
         
         # Fallback - construct expected URL
         if not deploy_url:
             deploy_url = f"https://{site_name}.netlify.app"
-            print(f"🔗 Using fallback URL: {deploy_url}")
         
         print(f"✅ Successfully deployed to: {deploy_url}")
         
@@ -425,52 +415,3 @@ def deploy_to_netlify(dist_dir: str, site_name: str, env: dict) -> dict:
         raise Exception("Netlify deployment timed out after 5 minutes")
     except Exception as e:
         raise Exception(f"Netlify deployment failed: {str(e)}")
-
-# Command line interface
-if __name__ == "__main__":
-    import sys
-    
-    print("🌐 Netlify Deployment Tool")
-    print("=" * 50)
-    
-    if len(sys.argv) != 2:
-        print("Usage: python3 deployment.py <project_id>")
-        print("\nExample:")
-        print("  python3 deployment.py horizon-885-3ac98")
-        print("\nMake sure you have:")
-        print("  1. Set NETLIFY_AUTH_TOKEN environment variable")
-        print("  2. Installed Netlify CLI: npm install -g netlify-cli")
-        print("  3. Node.js and npm installed")
-        sys.exit(1)
-    
-    project_id = sys.argv[1].strip()
-    
-    if not project_id:
-        print("❌ Project ID cannot be empty")
-        sys.exit(1)
-    
-    try:
-        result = deploy_frontend_to_netlify(project_id)
-        
-        print("\n" + "=" * 50)
-        print("🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!")
-        print("=" * 50)
-        print(f"📱 Live URL: {result['netlify_url']}")
-        print(f"🔗 Backend: {result['backend_url']}")
-        print(f"🏷️  Site: {result['site_name']}")
-        print(f"📊 Environment vars: {result['env_vars']}")
-        print(f"⏰ Deployed at: {result['deployed_at']}")
-        print("=" * 50)
-        
-    except Exception as e:
-        print("\n" + "=" * 50)
-        print("❌ DEPLOYMENT FAILED!")
-        print("=" * 50)
-        print(f"Error: {str(e)}")
-        print("\nTroubleshooting:")
-        print("  1. Check your NETLIFY_AUTH_TOKEN is set")
-        print("  2. Verify project exists in Azure Storage")
-        print("  3. Ensure Netlify CLI is installed")
-        print("  4. Check internet connection")
-        print("=" * 50)
-        sys.exit(1)

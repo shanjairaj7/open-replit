@@ -7,12 +7,17 @@ import os
 import json
 import tempfile
 import subprocess
+import asyncio
+import base64
+import uuid
+import mimetypes
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
+from vm_api import vm_api
 
 class AzureBlobStorage:
     """Azure Blob Storage client for project file management"""
@@ -53,8 +58,8 @@ class AzureBlobStorage:
         file_path = file_path.replace('\\', '/')
         return f"{project_id}/{file_path}"
     
-    def upload_file(self, project_id: str, file_path: str, content: str) -> bool:
-        """Upload file content to Azure Blob Storage"""
+    def upload_file(self, project_id: str, file_path: str, content: str, is_new_file: bool = False) -> bool:
+        """Upload file content to Azure Blob Storage and sync with VM"""
         try:
             blob_path = self._get_blob_path(project_id, file_path)
             blob_client = self.container_client.get_blob_client(blob_path)
@@ -68,6 +73,38 @@ class AzureBlobStorage:
             )
             
             print(f"☁️ Uploaded: {blob_path}")
+            
+            # Sync with VM only for project codebase files (frontend/ or backend/)
+            if file_path.startswith(('frontend/', 'backend/')):
+                try:
+                    def sync_with_vm():
+                        """Run VM sync in background without blocking"""
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                if is_new_file:
+                                    # File creation with overwrite allowed
+                                    loop.run_until_complete(vm_api.create_file(project_id, file_path, content, overwrite=True))
+                                else:
+                                    # File update with create_if_missing
+                                    loop.run_until_complete(vm_api.update_file(project_id, file_path, content, create_if_missing=True))
+                            finally:
+                                loop.close()
+                        except Exception as vm_error:
+                            print(f"⚠️ VM sync error for {file_path}: {str(vm_error)}")
+                    
+                    # Run VM sync in background thread to not block
+                    import threading
+                    thread = threading.Thread(target=sync_with_vm, daemon=True)
+                    thread.start()
+                    
+                except Exception as vm_error:
+                    print(f"⚠️ VM sync warning for {file_path}: {str(vm_error)}")
+                    # Don't fail the operation if VM sync fails
+            else:
+                print(f"📁 System file - skipping VM sync: {file_path}")
+            
             return True
             
         except Exception as e:
@@ -95,7 +132,7 @@ class AzureBlobStorage:
             return None
     
     def delete_file(self, project_id: str, file_path: str) -> bool:
-        """Delete file from Azure Blob Storage"""
+        """Delete file from Azure Blob Storage and sync with VM"""
         try:
             blob_path = self._get_blob_path(project_id, file_path)
             blob_client = self.container_client.get_blob_client(blob_path)
@@ -103,10 +140,56 @@ class AzureBlobStorage:
             blob_client.delete_blob()
             
             print(f"🗑️ Deleted: {blob_path}")
+            
+            # Sync with VM only for project codebase files (frontend/ or backend/)
+            if file_path.startswith(('frontend/', 'backend/')):
+                try:
+                    def sync_vm_delete():
+                        """Run VM delete sync in background without blocking"""
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                loop.run_until_complete(vm_api.delete_file(project_id, file_path))
+                            finally:
+                                loop.close()
+                        except Exception as vm_error:
+                            print(f"⚠️ VM delete sync error for {file_path}: {str(vm_error)}")
+                    
+                    # Run VM delete sync in background thread to not block
+                    import threading
+                    thread = threading.Thread(target=sync_vm_delete, daemon=True)
+                    thread.start()
+                    
+                except Exception as vm_error:
+                    print(f"⚠️ VM delete sync warning for {file_path}: {str(vm_error)}")
+                    # Don't fail the operation if VM sync fails
+            else:
+                print(f"📁 System file - skipping VM sync: {file_path}")
+            
             return True
             
         except ResourceNotFoundError:
             print(f"📄 File not found for deletion: {file_path}")
+            # Still try to delete from VM in case file exists there (for project files only)
+            if file_path.startswith(('frontend/', 'backend/')):
+                try:
+                    def sync_vm_delete():
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                loop.run_until_complete(vm_api.delete_file(project_id, file_path))
+                            finally:
+                                loop.close()
+                        except Exception as vm_error:
+                            print(f"⚠️ VM delete sync error for {file_path}: {str(vm_error)}")
+                    
+                    import threading
+                    thread = threading.Thread(target=sync_vm_delete, daemon=True)
+                    thread.start()
+                except Exception as vm_error:
+                    print(f"⚠️ VM delete sync warning for {file_path}: {str(vm_error)}")
             return False
         except Exception as e:
             print(f"❌ Failed to delete {file_path}: {str(e)}")
@@ -148,6 +231,55 @@ class AzureBlobStorage:
         except Exception as e:
             print(f"❌ Failed to check file existence {file_path}: {str(e)}")
             return False
+
+    def upload_image(self, base64_image: str, conversation_id: str) -> Optional[str]:
+        """Upload base64 image to Azure Blob Storage and return public URL"""
+        try:
+            # Decode base64 image
+            if base64_image.startswith('data:image/'):
+                # Remove data URL prefix (e.g., "data:image/jpeg;base64,")
+                header, base64_data = base64_image.split(',', 1)
+                # Extract image type from header
+                image_type = header.split('/')[1].split(';')[0]
+            else:
+                # Assume raw base64 data, default to jpeg
+                base64_data = base64_image
+                image_type = 'jpeg'
+            
+            # Decode base64 to bytes
+            image_data = base64.b64decode(base64_data)
+            
+            # Generate unique filename
+            image_id = str(uuid.uuid4())
+            file_extension = image_type if image_type in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else 'jpg'
+            filename = f"images/{conversation_id}/{image_id}.{file_extension}"
+            
+            print(f"🖼️ Uploading image: {filename}")
+            
+            # Upload to Azure with public access
+            blob_client = self.container_client.get_blob_client(filename)
+            
+            # Set content type based on image format
+            content_type = f"image/{image_type}" if image_type != 'jpg' else "image/jpeg"
+            
+            blob_client.upload_blob(
+                image_data,
+                overwrite=True,
+                content_settings={
+                    'content_type': content_type,
+                    'cache_control': 'public, max-age=86400'  # Cache for 1 day
+                }
+            )
+            
+            # Generate public URL
+            public_url = blob_client.url
+            
+            print(f"✅ Image uploaded successfully: {public_url}")
+            return public_url
+            
+        except Exception as e:
+            print(f"❌ Failed to upload image: {str(e)}")
+            return None
     
     def clone_from_github(self, project_id: str, repo_url: str, target_dir: str) -> bool:
         """Clone GitHub repository and upload files to Azure storage"""

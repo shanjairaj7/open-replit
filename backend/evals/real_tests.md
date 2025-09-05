@@ -17,3 +17,18 @@ prompt
 
 - Project id: horizon-885-3ac98
   tasks main page, create task with 2 properties, generate plan working, then circular dependancy error none of the other features are working. backend coding method is wrong. error - X
+
+- horizon-649-acf23
+  signup and login, create a task, show the list of the tasks, click on task shows each task info, generate ai plan passes the title and the description of hte task to generate the plan and adds it to the description of that task correctly, comments are also working. no errors, errors were fixed by the model.
+  backend deployment and auto-registering routes timing so routes are not working instantly, *small seconds delay*
+
+
+ai document research app
+
+prompt
+> We're a research company, and we want to build an AI research assistant that can help our analysts make sense of large amounts of information. It should be able to ingest different types of documents - PDFs, web pages, Word docs - and build a knowledge graph that connects the dots between them. For example, if it reads a news article about a company and a research paper about a new technology, it should be able to connect them if the company is mentioned in the paper. I want to charge each user a subcription of $50/month as well, with another higher tier of $100/month, build the pricing page in a nice modal as well.
+
+- horizon-884-1a242
+  initial ui home page didnt have the proper research home page with the pricing modal. assistant page route had the input with the graph and key entities sections.
+  initial version ingests web pages, ingest api didnt work, initial basic json error was fixed but ingest didnt work
+  model didnt test the apis, integration and complex functionalities should change

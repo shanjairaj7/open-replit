@@ -246,12 +246,13 @@ def fastapi_app():
     from routes import api_router
     from json_db import create_tables
 
-    # Initialize JSON database
+    # Initialize JSON database  <- Write the function to initialise the json database with the tables
     def initialize_json_databases():
         table_names = ["users", "contacts", "tasks", "projects"]
         create_tables(table_names)
         print(f"✅ JSON database initialized: {table_names}")
 
+    # Run the function to initialise the tables on app startup
     initialize_json_databases()
 
     app = FastAPI(title="My App", version="1.0.0")
@@ -733,3 +734,15 @@ export const AnalyticsPage: React.FC = () => {
   );
 };
 """
+
+# TODO: REMIND THIS TO ME
+
+  # <!-- Suggest the *next* set of tasks for the user to get you to work on, or tasks you want the user to do -->
+  # <suggest_next_tasks>
+  #   <suggestion for="me"> Payment Integration with Stripe to accept payments </suggestion>
+  #   <suggestion for="me"> Send welcome emails to users once they sign up </suggestion>
+
+  #   <!-- You can only suggest the user to do these 2 tasks -->
+  #   <suggestion for="user" goto="secret_keys|publish_frontend"> Add the Stripe Key to the environment variables </suggestion>
+  #   <suggestion for="user" goto="secret_keys|publish_frontend"> Publish your app to netlify and share it with your users </suggestion>
+  # </suggest_next_tasks>

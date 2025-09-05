@@ -4,18 +4,17 @@ Utility functions shared across the API server
 import os
 from openai import OpenAI
 from datetime import datetime
-from prompts.planning_prompt import planning_prompt
 
-async def generate_user_message_plan(message: str):
+async def enhance_user_message(message: str):
     """
-    Translates user's natural language request into a structured implementation plan
-    following the system's development methodology and rules.
+    Enhances user's vague requests into proper structured messages with clear features
+    and requirements, making them more actionable for development.
 
     Args:
-        message: User's natural language request for building an application
+        message: User's natural language request that may be vague or incomplete
 
     Returns:
-        Structured plan as a string with feature selection, architecture, and implementation steps
+        Enhanced message with clearer structure, features, and requirements
     """
     # Use same OpenRouter setup as agent_class.py
     api_key = os.environ.get('OPENAI_KEY', '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')
@@ -25,18 +24,27 @@ async def generate_user_message_plan(message: str):
         default_headers={"x-include-usage": 'true'}
     )
 
-    # Use the planning prompt that generates first-person plans
-    planning_system_prompt = planning_prompt
+    # Simple system prompt for message enhancement
+    enhancement_system_prompt = """You are a message enhancement assistant. Your job is to take the user's vague or incomplete request and transform it into a clear, well-structured message that specifies:
+
+1. What exactly they want to build or modify
+2. Key features and functionality they need
+3. Any specific requirements or preferences
+4. Clear structure and organization of their request
+
+Transform vague requests like "build me an app" into specific requests like "Build me a task management app where I can create, edit, and delete tasks, organize them by priority, and track completion status."
+
+Keep the enhanced message concise but comprehensive. Don't add unnecessary complexity - just clarify what they actually want."""
 
     # Remove await since OpenAI client is sync
     response = client.chat.completions.create(
         model="google/gemini-2.5-flash",  # Use a model that works with OpenRouter
         messages=[
-            {"role": "system", "content": planning_system_prompt},
+            {"role": "system", "content": enhancement_system_prompt},
             {"role": "user", "content": message}
         ],
-        temperature=0.3,  # Lower temperature for more consistent planning
-        max_tokens=15000
+        temperature=0.3,  # Lower temperature for more consistent enhancement
+        max_tokens=2000  # Reduced since we just want enhanced message, not full plans
     )
 
     return response.choices[0].message.content
