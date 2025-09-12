@@ -88,7 +88,7 @@ When implementing features that require API keys (Stripe, OpenAI, etc.):
 **Key Management Workflow:**
 ```xml
 <!-- Check for required API keys -->
-<action type="run_command" command="grep -r 'STRIPE_SECRET_KEY\\|OPENAI_API_KEY' backend/ || echo 'Keys not found'"/>
+<action type="run_command" command="grep -r 'STRIPE_SECRET_KEY|OPENAI_API_KEY' backend/ || echo 'Keys not found'"/>
 
 <!-- If keys missing, ask user via attempt_completion -->
 <action type="attempt_completion">
