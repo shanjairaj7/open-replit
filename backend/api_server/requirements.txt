@@ -1,37 +1,26 @@
-# Core FastAPI and web framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
+# Core FastAPI (use older stable versions that don't need Rust)
+fastapi==0.68.0
+uvicorn[standard]==0.15.0
+pydantic==1.10.12
 
 # AI and LLM integrations
 openai
 tiktoken
 
 # HTTP requests and APIs
-requests==2.32.5
-httpx==0.28.1
+requests
+httpx
 aiohttp
 
-# Authentication and security (lightweight versions)
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-
 # File handling and utilities
-python-multipart==0.0.6
-python-dotenv==1.0.0
+python-multipart
+python-dotenv
 
 # ASGI server for deployment
 gunicorn
 
 # Date and time handling
-python-dateutil==2.8.2
-
-# Email validation
-email-validator==2.1.0.post1
+python-dateutil
 
 # Cloud storage
 azure-storage-blob
-
-# Additional lightweight backend essentials  
-python-slugify==8.0.1
-validators==0.20.0
