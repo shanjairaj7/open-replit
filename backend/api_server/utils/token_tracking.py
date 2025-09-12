@@ -8,8 +8,11 @@ Extracted from agent.py and agent_class.py to provide reusable token tracking fu
 
 import requests
 import time
+import os
+import json
 from datetime import datetime
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Optional, Dict, Any, List
 
 
 class TokenTracker:
@@ -19,8 +22,9 @@ class TokenTracker:
     DEFAULT_INPUT_PRICE_PER_MILLION = 0.20   # $0.20 per 1M input tokens
     DEFAULT_OUTPUT_PRICE_PER_MILLION = 0.80  # $0.80 per 1M output tokens
     
-    def __init__(self, input_price: float = None, output_price: float = None):
-        """Initialize token tracker with pricing configuration"""
+    def __init__(self, project_id: str = None, input_price: float = None, output_price: float = None):
+        """Initialize token tracker with project ID and pricing configuration"""
+        self.project_id = project_id
         self.input_price_per_million = input_price or self.DEFAULT_INPUT_PRICE_PER_MILLION
         self.output_price_per_million = output_price or self.DEFAULT_OUTPUT_PRICE_PER_MILLION
         
@@ -30,6 +34,13 @@ class TokenTracker:
             'prompt_tokens': 0,
             'completion_tokens': 0
         }
+        
+        # Set up JSON audit log file path
+        self.audit_log_path = self._get_audit_log_path()
+        
+        # Session tracking for boundaries
+        self.current_session_id = None
+        self.session_start_recorded = False
         
     def initialize_token_usage(self) -> Dict[str, int]:
         """Initialize or reset token usage tracking"""
@@ -75,7 +86,8 @@ class TokenTracker:
         total_output_cost = (self.token_usage['completion_tokens'] / 1_000_000) * self.output_price_per_million
         total_cost = total_input_cost + total_output_cost
         
-        print("=📊 Updating internal token tracking...")
+        project_info = f" [Project: {self.project_id}]" if self.project_id else ""
+        print(f"=📊 Updating internal token tracking{project_info}...")
         print(f"=💰 Running Totals:")
         print(f"   Tokens: {old_total:,} -> {self.token_usage['total_tokens']:,}")
         print(f"   Input: {old_prompt:,} -> {self.token_usage['prompt_tokens']:,}")
@@ -83,6 +95,9 @@ class TokenTracker:
         print(f"   =-> Total Cost: ${total_cost:.6f}")
         print(f"      - Input: ${total_input_cost:.6f}")
         print(f"      - Output: ${total_output_cost:.6f}")
+        
+        # Log token usage update to JSON audit file
+        self.log_token_usage()
         
         return self.token_usage.copy()
     
@@ -115,15 +130,125 @@ class TokenTracker:
             'input_price_per_million': self.input_price_per_million,
             'output_price_per_million': self.output_price_per_million
         }
+    
+    # JSON Audit Logging Methods
+    
+    def _get_audit_log_path(self) -> str:
+        """Get path for token usage audit log JSON file"""
+        log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        return os.path.join(log_dir, "token_usage_audit.json")
+    
+    def _load_audit_log(self) -> List[Dict]:
+        """Load existing audit log entries"""
+        try:
+            if os.path.exists(self.audit_log_path):
+                with open(self.audit_log_path, 'r') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"⚠️ Failed to load audit log: {e}")
+        return []
+    
+    def _save_audit_log(self, entries: List[Dict]) -> None:
+        """Save audit log entries to JSON file"""
+        try:
+            with open(self.audit_log_path, 'w') as f:
+                json.dump(entries, f, indent=2)
+        except Exception as e:
+            print(f"❌ Failed to save audit log: {e}")
+    
+    def log_token_usage(self, session_boundary: str = None, generation_id: str = None) -> None:
+        """
+        Log current token usage to JSON audit file
+        
+        Args:
+            session_boundary: 'start' or 'end' to mark session boundaries, None for regular usage
+            generation_id: OpenRouter generation ID if available
+        """
+        try:
+            # Create audit entry
+            audit_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'project_id': self.project_id,
+                'session_id': self.current_session_id,
+                'total_input_tokens': self.token_usage.get('total_input_tokens', self.token_usage.get('prompt_tokens', 0)),
+                'total_output_tokens': self.token_usage.get('total_output_tokens', self.token_usage.get('completion_tokens', 0)),
+                'total_tokens': self.token_usage.get('total_tokens', 0),
+                'session_boundary': session_boundary,  # 'start', 'end', or None
+                'generation_id': generation_id,
+                'done': session_boundary == 'end'  # Mark as done if it's session end
+            }
+            
+            # Load existing entries and append new one
+            entries = self._load_audit_log()
+            entries.append(audit_entry)
+            
+            # Save updated entries
+            self._save_audit_log(entries)
+            
+            boundary_info = f" [{session_boundary.upper()}]" if session_boundary else ""
+            project_info = f" [Project: {self.project_id}]" if self.project_id else ""
+            print(f"📊 Token audit logged{boundary_info}: {audit_entry['total_tokens']:,} tokens{project_info}")
+            
+        except Exception as e:
+            print(f"❌ Failed to log token usage: {e}")
+    
+    def start_session(self, session_id: str = None) -> str:
+        """Start a new session for token tracking"""
+        if session_id is None:
+            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+        
+        self.current_session_id = session_id
+        self.session_start_recorded = False
+        
+        # Log session start
+        self.log_token_usage(session_boundary='start')
+        self.session_start_recorded = True
+        
+        print(f"🎯 Token tracking session started: {session_id}")
+        return session_id
+    
+    def end_session(self) -> None:
+        """End current session for token tracking"""
+        if self.current_session_id:
+            # Log session end
+            self.log_token_usage(session_boundary='end')
+            print(f"🏁 Token tracking session ended: {self.current_session_id}")
+            self.current_session_id = None
+            self.session_start_recorded = False
 
 
 class OpenRouterTokenTracker(TokenTracker):
     """Extended token tracker with OpenRouter API integration"""
     
-    def __init__(self, api_key: str, input_price: float = None, output_price: float = None):
-        """Initialize with OpenRouter API key"""
-        super().__init__(input_price, output_price)
+    def __init__(self, api_key: str, project_id: str = None, input_price: float = None, output_price: float = None):
+        """Initialize with OpenRouter API key and project ID"""
+        super().__init__(project_id, input_price, output_price)
         self.api_key = api_key
+        self.current_generation_id = None
+    
+    def update_token_usage(self, prompt_tokens: int, completion_tokens: int, 
+                          total_tokens: int = None) -> Dict[str, int]:
+        """Override to include generation_id in audit logging"""
+        # Call parent method
+        result = super().update_token_usage(prompt_tokens, completion_tokens, total_tokens)
+        
+        # Override the automatic logging to include generation_id
+        # Remove the last entry and add it again with generation_id
+        if hasattr(self, 'audit_log_path') and os.path.exists(self.audit_log_path):
+            try:
+                entries = self._load_audit_log()
+                if entries:
+                    # Remove the last entry added by parent method
+                    last_entry = entries.pop()
+                    # Add it back with generation_id
+                    last_entry['generation_id'] = self.current_generation_id
+                    entries.append(last_entry)
+                    self._save_audit_log(entries)
+            except Exception as e:
+                print(f"⚠️ Failed to update audit entry with generation_id: {e}")
+        
+        return result
         
     def query_generation_usage(self, generation_id: str, max_retries: int = 3, 
                              base_delay: int = 2, max_delay: int = 10) -> Optional[Dict[str, Any]]:
@@ -140,8 +265,12 @@ class OpenRouterTokenTracker(TokenTracker):
             print(f"-> No API key provided for OpenRouter usage query")
             return None
 
-        print(f"=-> Querying usage for generation ID: {generation_id}")
+        project_info = f" [Project: {self.project_id}]" if self.project_id else ""
+        print(f"=-> Querying usage for generation ID: {generation_id}{project_info}")
         print(f"=-> Using pricing - Input: ${self.input_price_per_million}/M, Output: ${self.output_price_per_million}/M")
+        
+        # Store generation_id for audit logging
+        self.current_generation_id = generation_id
 
         for attempt in range(max_retries):
             if attempt > 0:
@@ -277,13 +406,13 @@ def initialize_token_usage() -> Dict[str, int]:
         'completion_tokens': 0
     }
 
-def create_token_tracker(api_key: str = None, input_price: float = None, 
-                        output_price: float = None) -> TokenTracker:
+def create_token_tracker(api_key: str = None, project_id: str = None, 
+                        input_price: float = None, output_price: float = None) -> TokenTracker:
     """Create appropriate token tracker based on API key availability"""
     if api_key:
-        return OpenRouterTokenTracker(api_key, input_price, output_price)
+        return OpenRouterTokenTracker(api_key, project_id, input_price, output_price)
     else:
-        return TokenTracker(input_price, output_price)
+        return TokenTracker(project_id, input_price, output_price)
 
 def should_summarize_conversation(token_usage: Dict[str, int], threshold: int = 500000) -> bool:
     """Check if conversation should be summarized based on token count"""

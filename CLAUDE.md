@@ -1,5 +1,22 @@
 # Claude Code Workflow Instructions
 
+## Code Style Rules
+
+### Keep It Simple
+- Don't complicate things - write only what's important
+- Don't add comments in code at all
+- Don't write bloated code
+- Use simple, direct solutions
+- Use basic libraries like `requests` instead of complex async solutions when possible
+
+### Focus on Functionality
+- Write code that works, not code that looks "beautiful"
+- Skip unnecessary abstractions
+- Direct implementation over complex patterns
+- Logs are more useful than comments
+
+# Claude Code Workflow Instructions
+
 ## Significant Feature Implementation Workflow
 
 **CRITICAL**: For significant features or complex implementations, always follow this structured approach:

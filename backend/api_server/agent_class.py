@@ -41,8 +41,8 @@ from openai import OpenAI, AzureOpenAI
 
 # Azure OpenAI - GPT-4.1 deployment
 gpt_endpoint = "https://rajsu-m9qoo96e-eastus2.services.ai.azure.com"
-gpt_model_name = "gpt-4.1"
-gpt_deployment = "gpt-4.1-2"
+gpt_model_name = "grok-3"
+gpt_deployment = "grok-3"
 gpt_api_version = "2024-12-01-preview"
 
 # Azure OpenAI - DeepSeek R1 deployment
@@ -156,6 +156,8 @@ class BoilerplatePersistentGroq:
         else:
             self.client = openai_client
             self.model = 'qwen/qwen3-coder'  # Use model path for OpenRouter
+            # qwen/qwen3-coder
+            # moonshotai/kimi-k2-0905
             self.is_azure_mode = False
             print(f"🟢 DEBUG: OpenRouter client created with model: {self.model}")
         self.conversation_history = []  # Store conversation messages
@@ -184,12 +186,12 @@ class BoilerplatePersistentGroq:
         # Initialize persistent todo storage
         self._ensure_todos_loaded()
 
-        # Initialize token tracking using centralized module
+        # Initialize token tracking using centralized module with project_id
         api_key = None
         if hasattr(self.client, 'api_key'):
             api_key = self.client.api_key
 
-        self._token_tracker = create_token_tracker(api_key)
+        self._token_tracker = create_token_tracker(api_key, self.project_id)
 
         # Keep backward compatibility with existing token_usage references
         self.token_usage = self._token_tracker.get_token_usage()
@@ -290,15 +292,9 @@ class BoilerplatePersistentGroq:
     def _load_system_prompt(self) -> str:
         """Load system prompt from file with project context"""
 
-        # Use GPT-5 prompt for GPT-5 models, otherwise use simpler prompt
-        if "gpt-5" in self.model.lower():
-            base_prompt = gpt5_prompt.prompt
-            print(f"🤖 Using GPT-5 optimized prompt for model: {self.model}")
-        else:
-            base_prompt = simpler_prompt.prompt
+        base_prompt = simpler_prompt.prompt
 
         # any additions to system prompt based on project context, can be added here
-
         return base_prompt
 
     def _load_project_context(self):
@@ -1751,62 +1747,42 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         else:
             enhanced_user_message = f"{user_message}\n\n<project_files>\n{file_tree}\n</project_files>"
 
-        # Parse images if present in message
-        image_data = None
-        if "[IMAGE_DATA]" in enhanced_user_message and "[/IMAGE_DATA]" in enhanced_user_message:
-            # Extract image data from message
-            start_marker = "[IMAGE_DATA]"
-            end_marker = "[/IMAGE_DATA]"
-            start_idx = enhanced_user_message.find(start_marker) + len(start_marker)
-            end_idx = enhanced_user_message.find(end_marker)
-
-            if start_idx < end_idx:
-                image_data_str = enhanced_user_message[start_idx:end_idx]
-                # Remove image data from text message
-                enhanced_user_message = enhanced_user_message.replace(f"{start_marker}{image_data_str}{end_marker}", "")
-
-                try:
-                    import json
-                    parsed_data = json.loads(image_data_str)
-                    # Handle nested format from streaming_api
-                    if "image_urls" in parsed_data:
-                        image_data = parsed_data["image_urls"]
-                    else:
-                        image_data = parsed_data  # Fallback for direct array
-                    print(f"📷 Parsed {len(image_data)} images for LLM")
-                except Exception as e:
-                    print(f"⚠️ Failed to parse image data: {e}")
-                    image_data = None
-
-        # Create message with images if present
-        if image_data and len(image_data) > 0:
-            # Create content array with text and images
-            content = [{"type": "text", "text": enhanced_user_message}]
-
-            # Add each image to content
-            for image_url in image_data:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_url}
-                })
-
-            messages.append({"role": "user", "content": content})
-            print(f"📷 Added message with {len(image_data)} images to LLM")
+        # Handle both string messages and content arrays from streaming API
+        if isinstance(user_message, list):
+            # Already in OpenAI content array format - extract text and enhance it
+            original_text = ""
+            image_items = []
+            
+            for item in user_message:
+                if item.get("type") == "text":
+                    original_text = item.get("text", "")
+                elif item.get("type") == "image_url":
+                    image_items.append(item)
+            
+            # Enhance the text portion with project context
+            if mode == "step" and step_info and step_info.get('show_service_status', False):
+                enhanced_text = f"{original_text}\n\n{service_status}\n\n<project_files>\n{file_tree}\n</project_files>"
+            else:
+                enhanced_text = f"{original_text}\n\n<project_files>\n{file_tree}\n</project_files>"
+            
+            # Create enhanced content array
+            content_array = [{"type": "text", "text": enhanced_text}] + image_items
+            
+            messages.append({"role": "user", "content": content_array})
+            self.conversation_history.append({"role": "user", "content": content_array})
+            
+            # Count images for logging
+            image_count = len(image_items)
+            if image_count > 0:
+                print(f"📷 Added message with {image_count} images to LLM (OpenAI format)")
+            else:
+                print(f"📝 Added text message to LLM")
         else:
-            messages.append({"role": "user", "content": enhanced_user_message})
-
-        # Add current user message to conversation history and save in real-time
-        if image_data and len(image_data) > 0:
-            # Store with images in conversation history
-            content = [{"type": "text", "text": enhanced_user_message}]
-            for image_url in image_data:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_url}
-                })
-            self.conversation_history.append({"role": "user", "content": content})
-        else:
-            self.conversation_history.append({"role": "user", "content": enhanced_user_message})
+            # String message - convert to text-only content array for consistency  
+            content_array = [{"type": "text", "text": enhanced_user_message}]
+            messages.append({"role": "user", "content": content_array})
+            self.conversation_history.append({"role": "user", "content": content_array})
+            print(f"📝 Added text message to LLM")
         self._save_conversation_history()  # Real-time save - triggers summarization if needed
 
         print(f"🔍 Sending {len(messages)} messages to model:")
@@ -3254,6 +3230,46 @@ If you really want to create an empty file, please confirm by responding with th
                     # Update backend URL in state
                     self.backend_url = backend_url
 
+                    # Update .env file with BACKEND_URL
+                    try:
+                        env_file_path = "backend/.env"
+                        print(f"📝 Updating {env_file_path} with BACKEND_URL...")
+                        
+                        # Read existing .env content or create new
+                        existing_env_content = ""
+                        try:
+                            existing_env_content = self.cloud_storage.download_file(self.project_id, env_file_path)
+                            if existing_env_content is None:
+                                existing_env_content = ""
+                        except:
+                            existing_env_content = ""
+                        
+                        # Parse existing content into lines
+                        env_lines = existing_env_content.split('\n') if existing_env_content else []
+                        
+                        # Check if BACKEND_URL exists and update or add it
+                        backend_url_found = False
+                        for i, line in enumerate(env_lines):
+                            if line.startswith('BACKEND_URL='):
+                                env_lines[i] = f'BACKEND_URL={backend_url}'
+                                backend_url_found = True
+                                print(f"✅ Updated existing BACKEND_URL in .env")
+                                break
+                        
+                        if not backend_url_found:
+                            # Add BACKEND_URL if it doesn't exist
+                            env_lines.append(f'BACKEND_URL={backend_url}')
+                            print(f"✅ Added BACKEND_URL to .env")
+                        
+                        # Write back the updated .env content
+                        updated_env_content = '\n'.join(env_lines)
+                        self.cloud_storage.upload_file(self.project_id, env_file_path, updated_env_content)
+                        print(f"✅ Successfully updated {env_file_path} with BACKEND_URL={backend_url}")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Warning: Could not update .env file with BACKEND_URL: {e}")
+                        # Don't fail the deployment if .env update fails
+
                     # Update backend info in project metadata
                     if hasattr(self, 'project_id') and self.project_id:
                         try:
@@ -3401,6 +3417,41 @@ If you really want to create an empty file, please confirm by responding with th
                                     deployment_result = status_result.get('result', {})
                                     new_url = deployment_result.get('url')
                                     docs_url = deployment_result.get('docs_url')
+                                    
+                                    # Update .env file with BACKEND_URL
+                                    try:
+                                        env_file_path = "backend/.env"
+                                        print(f"📝 Updating {env_file_path} with BACKEND_URL...")
+                                        
+                                        existing_env_content = ""
+                                        try:
+                                            existing_env_content = self.cloud_storage.download_file(self.project_id, env_file_path)
+                                            if existing_env_content is None:
+                                                existing_env_content = ""
+                                        except:
+                                            existing_env_content = ""
+                                        
+                                        env_lines = existing_env_content.split('\n') if existing_env_content else []
+                                        
+                                        backend_url_found = False
+                                        for i, line in enumerate(env_lines):
+                                            if line.startswith('BACKEND_URL='):
+                                                env_lines[i] = f'BACKEND_URL={new_url}'
+                                                backend_url_found = True
+                                                print(f"✅ Updated existing BACKEND_URL in .env")
+                                                break
+                                        
+                                        if not backend_url_found:
+                                            env_lines.append(f'BACKEND_URL={new_url}')
+                                            print(f"✅ Added BACKEND_URL to .env")
+                                        
+                                        updated_env_content = '\n'.join(env_lines)
+                                        self.cloud_storage.upload_file(self.project_id, env_file_path, updated_env_content)
+                                        print(f"✅ Successfully updated {env_file_path} with BACKEND_URL={new_url}")
+                                        
+                                    except Exception as e:
+                                        print(f"⚠️ Warning: Could not update .env file with BACKEND_URL: {e}")
+                                    
                                     break  # Exit polling loop
 
                                 elif deployment_status == 'error':
@@ -3437,6 +3488,40 @@ If you really want to create an empty file, please confirm by responding with th
 
                     # Update backend URL in state
                     self.backend_url = new_url
+                    
+                    # Update .env file with BACKEND_URL
+                    try:
+                        env_file_path = "backend/.env"
+                        print(f"📝 Updating {env_file_path} with BACKEND_URL...")
+                        
+                        existing_env_content = ""
+                        try:
+                            existing_env_content = self.cloud_storage.download_file(self.project_id, env_file_path)
+                            if existing_env_content is None:
+                                existing_env_content = ""
+                        except:
+                            existing_env_content = ""
+                        
+                        env_lines = existing_env_content.split('\n') if existing_env_content else []
+                        
+                        backend_url_found = False
+                        for i, line in enumerate(env_lines):
+                            if line.startswith('BACKEND_URL='):
+                                env_lines[i] = f'BACKEND_URL={new_url}'
+                                backend_url_found = True
+                                print(f"✅ Updated existing BACKEND_URL in .env")
+                                break
+                        
+                        if not backend_url_found:
+                            env_lines.append(f'BACKEND_URL={new_url}')
+                            print(f"✅ Added BACKEND_URL to .env")
+                        
+                        updated_env_content = '\n'.join(env_lines)
+                        self.cloud_storage.upload_file(self.project_id, env_file_path, updated_env_content)
+                        print(f"✅ Successfully updated {env_file_path} with BACKEND_URL={new_url}")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Warning: Could not update .env file with BACKEND_URL: {e}")
 
                     return {
                         "status": "success",
@@ -4130,6 +4215,78 @@ If you really want to create an empty file, please confirm by responding with th
             return {"status": "error", "message": "ToolsManager not initialized"}
 
         return self.tools_manager.handle_list_files(action)
+
+    def _handle_parallel_interrupt(self, action: dict) -> dict:
+        """Handle parallel tool execution using dedicated handler"""
+        print(f"⚡ Parallel tool interrupt triggered")
+
+        # Lazy import and initialize parallel tool handler
+        if not hasattr(self, '_parallel_handler'):
+            try:
+                from tools.parallel_tools import ParallelToolHandler
+                self._parallel_handler = ParallelToolHandler(self)
+                print("✅ Parallel tool handler initialized")
+            except ImportError as e:
+                print(f"❌ Failed to import parallel tool handler: {e}")
+                return {"status": "error", "message": "Parallel tool handler not available"}
+
+        return self._parallel_handler.handle_parallel_execution(action)
+
+    def _handle_add_starter_kit_interrupt(self, action: dict) -> dict:
+        """Handle add_starter_kit action during interrupt"""
+        print(f"🛠️ Adding starter kit interrupt triggered")
+        
+        # Check raw_attrs first for the actual kit value
+        raw_attrs = action.get('raw_attrs', {})
+        kit_name = raw_attrs.get('kit') or action.get('kit')
+        target = raw_attrs.get('target') or action.get('target')  # optional: backend or frontend
+        
+        if not kit_name:
+            return {
+                "success": False,
+                "error": "No kit name provided. Use kit='stripe' to add a starter kit",
+                "action_type": "add_starter_kit"
+            }
+        
+        try:
+            # Lazy import and initialize starter kit manager
+            if not hasattr(self, '_starter_kit_manager'):
+                try:
+                    from starter_kits import get_starter_kit_manager
+                    self._starter_kit_manager = get_starter_kit_manager(self.cloud_storage)
+                    print("✅ Starter kit manager initialized")
+                except ImportError as e:
+                    print(f"❌ Failed to import starter kit manager: {e}")
+                    return {
+                        "success": False,
+                        "error": "Starter kit manager not available",
+                        "action_type": "add_starter_kit"
+                    }
+            
+            # Add the starter kit
+            result = self._starter_kit_manager.add_starter_kit(
+                project_id=self.project_id,
+                kit_name=kit_name,
+                target=target
+            )
+            
+            # Add action_type for consistency
+            result["action_type"] = "add_starter_kit"
+            
+            if result.get("success"):
+                print(f"🎉 Starter kit '{kit_name}' added successfully!")
+            else:
+                print(f"❌ Failed to add starter kit '{kit_name}': {result.get('error')}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ Exception in add_starter_kit: {e}")
+            return {
+                "success": False,
+                "error": f"Exception while adding starter kit: {str(e)}",
+                "action_type": "add_starter_kit"
+            }
 
     def _run_cloud_operation_background(self, operation_name: str, operation_func, *args, **kwargs):
         """Run cloud operation in background thread"""

@@ -65,6 +65,7 @@ class UpdateFileHandler:
 
         # Check for search/replace format (new preferred format)
         if ('------- SEARCH' in update_content and '+++++++ REPLACE' in update_content) or \
+           ('------- SEARCH' in update_content and '>>>>>>> REPLACE' in update_content) or \
            ('------- SEARCH' in update_content and '=======' in update_content):
             print("🔍 Detected search/replace format - processing with DiffParser")
             return self._handle_search_replace_update(file_path, update_content)

@@ -3,6 +3,7 @@
 ## Quick Setup
 
 **Requirements:** Add to `requirements.txt`:
+
 ```
 openai
 python-dotenv
@@ -11,6 +12,7 @@ python-dotenv
 **Environment:** The `OPENROUTER_API_KEY` is automatically provided in all deployed backends.
 
 **Basic Client Setup:**
+
 ```python
 from openai import OpenAI
 import os
@@ -30,6 +32,7 @@ client = OpenAI(
 ## How Messages Work
 
 Messages are conversation arrays that the LLM processes:
+
 ```python
 messages = [
     {"role": "system", "content": "You are a helpful assistant that can use tools."},  # Instructions
@@ -171,6 +174,7 @@ def agent_chat(user_message: str, conversation_history: list = None):
 ## Available Models
 
 **Recommended Models (Cost vs Performance):**
+
 - `meta-llama/llama-3.1-8b-instruct` - Best for tools ($0.000015/1k)
 - `mistralai/mistral-nemo` - Good balance ($0.0000075/1k)
 - `meta-llama/llama-3.2-3b-instruct` - Cheapest ($0.000003/1k)
@@ -208,14 +212,17 @@ When you call `agent_chat("Get me all tasks for user 123 and tell me which ones 
 ### Real Application Examples
 
 #### 🎯 **Task Manager App**
+
 - **Basic**: "Show my tasks" → List of tasks
 - **AI-Powered**: "I'm overwhelmed with my project" → AI analyzes tasks, suggests priorities, breaks complex tasks into subtasks, updates database automatically
 
 #### 🛒 **E-commerce App**
+
 - **Basic**: "Show my orders" → Order history
 - **AI-Powered**: "I need something for my dinner party" → AI analyzes past preferences, suggests products, calculates quantities, creates shopping list
 
 #### 📊 **Business CRM**
+
 - **Basic**: "Show client info" → Client data
 - **AI-Powered**: "How should I approach this client?" → AI analyzes client history, suggests strategy, schedules follow-ups, creates action items
 
@@ -226,6 +233,7 @@ User Request → AI Analysis → Smart Action → Database Update → Intelligen
 ```
 
 Instead of just retrieving data, the AI:
+
 1. **Understands intent** behind user's request
 2. **Analyzes available data** for insights
 3. **Takes intelligent actions** (create, update, organize)
@@ -395,10 +403,10 @@ def chat_with_persistence(user_message: str, user_id: str):
     return result["response"]
 ```
 
-
 ## Implementation Rules
 
 ### 1. UI/UX Guidelines
+
 - **Always use non-streaming** for cleaner user experience
 - **Show skeleton loaders** while waiting for LLM response
 - **Different UI patterns** for different app types:
@@ -408,6 +416,7 @@ def chat_with_persistence(user_message: str, user_id: str):
 - **Store all messages** in database for persistence
 
 ### 2. Agent Implementation Rules
+
 - **Always use the universal agent pattern** (while loop with tools)
 - **Pass conversation history** for context in chat apps
 - **Return both response and conversation** for persistence
@@ -415,12 +424,14 @@ def chat_with_persistence(user_message: str, user_id: str):
 - **Use cheapest model** unless tools are required
 
 ### 3. Database Integration Rules
+
 - **Store complete conversation arrays** in JSON format
 - **Include metadata** (user_id, timestamps, app_context)
 - **Load conversation history** before each agent call in chat apps
 - **Save immediately** after each response
 
 ### 4. Frontend Integration Rules
+
 - **Show skeleton loader** immediately on user action
 - **Call non-streaming endpoint** from frontend
 - **Update UI** when response arrives
@@ -428,6 +439,7 @@ def chat_with_persistence(user_message: str, user_id: str):
 - **Sync with backend** for persistence
 
 ### 5. Error Handling Rules
+
 - **Always include try-catch** around LLM calls
 - **Provide fallback responses** if tools fail
 - **Log errors** but continue conversation
@@ -462,6 +474,7 @@ def streaming_agent_chat(user_message: str):
 ```
 
 **Streaming Properties:**
+
 - `chunk.choices[0].delta.content` - Text content (None if no content)
 - `chunk.choices[0].finish_reason` - "stop", "length", "tool_calls", or None
 - `chunk.choices[0].delta.tool_calls` - Tool calls (if any)

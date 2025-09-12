@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from cloud_storage import get_cloud_storage
 
 # Import the model system and project pool
 from agent_class import BoilerplatePersistentGroq, FrontendCommandInterrupt
@@ -31,6 +32,10 @@ from project_pool_manager import get_pool_manager
 
 # Import deployment modules
 from api.netlify_deployment import deploy_frontend_to_netlify
+from api.cloudflare_deployment import deploy_frontend_to_cloudflare
+
+# Import session tracking for token usage analysis
+# Stream session tracking now handled by token tracker's audit logging
 
 
 # =============================================================================
@@ -131,6 +136,26 @@ class NetlifyDeploymentResponse(BaseModel):
     env_vars: Optional[int] = None
     deployed_at: Optional[str] = None
     error: Optional[str] = None
+
+# CLOUDFLARE PAGES DEPLOYMENT API
+
+class CloudflareDeploymentRequest(BaseModel):
+    project_id: str
+    project_name: Optional[str] = None  # Auto-generated if not provided
+    environment: Optional[str] = "production"
+    env_vars: Optional[Dict[str, str]] = None  # Only for overrides, project .env is used by default
+
+class CloudflareDeploymentResponse(BaseModel):
+    status: str
+    project_id: str
+    deployment_url: Optional[str] = None
+    preview_url: Optional[str] = None
+    project_name: Optional[str] = None
+    environment: Optional[str] = None
+    logs: Optional[List[str]] = None
+    error_type: Optional[str] = None
+    message: Optional[str] = None
+    suggestions: Optional[List[str]] = None
 
 
 # Separate Azure storage clients for resource isolation
@@ -396,32 +421,69 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             secret_name = generate_modal_secret_name(short_app_name)
             env["MODAL_SECRET_NAME"] = secret_name
 
-            # Handle secrets creation for first deployment with fallback
+            # Handle secrets creation - ALWAYS ensure .env file and Modal secrets are synchronized
             secrets_created_successfully = True
-            final_secrets = {}  # Initialize to avoid undefined variable
+            final_secrets = {}
 
+            # STEP 1: Download and parse existing .env file to get current keys
+            print(f"📥 Reading existing .env file to ensure synchronization...")
+            env_path = "backend/.env"
+            existing_env = cloud_storage.download_file(request.project_id, env_path) or ""
+            
+            # Parse existing .env variables
+            env_vars = {}
+            for line in existing_env.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    env_vars[k] = v
+            
+            print(f"🔍 Found {len(env_vars)} existing keys in .env: {list(env_vars.keys())}")
+
+            # STEP 2: Define default secrets that should always exist
+            default_secrets = {
+                "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
+                "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
+                "APP_TITLE": request.app_title or "AI Generated Backend",
+                "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
+                "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
+                "EXA_API_KEY": "16fe8779-7264-44c1-a911-e8187cb629c6"
+            }
+
+            # STEP 3: Merge all sources in order of priority: .env existing > request.secrets > defaults
+            final_secrets = {**default_secrets}
+            if request.secrets:
+                final_secrets.update(request.secrets)
+            # Existing .env keys take highest priority (don't overwrite them)
+            for key, value in env_vars.items():
+                final_secrets[key] = value
+
+            print(f"🔗 Final secret set has {len(final_secrets)} keys: {list(final_secrets.keys())}")
+
+            # STEP 4: Update .env file with complete key set
+            new_env_lines = []
+            for k, v in sorted(final_secrets.items()):
+                if ' ' in v or '"' in v:
+                    v = v.replace('"', '\\"')
+                    new_env_lines.append(f'{k}="{v}"')
+                else:
+                    new_env_lines.append(f'{k}={v}')
+            
+            new_env_content = '\n'.join(new_env_lines) + '\n'
+            cloud_storage.upload_file(request.project_id, env_path, new_env_content)
+            print(f"✅ Updated .env with {len(final_secrets)} synchronized keys")
+
+            # STEP 5: Create Modal secrets using the synchronized key set
             if not request.redeployment:
                 print(f"🔐 Creating Modal secrets for first deployment")
 
-                default_secrets = {
-                    "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
-                    "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
-                    "APP_TITLE": request.app_title or "AI Generated Backend",
-                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
-                    "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
-                    "EXA_API_KEY": "16fe8779-7264-44c1-a911-e8187cb629c6"
-                }
-
-                final_secrets = {**default_secrets}
-                if request.secrets:
-                    final_secrets.update(request.secrets)
-
-                # Try to create secrets, but fallback to redeployment if it fails
                 try:
                     secrets_request = ModalSecretsRequest(
                         secret_name=secret_name,
                         secrets=final_secrets,
-                        overwrite=False  # Don't try to delete - we know secrets don't exist
+                        overwrite=False
                     )
                     secrets_result = await create_modal_secrets_standalone(secrets_request)
 
@@ -437,24 +499,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
                     print(f"🔄 Falling back to redeployment mode (secrets may already exist)")
                     secrets_created_successfully = False
             else:
-                print(f"🔄 Redeployment mode: checking if secrets exist...")
-
-                # For redeployments, we still need to ensure secrets exist
-                # Set up default secrets in case they need to be created
-                default_secrets = {
-                    "SECRET_KEY": f"auto-generated-key-{request.app_name}-{hash(request.project_id) % 10000}",
-                    "DATABASE_NAME": request.database_name or f"{request.app_name}_database.db",
-                    "APP_TITLE": request.app_title or "AI Generated Backend",
-                    "APP_DESCRIPTION": request.app_description or "Auto-generated FastAPI backend",
-                    "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
-                    "EXA_API_KEY": "16fe8779-7264-44c1-a911-e8187cb629c6"
-                }
-
-                final_secrets = {**default_secrets}
-                if request.secrets:
-                    final_secrets.update(request.secrets)
-
-                # Skip secret creation for now, but we'll handle missing secrets after deployment fails
+                print(f"🔄 Redeployment mode: .env synchronized, secrets should exist...")
                 secrets_created_successfully = False
 
             # Change to project directory and deploy with REAL Modal CLI
@@ -464,7 +509,7 @@ async def _execute_modal_deployment(request: ModalDeploymentRequest) -> ModalDep
             try:
                 print(f"🚀 REAL Modal deployment starting...")
 
-                # Run ACTUAL modal deploy command
+                # Run ACTUAL modal deploy command with virtual environment
                 proc = await asyncio.create_subprocess_exec(
                     "modal", "deploy", "app.py",
                     stdout=asyncio.subprocess.PIPE,
@@ -723,6 +768,10 @@ def create_app():
             # File tracking for this streaming session
             self.files_created = []  # List of file paths created
             self.files_updated = []  # List of file paths updated
+            
+            # Session tracking for token usage analysis
+            self.session_id = None
+            self.initial_token_state = None
 
             # Load existing streaming chunks from this conversation (cumulative approach)
             project_id = getattr(model_system, 'project_id', None)
@@ -740,10 +789,34 @@ def create_app():
 
             self.last_save_count = len(self.streaming_chunks)  # Track baseline for saves
 
-        async def stream_response(self, message: str) -> AsyncGenerator[str, None]:
+        async def stream_response(self, message) -> AsyncGenerator[str, None]:
             """Stream the model response with action tracking"""
             try:
-                print(f"🌊 Starting stream_response for: {message[:30]}...")
+                # Handle both string messages and content arrays
+                if isinstance(message, list):
+                    # Extract text from content array for preview
+                    text_content = ""
+                    for item in message:
+                        if item.get("type") == "text":
+                            text_content = item.get("text", "")
+                            break
+                    print(f"🌊 Starting stream_response for content array with text: {text_content[:30]}...")
+                else:
+                    print(f"🌊 Starting stream_response for: {message[:30]}...")
+                
+                # Start token tracker session for audit logging
+                project_id = getattr(self.model_system, 'project_id', None) or "unknown"
+                if hasattr(self.model_system, '_token_tracker') and self.model_system._token_tracker:
+                    # Generate session ID based on conversation and timestamp
+                    session_id = f"{self.conversation_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    self.session_id = self.model_system._token_tracker.start_session(session_id)
+                    print(f"🎯 Token audit session started: {self.session_id}")
+                
+                # Capture initial token state
+                if hasattr(self.model_system, '_token_tracker') and self.model_system._token_tracker:
+                    self.initial_token_state = self.model_system._token_tracker.get_token_usage()
+                    print(f"🎯 Session {self.session_id}: Initial token state captured - {self.initial_token_state.get('total_tokens', 0):,} tokens")
+                
                 # Use a simple thread-safe queue
                 import queue
                 stream_queue = queue.Queue()
@@ -967,6 +1040,13 @@ def create_app():
                     "message": "Failed to initialize streaming"
                 }, self.conversation_id)
             finally:
+                # End token tracker session for audit logging
+                if hasattr(self.model_system, '_token_tracker') and self.model_system._token_tracker:
+                    try:
+                        self.model_system._token_tracker.end_session()
+                    except Exception as e:
+                        print(f"⚠️ Failed to end token tracking session: {e}")
+                
                 # Batch save all streaming chunks to Azure at the end
                 await self._save_streaming_chunks_batch()
 
@@ -983,7 +1063,7 @@ def create_app():
 
                 # Call the actual processing method with streaming callback (now async!)
                 if hasattr(self.model_system, '_process_update_request_with_interrupts'):
-                    result = await self.model_system._process_update_request_with_interrupts(message, streaming_callback=stream_callback)
+                    result = await self.model_system._process_update_request_with_interrupts(message, mode=mode, streaming_callback=stream_callback)
 
                     # Save conversation history
                     if hasattr(self.model_system, '_save_conversation_history'):
@@ -1139,11 +1219,11 @@ def create_app():
             del conversation_metadata[conversation_id]
         return {"status": "deleted", "conversation_id": conversation_id}
 
-    async def process_request_with_images(request: ConversationRequest, conversation_id: str) -> str:
-        """Process images and format message for LLM consumption"""
+    async def process_request_with_images(request: ConversationRequest, conversation_id: str) -> tuple:
+        """Process images and return (formatted_message, image_urls)"""
         if not request.images or len(request.images) == 0:
-            # No images, return original message
-            return request.message
+            # No images, return original message and empty list
+            return request.message, []
 
         print(f"🖼️ Processing {len(request.images)} images for conversation {conversation_id}")
 
@@ -1164,23 +1244,18 @@ def create_app():
 
         if not image_urls:
             # No images uploaded successfully, return original message
-            return request.message
+            return request.message, []
 
-        # Format message with proper structure for LLM
-        # The agent will receive this and parse it properly for the messages array
-        formatted_content = {
-            "text": request.message,
-            "images": image_urls
-        }
+        # Create OpenAI format content array
+        content_array = [{"type": "text", "text": request.message}]
+        for url in image_urls:
+            content_array.append({
+                "type": "image_url", 
+                "image_url": {"url": url}
+            })
 
-        # Convert to a format the agent can understand
-        # We'll use a special marker that the agent can detect and format properly
-        import json
-        image_data = json.dumps({"image_urls": image_urls})
-        formatted_message = f"[IMAGE_DATA]{image_data}[/IMAGE_DATA]{request.message}"
-
-        print(f"📝 Formatted message with {len(image_urls)} images")
-        return formatted_message
+        print(f"📝 Created content array with {len(image_urls)} images")
+        return content_array, image_urls
 
     @app.post("/chat/stream")
     async def stream_chat(request: ConversationRequest):
@@ -1219,7 +1294,7 @@ def create_app():
                     print(f"🚀 Initializing create mode")
                     pool_manager = get_pool_manager()
 
-                    # Try to get an available project from the pool
+                    # Try to get an available project from the pool (needs to be sync - we need the result)
                     pooled_project_id = pool_manager.get_available_project(conversation_id, request.message)
 
                     if pooled_project_id:
@@ -1233,8 +1308,8 @@ def create_app():
                             project_id=pooled_project_id  # Use pooled project directly
                         )
 
-                        # Mark project as active in the pool
-                        pool_manager.mark_project_active(pooled_project_id)
+                        # Mark project as active in the pool (non-blocking fire-and-forget)
+                        await pool_manager.mark_project_active_async(pooled_project_id)
 
                         initialization_time = datetime.now()
                         print(f"⚡ Total initialization time: {(initialization_time - start_time).total_seconds():.3f}s")
@@ -1267,7 +1342,12 @@ def create_app():
             # Update message count
             conversation_metadata[conversation_id]["message_count"] += 1
 
+            # Process images if present BEFORE saving to history
+            message_content, image_urls = await process_request_with_images(request, conversation_id)
+            print(f"🐛 DEBUG: message_content type: {type(message_content)}, content: {message_content if isinstance(message_content, str) else 'ARRAY'}")
+
             # Save user message to streaming conversation history (avoid command results)
+            user_message_chunk = None  # Initialize outside try block
             if not is_action_result:
                 try:
                     from cloud_storage import AzureBlobStorage
@@ -1276,10 +1356,11 @@ def create_app():
                     project_id = request.project_id or getattr(model_system, 'project_id', None)
                     
                     if project_id:
+                        # Use the same content array from image processing
                         user_message_chunk = {
                             "type": "user_message",
                             "data": {
-                                "content": request.message,
+                                "content": message_content if isinstance(message_content, list) else [{"type": "text", "text": message_content}],
                                 "message_type": "user"
                             },
                             "conversation_id": conversation_id,
@@ -1307,10 +1388,13 @@ def create_app():
 
                     project_id = getattr(model_system, 'project_id', None)
                     if project_id:
+                        # Command results are text only, but keep consistent format
+                        content_array = [{"type": "text", "text": request.message}]
+                        
                         command_result_chunk = {
                             "type": "user_message",
                             "data": {
-                                "content": request.message,
+                                "content": content_array,
                                 "message_type": "user"
                             },
                             "conversation_id": conversation_id,
@@ -1334,16 +1418,18 @@ def create_app():
 
             # Create streaming wrapper
             streaming_wrapper = StreamingModelWrapper(model_system, conversation_id)
+            
+            # Add user message chunk to wrapper's streaming chunks for update mode
+            if user_message_chunk is not None:
+                streaming_wrapper.streaming_chunks.append(user_message_chunk)
+                print(f"📝 Added user message to streaming chunks (total: {len(streaming_wrapper.streaming_chunks)})")
 
             # Add timing context to wrapper
             streaming_wrapper.request_start_time = start_time
 
-            # Process images if present and create formatted message
-            formatted_message = await process_request_with_images(request, conversation_id)
-
             # Return streaming response
             return StreamingResponse(
-                streaming_wrapper.stream_response(formatted_message),
+                streaming_wrapper.stream_response(message_content),
                 media_type="text/plain",
                 headers={
                     "Cache-Control": "no-cache",
@@ -2064,6 +2150,55 @@ def create_app():
                 error=error_msg
             )
 
+    @app.post("/cloudflare/deploy", response_model=CloudflareDeploymentResponse)
+    async def deploy_frontend_to_cloudflare_api(request: CloudflareDeploymentRequest):
+        """Deploy frontend to Cloudflare Pages"""
+        try:
+            print(f"🚀 Starting Cloudflare Pages deployment for project: {request.project_id}")
+            
+            # Call the deployment function
+            result = deploy_frontend_to_cloudflare(
+                project_id=request.project_id,
+                project_name=request.project_name,
+                environment=request.environment,
+                custom_env_vars=request.env_vars
+            )
+            
+            if result.get("status") == "success":
+                print(f"✅ Cloudflare Pages deployment completed successfully")
+                
+                return CloudflareDeploymentResponse(
+                    status="success",
+                    project_id=request.project_id,
+                    deployment_url=result.get("deployment_url"),
+                    preview_url=result.get("preview_url"),
+                    project_name=result.get("project_name"),
+                    environment=result.get("environment"),
+                    logs=result.get("logs", [])
+                )
+            else:
+                print(f"❌ Cloudflare Pages deployment failed: {result.get('message')}")
+                
+                return CloudflareDeploymentResponse(
+                    status="error",
+                    project_id=request.project_id,
+                    error_type=result.get("error_type"),
+                    message=result.get("message"),
+                    suggestions=result.get("suggestions", []),
+                    logs=result.get("logs", [])
+                )
+            
+        except Exception as e:
+            error_msg = f"Cloudflare Pages deployment failed: {str(e)}"
+            print(f"❌ {error_msg}")
+            
+            return CloudflareDeploymentResponse(
+                status="error",
+                project_id=request.project_id,
+                message=error_msg,
+                error_type="unexpected_error"
+            )
+
     @app.get("/modal/apps")
     async def list_modal_apps():
         """List deployed Modal.com apps"""
@@ -2202,8 +2337,8 @@ def create_app():
                 # Use dedicated general Azure client (separate from streaming)
                 cloud_storage = get_general_azure_client()
 
-                # Load project metadata
-                metadata = cloud_storage.load_project_metadata(project_id)
+                # Load project metadata (async, non-blocking)
+                metadata = await asyncio.to_thread(cloud_storage.load_project_metadata, project_id)
                 if not metadata:
                     return {
                         "status": "error",
@@ -2750,101 +2885,162 @@ def create_app():
     # Add secrets and redeploy backend
     @app.post("/projects/{project_id}/backend/secrets/update")
     async def update_backend_secrets_and_redeploy(project_id: str, secrets: Dict[str, str]):
-            """Add/update individual backend secrets without replacing existing ones"""
-            try:
-                import asyncio
+        """Add/update individual backend secrets without replacing existing ones"""
+        try:
+            import asyncio
+            from utils.crypto_utils import decrypt_data
 
-                # Use general Azure client for non-streaming operations
-                cloud_storage = get_general_azure_client()
-
-                # Load existing project metadata
-                metadata = cloud_storage.load_project_metadata(project_id)
-                if not metadata or not metadata.get("backend_deployment"):
-                    return {
-                        "status": "error",
-                        "error": "No backend deployment found for this project",
-                        "project_id": project_id
-                    }
-
-                backend_deployment = metadata["backend_deployment"]
-                secret_name = backend_deployment.get("secret_name")
-                app_name = backend_deployment["app_name"]
-
-                if not secret_name:
-                    return {
-                        "status": "error",
-                        "error": "No secret name found in backend deployment info",
-                        "project_id": project_id
-                    }
-
-                print(f"🔐 Adding new secrets to existing Modal secret: {secret_name}")
-
-                # Add each new secret variable individually using modal secret set
-                updated_secrets = []
-                failed_secrets = []
-
-                for key, value in secrets.items():
+            # Use general Azure client for non-streaming operations
+            cloud_storage = get_general_azure_client()
+            
+            # Process and decrypt secrets if needed
+            decrypted_secrets = {}
+            for key, value in secrets.items():
+                # Check if value is encrypted (base64 string > 100 chars)
+                if isinstance(value, str) and len(value) > 100:
                     try:
-                        print(f"🔑 Adding secret: {key}")
-
-                        # Use modal secret set to ADD this variable to existing secret
-                        proc = await asyncio.create_subprocess_exec(
-                            "modal", "secret", "set", secret_name, f"{key}={value}",
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                        stdout = stdout.decode('utf-8') if stdout else ""
-                        stderr = stderr.decode('utf-8') if stderr else ""
-
-                        if proc.returncode == 0:
-                            print(f"✅ Successfully added secret: {key}")
-                            updated_secrets.append(key)
-                        else:
-                            print(f"❌ Failed to add secret {key}: {stderr}")
-                            failed_secrets.append({"key": key, "error": stderr})
-
-                    except Exception as e:
-                        print(f"❌ Error adding secret {key}: {e}")
-                        failed_secrets.append({"key": key, "error": str(e)})
-
-                # Update metadata with new secret keys (add to existing list)
-                current_secret_keys = backend_deployment.get("secret_keys", [])
-                new_secret_keys = list(set(current_secret_keys + updated_secrets))  # Remove duplicates
-
-                # Update backend deployment info in metadata
-                backend_deployment["secret_keys"] = new_secret_keys
-                backend_deployment["last_secrets_update"] = datetime.now().isoformat()
-
-                # Save updated metadata
-                metadata["backend_deployment"] = backend_deployment
-                cloud_storage.save_project_metadata(project_id, metadata)
-
-                if updated_secrets:
-                    return {
-                        "status": "success",
-                        "message": f"Successfully added {len(updated_secrets)} secret(s) to existing backend",
-                        "app_name": app_name,
-                        "secret_name": secret_name,
-                        "updated_secrets": updated_secrets,
-                        "failed_secrets": failed_secrets,
-                        "project_id": project_id
-                    }
+                        # Try to decrypt
+                        decrypted_value = decrypt_data(value)
+                        decrypted_secrets[key] = decrypted_value
+                        print(f"🔓 Decrypted: {key}")
+                    except:
+                        # Not encrypted or decryption failed, use as is
+                        decrypted_secrets[key] = value
                 else:
-                    return {
-                        "status": "error",
-                        "error": "Failed to add any secrets",
-                        "failed_secrets": failed_secrets,
-                        "project_id": project_id
-                    }
+                    decrypted_secrets[key] = value
+            
+            # Update .env file in cloud storage
+            env_path = "backend/.env"
+            existing_env = cloud_storage.download_file(project_id, env_path) or ""
+            
+            # Parse existing .env
+            env_vars = {}
+            for line in existing_env.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    env_vars[k] = v
+            
+            # Add new secrets
+            env_vars.update(decrypted_secrets)
+            
+            # Build new .env content
+            new_env = []
+            for k, v in sorted(env_vars.items()):
+                if ' ' in v or '"' in v:
+                    v = v.replace('"', '\\"')
+                    new_env.append(f'{k}="{v}"')
+                else:
+                    new_env.append(f'{k}={v}')
+            
+            new_env_content = '\n'.join(new_env) + '\n'
+            
+            # Upload updated .env
+            cloud_storage.upload_file(project_id, env_path, new_env_content)
+            print(f"✅ Updated .env with {len(decrypted_secrets)} secrets")
+            
+            # Use decrypted secrets for Modal
+            secrets = decrypted_secrets
 
-            except Exception as e:
+            # Load existing project metadata
+            metadata = cloud_storage.load_project_metadata(project_id)
+            if not metadata or not metadata.get("backend_deployment"):
                 return {
                     "status": "error",
-                    "error": str(e),
+                    "error": "No backend deployment found for this project",
                     "project_id": project_id
                 }
+
+            backend_deployment = metadata["backend_deployment"]
+            secret_name = backend_deployment.get("secret_name")
+            app_name = backend_deployment["app_name"]
+
+            if not secret_name:
+                return {
+                    "status": "error",
+                    "error": "No secret name found in backend deployment info",
+                    "project_id": project_id
+                }
+
+            print(f"🔐 Adding new secrets to existing Modal secret: {secret_name}")
+
+            try:
+                # Step 1: Use all environment variables from .env file as the complete secret set
+                # This ensures we don't lose any existing keys and have the most up-to-date values
+                print(f"🔍 Using .env file variables as complete secret set for: {secret_name}")
+                print(f"📋 Total environment variables: {list(env_vars.keys())}")
+                
+                # Step 2: Create secret args from all .env variables (which now includes new secrets)
+                secret_args = []
+                for key, value in env_vars.items():
+                    # Escape any special characters in values
+                    escaped_value = value.replace('"', '\\"') if '"' in value else value
+                    secret_args.append(f"{key}={escaped_value}")
+                
+                print(f"🔗 Creating Modal secret with {len(secret_args)} total keys")
+                
+                # Step 3: Recreate the secret with all .env keys using --force
+                create_proc = await asyncio.create_subprocess_exec(
+                    "modal", "secret", "create", "--force", secret_name, *secret_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+
+                stdout, stderr = await asyncio.wait_for(create_proc.communicate(), timeout=30)
+                stdout = stdout.decode('utf-8') if stdout else ""
+                stderr = stderr.decode('utf-8') if stderr else ""
+
+                if create_proc.returncode == 0:
+                    print(f"✅ Successfully updated secret with new keys: {list(secrets.keys())}")
+                    updated_secrets = list(secrets.keys())
+                    failed_secrets = []
+                else:
+                    print(f"❌ Failed to update secret: {stderr}")
+                    updated_secrets = []
+                    failed_secrets = [{"key": "all", "error": stderr}]
+
+            except Exception as e:
+                print(f"❌ Error updating secrets: {e}")
+                updated_secrets = []
+                failed_secrets = [{"key": "all", "error": str(e)}]
+
+            # Update metadata with all secret keys from .env file
+            all_secret_keys = list(env_vars.keys())  # Use all keys from .env as the complete list
+
+            # Update backend deployment info in metadata
+            backend_deployment["secret_keys"] = all_secret_keys
+            backend_deployment["last_secrets_update"] = datetime.now().isoformat()
+
+            # Save updated metadata
+            metadata["backend_deployment"] = backend_deployment
+            cloud_storage.save_project_metadata(project_id, metadata)
+
+            if updated_secrets:
+                return {
+                    "status": "success",
+                    "message": f"Successfully added {len(updated_secrets)} secret(s) to existing backend",
+                    "app_name": app_name,
+                    "secret_name": secret_name,
+                    "updated_secrets": updated_secrets,
+                    "failed_secrets": failed_secrets,
+                    "project_id": project_id
+                }
+            else:
+                return {
+                    "status": "error",
+                    "error": "Failed to add any secrets",
+                    "failed_secrets": failed_secrets,
+                    "project_id": project_id
+                }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "project_id": project_id
+            }
 
     @app.get("/{project_id}/server_info")
     async def get_server_info(project_id: str):
@@ -3010,6 +3206,9 @@ if __name__ == "__main__":
     print("  POST /{project_id}/server_info - Queue logs/network (ULTRA-FAST)")
     print("  GET /{project_id}/logs/{type} - Retrieve stored logs/network data")
     print("  GET /queue/status - Background queue statistics")
+    print("  POST /modal/deploy - Deploy backend to Modal.com")
+    print("  POST /netlify/deploy - Deploy frontend to Netlify")
+    print("  POST /cloudflare/deploy - Deploy frontend to Cloudflare Pages")
     print("=" * 50)
 
     app = create_app()

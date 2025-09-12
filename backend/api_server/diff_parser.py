@@ -162,6 +162,11 @@ class DiffParser:
             - successes: List of successful replacements  
             - failures: List of detailed failure messages with fix instructions
         """
+        # CRITICAL: Validate input content for obvious corruption first
+        validation_error = DiffParser._validate_search_replace_content(update_content)
+        if validation_error:
+            return file_content, [], [f"❌ MALFORMED SEARCH/REPLACE CONTENT DETECTED: {validation_error}"]
+        
         # Parse the update content for search/replace pairs
         search_replace_pairs = DiffParser.parse_diff_content(update_content)
         
@@ -172,12 +177,17 @@ class DiffParser:
         for i, (search_text, replace_text) in enumerate(search_replace_pairs):
             if search_text is None:
                 # Legacy format - replace entire file
-                current_content = replace_text
+                # CRITICAL: Sanitize replacement content to ensure no search/replace markers
+                sanitized_replace_text = DiffParser._sanitize_content(replace_text)
+                current_content = sanitized_replace_text
                 successes.append("Replaced entire file content")
             else:
+                # CRITICAL: Sanitize replacement text before applying
+                sanitized_replace_text = DiffParser._sanitize_content(replace_text)
+                
                 # Apply search/replace
                 new_content, success = DiffParser.apply_search_replace(
-                    current_content, search_text, replace_text
+                    current_content, search_text, sanitized_replace_text
                 )
                 
                 if success:
@@ -192,7 +202,15 @@ class DiffParser:
                     )
                     failures.append(detailed_error)
         
-        return current_content, successes, failures
+        # CRITICAL: Final sanitization check - ensure no search/replace markers in final content
+        final_content = DiffParser._sanitize_content(current_content)
+        
+        # Verify final content integrity
+        if DiffParser._has_search_replace_markers(final_content):
+            print("🚨 CRITICAL ERROR: Final content still contains search/replace markers!")
+            return file_content, [], ["❌ CRITICAL SAFETY CHECK FAILED: Processed content contains search/replace markers. File update blocked to prevent corruption."]
+        
+        return final_content, successes, failures
     
     @staticmethod
     def _generate_detailed_search_failure_message(search_text: str, file_content: str, block_number: int) -> str:
@@ -318,36 +336,325 @@ class DiffParser:
     def _parse_direct_search_replace(content: str) -> List[Tuple[str, str]]:
         """
         Parse direct search/replace format without <diff> tags
+        Handles multiple blocks with mixed formats in the same content
         
-        Handles formats like:
-        ------- SEARCH
-        old content
-        =======
-        new content
-        +++++++ REPLACE
+        Supported formats:
+        1. ------- SEARCH ... ======= ... +++++++ REPLACE
+        2. ------- SEARCH ... >>>>>>> REPLACE ... (with replacement after)
+        3. ------- SEARCH ... ======= ... >>>>>>> REPLACE  
+        4. ------- SEARCH ... ======= ... (implicit end)
         
         Returns:
             List of (search_text, replace_text) tuples
         """
         search_replace_pairs = []
         
-        # Pattern for ------- SEARCH ... ======= ... +++++++ REPLACE format
-        pattern1 = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n\+{7}\s*REPLACE'
-        matches = re.findall(pattern1, content, re.DOTALL)
+        # Split content into potential blocks based on SEARCH markers
+        blocks = re.split(r'(?=-------\s*SEARCH)', content)
+        blocks = [b for b in blocks if b.strip()]  # Remove empty blocks
         
-        for search_text, replace_text in matches:
-            search_text = search_text.rstrip('\n')
-            replace_text = replace_text.rstrip('\n')
-            search_replace_pairs.append((search_text, replace_text))
-        
-        # Pattern for ------- SEARCH ... ======= ... (without +++++++ REPLACE)
-        if not search_replace_pairs:
-            pattern2 = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)(?=\n-------\s*SEARCH|\Z)'
-            matches = re.findall(pattern2, content, re.DOTALL)
+        for block in blocks:
+            if not block.strip().startswith('-------'):
+                print(f"⚠️ Skipping block that doesn't start with SEARCH marker: {block[:50]}...")
+                continue
+                
+            # CRITICAL: Pre-validate block for obvious corruption
+            if DiffParser._is_block_corrupted(block):
+                print(f"⚠️ Skipping corrupted block: {block[:100]}...")
+                continue
+                
+            # Try each pattern on the individual block
+            block_processed = False
             
-            for search_text, replace_text in matches:
-                search_text = search_text.rstrip('\n')
-                replace_text = replace_text.rstrip('\n')
-                search_replace_pairs.append((search_text, replace_text))
+            # Pattern 1: ------- SEARCH ... >>>>>>> REPLACE ... (replacement after marker)
+            if not block_processed:
+                pattern = r'-------\s*SEARCH\s*\n(.*?)\n>{7}\s*REPLACE\s*\n(.*?)$'
+                match = re.search(pattern, block, re.DOTALL)
+                if match:
+                    search_text = match.group(1).rstrip('\n')
+                    replace_text = match.group(2).rstrip('\n')
+                    
+                    # CRITICAL: Validate extracted content
+                    if DiffParser._validate_extracted_content(search_text, replace_text):
+                        search_replace_pairs.append((search_text, replace_text))
+                        block_processed = True
+                        print(f"✅ Parsed block with >>>>>>> REPLACE format")
+                    else:
+                        print(f"⚠️ Skipping invalid extracted content from >>>>>>> REPLACE block")
+            
+            # Pattern 2: ------- SEARCH ... ======= ... >>>>>>> REPLACE
+            if not block_processed:
+                pattern = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>{7}\s*REPLACE'
+                match = re.search(pattern, block, re.DOTALL)
+                if match:
+                    search_text = match.group(1).rstrip('\n')
+                    replace_text = match.group(2).rstrip('\n')
+                    
+                    # CRITICAL: Validate extracted content
+                    if DiffParser._validate_extracted_content(search_text, replace_text):
+                        search_replace_pairs.append((search_text, replace_text))
+                        block_processed = True
+                        print(f"✅ Parsed block with ======= / >>>>>>> REPLACE format")
+                    else:
+                        print(f"⚠️ Skipping invalid extracted content from ======= / >>>>>>> REPLACE block")
+            
+            # Pattern 3: ------- SEARCH ... ======= ... +++++++ REPLACE
+            if not block_processed:
+                pattern = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n\+{7}\s*REPLACE'
+                match = re.search(pattern, block, re.DOTALL)
+                if match:
+                    search_text = match.group(1).rstrip('\n')
+                    replace_text = match.group(2).rstrip('\n')
+                    
+                    # Clean replacement text of any separator artifacts
+                    replace_lines = replace_text.split('\n')
+                    clean_replace_lines = []
+                    for line in replace_lines:
+                        if line.strip() == "=======":
+                            print(f"⚠️ Removing separator artifact from replacement content: '{line}'")
+                            continue
+                        clean_replace_lines.append(line)
+                    
+                    clean_replace_text = '\n'.join(clean_replace_lines)
+                    
+                    # CRITICAL: Validate extracted content
+                    if DiffParser._validate_extracted_content(search_text, clean_replace_text):
+                        search_replace_pairs.append((search_text, clean_replace_text))
+                        block_processed = True
+                        print(f"✅ Parsed block with ======= / +++++++ REPLACE format")
+                    else:
+                        print(f"⚠️ Skipping invalid extracted content from ======= / +++++++ REPLACE block")
+            
+            # Pattern 4: ------- SEARCH ... ======= ... (implicit end)
+            if not block_processed:
+                pattern = r'-------\s*SEARCH\s*\n(.*?)\n=======\s*\n(.*?)$'
+                match = re.search(pattern, block, re.DOTALL)
+                if match:
+                    search_text = match.group(1).rstrip('\n')
+                    replace_text = match.group(2).rstrip('\n')
+                    
+                    # Skip if replacement is just separator artifacts or empty
+                    if replace_text.strip() not in ["=======", ""] and DiffParser._validate_extracted_content(search_text, replace_text):
+                        search_replace_pairs.append((search_text, replace_text))
+                        block_processed = True
+                        print(f"✅ Parsed block with implicit end format")
+                    else:
+                        print(f"⚠️ Skipping malformed block with empty/separator replacement or invalid content")
+            
+            if not block_processed:
+                print(f"⚠️ Could not parse search/replace block: {block[:100]}...")
         
         return search_replace_pairs
+    
+    @staticmethod
+    def _validate_search_replace_content(content: str) -> Optional[str]:
+        """
+        Validate search/replace content for obvious corruption/malformation
+        
+        Returns:
+            Error message if content is malformed, None if valid
+        """
+        # Check for obvious signs of corruption
+        
+        # Count various markers to detect malformation
+        search_count = content.count('------- SEARCH')
+        equals_count = content.count('=======')
+        plus_replace_count = content.count('+++++++ REPLACE')
+        arrow_replace_count = content.count('>>>>>>> REPLACE')
+        
+        # Detect duplicate markers (sign of malformation)
+        if arrow_replace_count > search_count * 2:  # Too many arrow markers
+            return f"Too many >>>>>>> REPLACE markers ({arrow_replace_count}) relative to SEARCH blocks ({search_count})"
+        
+        # Check for orphaned markers (markers without proper pairs)
+        if equals_count > 0 and search_count == 0:
+            return "Found ======= markers without corresponding ------- SEARCH markers"
+        
+        if (plus_replace_count > 0 or arrow_replace_count > 0) and search_count == 0:
+            return "Found REPLACE markers without corresponding ------- SEARCH markers"
+        
+        # Check for obvious malformed patterns
+        malformed_patterns = [
+            r'>{7}\s*REPLACE\s*\n>{7}\s*REPLACE',  # Duplicate arrow replace markers
+            r'={7}\s*\n={7}',  # Duplicate equals markers
+            r'>{7}\s*REPLACE[^a-zA-Z0-9\s]*import',  # REPLACE marker immediately followed by import (corruption)
+        ]
+        
+        for pattern in malformed_patterns:
+            if re.search(pattern, content):
+                return f"Detected malformed pattern: {pattern}"
+        
+        # Check for content that starts with markers (likely corruption)
+        if content.strip().startswith(('=======', '>>>>>>> REPLACE', '+++++++ REPLACE')):
+            return "Content starts with REPLACE marker (likely corrupted)"
+        
+        return None
+    
+    @staticmethod
+    def _sanitize_content(content: str) -> str:
+        """
+        Remove any search/replace markers from content to prevent corruption
+        
+        Args:
+            content: Content that may contain markers
+            
+        Returns:
+            Sanitized content with all search/replace markers removed
+        """
+        if not content:
+            return content
+        
+        # List of all possible search/replace markers to remove
+        markers_to_remove = [
+            r'-------\s*SEARCH\s*\n?',
+            r'=======\s*\n?',
+            r'\+{7}\s*REPLACE\s*\n?',
+            r'>{7}\s*REPLACE\s*\n?',
+            r'<{7}\s*SEARCH\s*\n?',
+            r'@{3}\s*SEARCH\s*\n?',
+            r'@{3}\s*\n?',
+        ]
+        
+        sanitized = content
+        for marker_pattern in markers_to_remove:
+            sanitized = re.sub(marker_pattern, '', sanitized)
+        
+        # Remove any standalone marker lines
+        lines = sanitized.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            # Skip lines that are just markers
+            if stripped in ['=======', '>>>>>>> REPLACE', '+++++++ REPLACE', '------- SEARCH']:
+                print(f"🧹 Sanitized marker line: '{stripped}'")
+                continue
+            clean_lines.append(line)
+        
+        result = '\n'.join(clean_lines)
+        
+        # Log if we removed anything
+        if result != content:
+            print(f"🧹 Sanitized content: removed {len(content) - len(result)} characters of markers")
+        
+        return result
+    
+    @staticmethod
+    def _has_search_replace_markers(content: str) -> bool:
+        """
+        Check if content contains search/replace markers
+        
+        Returns:
+            True if markers are found, False otherwise
+        """
+        if not content:
+            return False
+        
+        marker_patterns = [
+            r'-------\s*SEARCH',
+            r'={7}',
+            r'\+{7}\s*REPLACE',
+            r'>{7}\s*REPLACE',
+            r'<{7}\s*SEARCH',
+            r'@{3}\s*SEARCH',
+        ]
+        
+        for pattern in marker_patterns:
+            if re.search(pattern, content):
+                return True
+                
+        return False
+    
+    @staticmethod
+    def _is_block_corrupted(block: str) -> bool:
+        """
+        Check if a search/replace block is obviously corrupted
+        
+        Returns:
+            True if block is corrupted, False otherwise
+        """
+        if not block:
+            return True
+        
+        # Check for obvious corruption patterns
+        corruption_patterns = [
+            r'>{7}\s*REPLACE\s*[^\n]*>{7}\s*REPLACE',  # Duplicate consecutive REPLACE markers
+            r'={7}\s*[^\n]*={7}',  # Duplicate consecutive equals markers (but not spaced)
+            r'REPLACE[^a-zA-Z0-9\s]*import',  # REPLACE marker directly before import (corruption)
+            r'\A>{7}\s*REPLACE',  # Block starts with REPLACE marker (use \A for start of string)
+            r'\A={7}',  # Block starts with equals marker (use \A for start of string)
+        ]
+        
+        for pattern in corruption_patterns:
+            # Don't use MULTILINE for start-of-string patterns
+            flags = 0 if pattern.startswith(r'\A') else re.MULTILINE
+            if re.search(pattern, block, flags):
+                return True
+        
+        # Check marker ratios (should be balanced)
+        search_markers = block.count('------- SEARCH')
+        replace_arrow = block.count('>>>>>>> REPLACE')
+        replace_plus = block.count('+++++++ REPLACE')
+        equals = block.count('=======')
+        
+        # A block should have exactly 1 SEARCH marker
+        if search_markers != 1:
+            return True
+        
+        # Should have reasonable marker balance - but allow either arrow or plus, not both excessively
+        total_replace_markers = replace_arrow + replace_plus
+        if total_replace_markers > 1:  # One block should have exactly 1 replace marker
+            # But allow for some cases where there might be 1 arrow + 1 plus in complex patterns
+            if replace_arrow > 1 or replace_plus > 1:  # Multiple of the same type is definitely corruption
+                return True
+        
+        # Multiple equals are OK as long as they're properly spaced (not consecutive corruption)
+        if equals > 2:  # Too many equals markers for one block
+            return True
+        
+        return False
+    
+    @staticmethod
+    def _validate_extracted_content(search_text: str, replace_text: str) -> bool:
+        """
+        Validate extracted search and replace text to ensure they're clean
+        
+        Returns:
+            True if content is valid, False otherwise
+        """
+        if search_text is None or replace_text is None:
+            return False
+        
+        # Check if extracted content still contains markers (sign of bad parsing)
+        if DiffParser._has_search_replace_markers(search_text):
+            print(f"⚠️ Search text contains markers - bad extraction: {search_text[:50]}...")
+            return False
+        
+        if DiffParser._has_search_replace_markers(replace_text):
+            print(f"⚠️ Replace text contains markers - bad extraction: {replace_text[:50]}...")
+            return False
+        
+        # Search text should not be empty (replace text can be empty for deletion)
+        if not search_text.strip():
+            print(f"⚠️ Search text is empty - invalid block")
+            return False
+        
+        # Check for obvious corruption indicators
+        corruption_indicators = [
+            'REPLACE',
+            'SEARCH',
+            '=======',
+            '>>>>>>>',
+            '+++++++',
+            '-------',
+        ]
+        
+        for indicator in corruption_indicators:
+            if indicator in search_text and search_text.strip() == indicator:
+                print(f"⚠️ Search text is just a marker: '{indicator}'")
+                return False
+            if indicator in replace_text and replace_text.strip() == indicator:
+                print(f"⚠️ Replace text is just a marker: '{indicator}'")
+                return False
+        
+        return True

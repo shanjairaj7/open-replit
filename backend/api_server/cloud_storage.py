@@ -262,13 +262,15 @@ class AzureBlobStorage:
             # Set content type based on image format
             content_type = f"image/{image_type}" if image_type != 'jpg' else "image/jpeg"
             
+            from azure.storage.blob import ContentSettings
+            
             blob_client.upload_blob(
                 image_data,
                 overwrite=True,
-                content_settings={
-                    'content_type': content_type,
-                    'cache_control': 'public, max-age=86400'  # Cache for 1 day
-                }
+                content_settings=ContentSettings(
+                    content_type=content_type,
+                    cache_control='public, max-age=86400'  # Cache for 1 day
+                )
             )
             
             # Generate public URL

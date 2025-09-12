@@ -297,6 +297,34 @@ class ProjectPoolManager:
         except Exception as e:
             print(f"❌ Error saving project pool: {e}")
 
+    async def _save_pool_to_storage_async(self) -> None:
+        """Save current project pool state to Azure storage (async, non-blocking)"""
+        try:
+            # Create pool data snapshot in current thread
+            with self.lock:
+                pool_data = {
+                    "last_updated": datetime.now().isoformat(),
+                    "pool_size": len(self.pool),
+                    "projects": [project.to_dict() for project in self.pool.values()]
+                }
+
+            # Run Azure upload in thread pool to avoid blocking
+            pool_json = json.dumps(pool_data, indent=2)
+            success = await asyncio.to_thread(
+                self.cloud_storage.upload_file, 
+                "system", 
+                "project_pool.json", 
+                pool_json
+            )
+
+            if success:
+                print(f"💾 Async saved project pool state ({pool_data['pool_size']} projects)")
+            else:
+                print(f"❌ Failed to async save project pool state")
+
+        except Exception as e:
+            print(f"❌ Error async saving project pool: {e}")
+
     def _create_pooled_project(self) -> Optional[PooledProject]:
         """Create a new project with GitHub boilerplates pre-cloned"""
         project_id = self._generate_pooled_project_id()
@@ -370,7 +398,7 @@ class ProjectPoolManager:
             return None
 
     def get_available_project(self, conversation_id: str, user_request: str) -> Optional[str]:
-        """Allocate an available project from the pool"""
+        """Allocate an available project from the pool (with async save)"""
         with self.lock:
             # Find first available project
             for project_id, project in self.pool.items():
@@ -383,8 +411,21 @@ class ProjectPoolManager:
                     print(f"🎯 Allocated pooled project: {project_id} to conversation: {conversation_id}")
                     print(f"📝 User request: {user_request[:50]}...")
 
-                    # Save updated pool state
-                    self._save_pool_to_storage()
+                    # Save updated pool state asynchronously in background (fire-and-forget)
+                    # Create new event loop for thread to run async task
+                    def save_async():
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(self._save_pool_to_storage_async())
+                            loop.close()
+                        except Exception as e:
+                            print(f"⚠️ Async save failed, using sync: {e}")
+                            self._save_pool_to_storage()
+                    
+                    # Run in background thread
+                    save_thread = threading.Thread(target=save_async, daemon=True)
+                    save_thread.start()
 
                     # Background worker runs continuously, no trigger needed
                     return project_id
@@ -401,6 +442,15 @@ class ProjectPoolManager:
                 print(f"🟢 Project {project_id} marked as active")
                 self._save_pool_to_storage()
 
+    async def mark_project_active_async(self, project_id: str) -> None:
+        """Mark allocated project as active (in use) - async, non-blocking"""
+        with self.lock:
+            if project_id in self.pool:
+                self.pool[project_id].status = ProjectStatus.ACTIVE
+                print(f"🟢 Project {project_id} marked as active")
+                # Save asynchronously (fire-and-forget)
+                asyncio.create_task(self._save_pool_to_storage_async())
+
     def archive_project(self, project_id: str) -> None:
         """Archive completed project"""
         with self.lock:
@@ -408,6 +458,15 @@ class ProjectPoolManager:
                 self.pool[project_id].status = ProjectStatus.ARCHIVED
                 print(f"📦 Project {project_id} archived")
                 self._save_pool_to_storage()
+
+    async def archive_project_async(self, project_id: str) -> None:
+        """Archive completed project - async, non-blocking"""
+        with self.lock:
+            if project_id in self.pool:
+                self.pool[project_id].status = ProjectStatus.ARCHIVED
+                print(f"📦 Project {project_id} archived")
+                # Save asynchronously (fire-and-forget)
+                asyncio.create_task(self._save_pool_to_storage_async())
 
     def get_pool_stats(self) -> dict:
         """Get current pool statistics"""
@@ -481,8 +540,16 @@ class ProjectPoolManager:
                 # Clean up old archived projects (keep only last 10)
                 self._cleanup_archived_projects()
 
-                # Save pool state
-                self._save_pool_to_storage()
+                # Save pool state (async to avoid blocking)
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self._save_pool_to_storage_async())
+                    loop.close()
+                except Exception as e:
+                    print(f"⚠️ Async pool save failed in background worker: {e}")
+                    # Fallback to sync save
+                    self._save_pool_to_storage()
 
                 # Wait for next maintenance cycle
                 time.sleep(self.maintenance_interval)

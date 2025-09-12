@@ -724,6 +724,25 @@ Please use the correct action tags to perform actions based on your plan and the
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for run_command")
                             break
+                        elif action_type == 'add_starter_kit':
+                            # Check raw_attrs for the actual values
+                            raw_attrs = action.get('raw_attrs', {})
+                            kit_name = raw_attrs.get('kit') or action.get('kit')
+                            target = raw_attrs.get('target') or action.get('target')
+                            print(f"\n🚨 CODER: INTERRUPT - Detected add_starter_kit action: {kit_name} to {target}")
+
+                            # Emit streaming event for add_starter_kit action
+                            _emit_stream("action_start", f"Adding starter kit: {kit_name}", {
+                                "action_type": "add_starter_kit",
+                                "kit_name": kit_name,
+                                "target": target,
+                                "action_details": action
+                            })
+
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for add_starter_kit")
+                            break
                         elif action_type == 'update_file':
                             file_path = action.get('path') or action.get('filePath')
                             print(f"📝 CODER: Found update_file action for: {file_path}")
@@ -893,6 +912,21 @@ Please use the correct action tags to perform actions based on your plan and the
                             should_interrupt = True
                             interrupt_action = action
                             print("⚡ CODER: Breaking from action loop for list_files")
+                            break
+                        elif action_type == 'parallel':
+                            actions_list = action.get('actions', [])
+                            print(f"\n🚨 CODER: INTERRUPT - Detected parallel action with {len(actions_list)} sub-actions")
+
+                            # Emit streaming event for parallel action
+                            _emit_stream("action_start", f"Executing parallel actions: {len(actions_list)} sub-actions", {
+                                "action_type": "parallel",
+                                "sub_actions_count": len(actions_list),
+                                "action_details": action
+                            })
+
+                            should_interrupt = True
+                            interrupt_action = action
+                            print("⚡ CODER: Breaking from action loop for parallel")
                             break
                         elif action_type.startswith('todo_'):
                             print(f"\n📋 CODER: Processing todo action inline: {action_type}")
@@ -1117,8 +1151,9 @@ Please use the correct action tags to perform actions based on your plan and the
                 else:
                     # Create token tracker if it doesn't exist
                     api_key = getattr(self.client, 'api_key', None)
+                    project_id = getattr(self, 'project_id', None)
                     if api_key:
-                        self._token_tracker = OpenRouterTokenTracker(api_key)
+                        self._token_tracker = OpenRouterTokenTracker(api_key, project_id)
                         self._token_tracker.load_token_usage(self.token_usage)
                         
                         # Run token usage query in background thread but ensure state gets updated
@@ -1463,6 +1498,159 @@ Please continue with your next steps..
                         continue
                     else:
                         print(f"❌ Failed to run command {interrupt_action.get('command')}, stopping generation")
+                        
+                        # Checkpoint: End interrupt handling (failed case)
+                        last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_FAILED", iteration_start_time, last_checkpoint)
+                        
+                        break
+                elif interrupt_action.get('type') == 'add_starter_kit':
+                    # Check raw_attrs for the actual values
+                    raw_attrs = interrupt_action.get('raw_attrs', {})
+                    kit_name = raw_attrs.get('kit') or interrupt_action.get('kit')
+                    target = raw_attrs.get('target') or interrupt_action.get('target')
+                    print(f"🛠️ CODER: Handling add_starter_kit interrupt for: {kit_name} to {target}")
+                    
+                    result = self._handle_add_starter_kit_interrupt(interrupt_action)
+                    if result.get('success'):
+                        print(f"✅ CODER: Successfully added starter kit: {kit_name}")
+                        
+                        # Emit streaming event for successful add_starter_kit result
+                        _emit_stream("action_result", f"Added starter kit: {kit_name}", {
+                            "action_type": "add_starter_kit",
+                            "kit_name": kit_name,
+                            "target": target,
+                            "status": "success",
+                            "result": result
+                        })
+                        
+                        # Add the starter kit result to messages and conversation history
+                        assistant_msg = {"role": "assistant", "content": accumulated_content}
+                        
+                        next_steps_text = ""
+                        if result.get('next_steps'):
+                            next_steps_text = "\n\n**Next Steps:**\n" + "\n".join([f"- {step}" for step in result.get('next_steps')])
+                        
+                        # Create kit-specific guidance
+                        kit_guidance = ""
+                        if kit_name and "stripe" in kit_name.lower():
+                            kit_guidance = f"""
+
+# 🚀 **STRIPE INTEGRATION GUIDE**
+
+## **IMMEDIATE SETUP REQUIRED:**
+
+### **1. Add to requirements.txt:**
+```
+stripe>=10.0.0
+```
+
+### **2. Add to FastAPI app.py (3 lines):**
+```python
+# Add to initialization section:
+def initialize_stripe():
+    from stripe_kit.setup import setup_stripe_kit
+    from json_db import db
+    success = setup_stripe_kit(app, db)
+    if success:
+        print("✅ Stripe Kit initialized successfully")
+
+# Call during startup:
+initialize_stripe()
+```
+
+## **CUSTOMIZATION STEPS:**
+
+### **A. Define Custom Products/Plans:**
+```python
+products = [
+    {{"name": "Basic Plan", "price_cents": 999}},      # $9.99/month
+    {{"name": "Pro Plan", "price_cents": 1999}},       # $19.99/month  
+    {{"name": "Enterprise Plan", "price_cents": 2999}} # $29.99/month
+]
+
+setup_stripe_kit(app, db, products=products)
+```
+
+### **B. Frontend Integration:**
+```javascript
+// Create payment link and redirect to Stripe
+const response = await axios.post("/stripe/create-payment-link", {{
+  user_email: "user@example.com",
+}});
+window.location.href = response.data.payment_link_url;
+```
+
+### **C. Add Subscription-Protected Routes:**
+```python
+@router.post("/premium-feature")
+def premium_feature(request: Request):
+    # Check if user has active subscription
+    subscription = db.find_one("user_subscriptions", 
+                              user_email=user_email, 
+                              status="active")
+    if not subscription:
+        raise HTTPException(403, "Premium subscription required")
+```
+
+## **AUTO-GENERATED ENDPOINTS:**
+- `POST /stripe/create-payment-link` - Create payment link
+- `GET /stripe/subscription-status/{{email}}` - Check subscription  
+- `POST /stripe/webhook` - Handle Stripe events
+
+## **DATABASE TABLES CREATED:**
+- `stripe_products` - Product/price information
+- `user_subscriptions` - User subscription data  
+- `stripe_webhooks` - Webhook endpoint data
+
+💡 **The kit provides complete Stripe subscription system with minimal integration effort!**
+
+---
+"""
+                        
+                        user_msg = {
+                            "role": "user", "content": f"""
+✅ **Starter Kit Added Successfully!**
+
+**Kit:** {kit_name}
+**Target:** {target}
+**Location:** {result.get('target')}/{result.get('folder_name')}
+**Files Added:** {result.get('copied_files')} files copied{next_steps_text}{kit_guidance}
+
+🔥 **IMPORTANT NEXT STEP:** You should now read the README.md file in the {result.get('folder_name')} folder to understand how to customize and implement {kit_name} for this app. The README contains detailed setup instructions, configuration options, and implementation examples.
+🔥 Important: Make sure to deploy the backend before asking the user to add the keys in the dashboard.
+
+Use: `<action type="read_file" path="backend/stripe_kit/README.md"/>` to read the setup instructions.
+
+
+Please continue with your next steps...
+                            """
+                        }
+                        
+                        messages.append(assistant_msg)
+                        full_user_msg += f"""
+<action_result type="add_starter_kit" kit="{kit_name}" target="{target}">
+Starter kit '{kit_name}' successfully added to {target}.
+Files copied: {result.get('copied_files')}
+Location: {result.get('target')}/{result.get('folder_name')}
+</action_result>
+"""
+                        
+                        # Also add to conversation history for persistence
+                        self.conversation_history.append(assistant_msg)
+                        self._save_conversation_background()
+                        
+                        # Add todo and service context before continuing
+                        full_user_msg = _add_context_to_message(self, full_user_msg)
+                        
+                        # Accumulated messages will be added at the start of next iteration
+                        print(f"💾 CODER: Accumulated {len(full_user_msg)} chars of context for next iteration")
+                        
+                        # Checkpoint: End interrupt handling
+                        last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_COMPLETE", iteration_start_time, last_checkpoint)
+                        
+                        continue
+                    else:
+                        print(f"❌ Failed to add starter kit {kit_name}: {result.get('error')}")
                         
                         # Checkpoint: End interrupt handling (failed case)
                         last_checkpoint = _timing_checkpoint("INTERRUPT_HANDLING_FAILED", iteration_start_time, last_checkpoint)
@@ -2315,54 +2503,99 @@ Error with docs operation: {error_msg}
 """
                     continue
 
-                elif interrupt_action.get('type') == 'attempt_completion':
-                    # Handle attempt completion action - CHECK TODOS FIRST BEFORE ENDING
-                    print(f"🎯 CODER: Processing attempt_completion interrupt - CHECKING TODOS FIRST")
+                elif interrupt_action.get('type') == 'parallel':
+                    print(f"🔄 CODER: Handling parallel interrupt")
+                    parallel_result = self._handle_parallel_interrupt(interrupt_action)
+                    if parallel_result and parallel_result.get('status') == 'success':
+                        actions_count = parallel_result.get('actions_count', 0)
+                        results_count = len(parallel_result.get('results', []))
+                        print(f"✅ CODER: Parallel execution completed: {results_count}/{actions_count} actions successful")
 
-                    # Check if there are incomplete todos
-                    if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
-                        print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
+                        # Format the parallel results
+                        results = parallel_result.get('results', [])
+                        result_msg = f"Parallel execution completed ({results_count}/{actions_count} actions):\n\n"
 
-                        # Get detailed todo message
-                        incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                        for i, result in enumerate(results, 1):
+                            action_type = result.get('action_type', 'unknown')
+                            status = result.get('status', 'unknown')
+                            summary = result.get('summary', 'No summary available')
+                            result_msg += f"{i}. **{action_type}** - {status.upper()}\n   {summary}\n"
 
-                        # Add the incomplete todos warning to conversation history
-                        assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        self.conversation_history.append(assistant_msg)
-                        self._save_conversation_background()  # Save async
+                            # Include actual results for each action (only read_file and run_command supported in parallel)
+                            if action_type == 'read_file' and result.get('content'):
+                                file_path = result.get('file_path', 'unknown')
+                                content = result.get('content', '')
+                                result_msg += f"   📄 **File Content ({file_path}):**\n   ```\n   {content}\n   ```\n"
+                            elif action_type == 'run_command' and result.get('output'):
+                                command = result.get('command', 'unknown')
+                                output = result.get('output', '')
+                                result_msg += f"   💻 **Command Output ({command}):**\n   ```\n   {output}\n   ```\n"
 
-                        # Continue the conversation instead of ending
+                            result_msg += "\n"
+
+                        # Emit action_result for parallel execution
+                        _emit_stream("action_result", f"Parallel execution completed: {results_count}/{actions_count} actions", {
+                            "action_type": "parallel",
+                            "status": "success",
+                            "actions_count": actions_count,
+                            "results_count": results_count,
+                            "results": results
+                        })
+
                         full_user_msg += f"""
-<action_result type="attempt_completion_blocked">
-{incomplete_message}
+<action_result type="parallel">
+{result_msg}
 </action_result>
 """
-
-                        # Add todo and service context before continuing
-                        full_user_msg = _add_context_to_message(self, full_user_msg)
-
-                        messages.append(assistant_msg)
-                        print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
-                        continue
                     else:
-                        # No incomplete todos - proceed with completion
-                        print(f"✅ CODER: No incomplete todos found - PROCEEDING WITH TERMINATION")
+                        error_msg = parallel_result.get('message', 'Unknown error') if parallel_result else 'No result returned'
+                        print(f"❌ CODER: Failed parallel execution: {error_msg}")
+                        full_user_msg += f"""
+<action_result type="parallel" status="error">
+Error with parallel execution: {error_msg}
+</action_result>
+"""
+                    continue
 
-                        completion_result = self._handle_attempt_completion_interrupt(interrupt_action, accumulated_content)
+                elif interrupt_action.get('type') == 'attempt_completion':
+                    # Handle attempt completion action - ALLOW COMPLETION REGARDLESS OF TODOS
+                    print(f"🎯 CODER: Processing attempt_completion interrupt - ALLOWING COMPLETION")
 
-                        # Add the completion message to conversation history
-                        assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        self.conversation_history.append(assistant_msg)
-                        self._save_conversation_background()  # Save async
+                    # COMMENTED OUT: Todo completion check - allows completion even with pending todos
+                    # if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
+                    #     print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
+                    #     incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                    #     assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    #     self.conversation_history.append(assistant_msg)
+                    #     self._save_conversation_background()
+                    #     full_user_msg += f"""
+                    # <action_result type="attempt_completion_blocked">
+                    # {incomplete_message}
+                    # </action_result>
+                    # """
+                    #     full_user_msg = _add_context_to_message(self, full_user_msg)
+                    #     messages.append(assistant_msg)
+                    #     print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
+                    #     continue
 
-                        # Session will end after this return - completion message already handled in streaming buffer
+                    # Always proceed with completion
+                    print(f"✅ CODER: PROCEEDING WITH TERMINATION")
 
-                        print(f"🏁 CODER: Session TERMINATED by attempt_completion action")
-                        print(f"📝 CODER: Final response length: {len(full_response + accumulated_content)} chars")
-                        print(f"🔚 CODER: Ending iteration loop at iteration {iteration}")
+                    completion_result = self._handle_attempt_completion_interrupt(interrupt_action, accumulated_content)
 
-                        # IMMEDIATELY RETURN AND END THE ENTIRE CODER FUNCTION
-                        return full_response + accumulated_content
+                    # Add the completion message to conversation history
+                    assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    self.conversation_history.append(assistant_msg)
+                    self._save_conversation_background()  # Save async
+
+                    # Session will end after this return - completion message already handled in streaming buffer
+
+                    print(f"🏁 CODER: Session TERMINATED by attempt_completion action")
+                    print(f"📝 CODER: Final response length: {len(full_response + accumulated_content)} chars")
+                    print(f"🔚 CODER: Ending iteration loop at iteration {iteration}")
+
+                    # IMMEDIATELY RETURN AND END THE ENTIRE CODER FUNCTION
+                    return full_response + accumulated_content
             else:
                  # No interruption, process any remaining actions and finish
                 print("🎬 CODER: No interrupt detected, processing remaining actions...")
@@ -2410,51 +2643,42 @@ Error with docs operation: {error_msg}
                                 break
 
                 if attempt_completion_detected:
-                    print("🎯 CODER: attempt_completion detected in content - CHECKING TODOS FIRST")
+                    print("🎯 CODER: attempt_completion detected in content - ALLOWING COMPLETION")
 
-                    # Check if there are incomplete todos
-                    if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
-                        print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
+                    # COMMENTED OUT: Todo completion check - allows completion even with pending todos
+                    # if hasattr(self, '_has_incomplete_todos') and self._has_incomplete_todos():
+                    #     print(f"🚨 CODER: INCOMPLETE TODOS FOUND - BLOCKING COMPLETION")
+                    #     incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                    #     assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    #     self.conversation_history.append(assistant_msg)
+                    #     self._save_conversation_background()
+                    #     full_user_msg += f"""
+                    # <action_result type="attempt_completion_blocked">
+                    # {incomplete_message}
+                    # </action_result>
+                    # """
+                    #     full_user_msg = _add_context_to_message(self, full_user_msg)
+                    #     messages.append(assistant_msg)
+                    #     print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
+                    #     continue
 
-                        # Get detailed todo message
-                        incomplete_message = self._get_incomplete_todos_message() if hasattr(self, '_get_incomplete_todos_message') else "There are still incomplete todos that need to be finished."
+                    # Always proceed with completion
+                    print("✅ CODER: ENDING SESSION IMMEDIATELY")
+                    print("🏁 CODER: Session terminated by attempt_completion action")
 
-                        # Add the incomplete todos warning to conversation history
-                        assistant_msg = {"role": "assistant", "content": accumulated_content}
-                        self.conversation_history.append(assistant_msg)
-                        self._save_conversation_background()  # Save async
+                    # If we extracted a specific completion message, add it to the response
+                    if detected_completion_message:
+                        print(f"📝 CODER: Including extracted completion message in final response")
+                        # Remove any remaining XML tags
+                        detected_completion_message = re.sub(r'<[^>]+>', '', detected_completion_message)
 
-                        # Continue the conversation instead of ending
-                        full_user_msg += f"""
-<action_result type="attempt_completion_blocked">
-{incomplete_message}
-</action_result>
-"""
+                        # Ensure the completion message is visible in the response
+                        final_response = full_response + accumulated_content
+                        if detected_completion_message not in final_response:
+                            final_response += f"\n\n{detected_completion_message}"
+                        return final_response
 
-                        # Add todo and service context before continuing
-                        full_user_msg = _add_context_to_message(self, full_user_msg)
-
-                        messages.append(assistant_msg)
-                        print(f"💾 CODER: Blocked completion - continuing iteration with {len(full_user_msg)} chars")
-                        continue
-                    else:
-                        # No incomplete todos - proceed with completion
-                        print("✅ CODER: No incomplete todos found - ENDING SESSION IMMEDIATELY")
-                        print("🏁 CODER: Session terminated by attempt_completion action")
-
-                        # If we extracted a specific completion message, add it to the response
-                        if detected_completion_message:
-                            print(f"📝 CODER: Including extracted completion message in final response")
-                            # Remove any remaining XML tags
-                            detected_completion_message = re.sub(r'<[^>]+>', '', detected_completion_message)
-
-                            # Ensure the completion message is visible in the response
-                            final_response = full_response + accumulated_content
-                            if detected_completion_message not in final_response:
-                                final_response += f"\n\n{detected_completion_message}"
-                            return final_response
-
-                        return full_response + accumulated_content
+                    return full_response + accumulated_content
 
                 self._process_remaining_actions(accumulated_content)
 
@@ -2997,8 +3221,8 @@ def _detect_invalid_xml_tags(content):
 
     # Valid action tag patterns that we expect
     valid_action_patterns = [
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list|integration_docs|web_search|list_files)"[^>]*>',
-        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list|integration_docs|web_search|list_files)"[^>]*/?>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list|integration_docs|web_search|list_files|parallel|add_starter_kit)"[^>]*>',
+        r'<action\s+type="(read_file|file|update_file|rename_file|delete_file|run_command|start_backend|start_frontend|restart_backend|restart_frontend|check_errors|check_logs|check_network|todo_create|todo_update|todo_complete|todo_list|integration_docs|web_search|list_files|parallel|add_starter_kit)"[^>]*/?>',
         r'<artifact\s+[^>]*>',
         r'<thinking>'
     ]
