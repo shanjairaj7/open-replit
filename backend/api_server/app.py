@@ -3255,5 +3255,9 @@ if __name__ == "__main__":
     app = create_app()
     uvicorn.run(app, host="0.0.0.0", port=8084)
 
-# For Azure deployment
+# For Railway deployment
 app = create_app()
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}

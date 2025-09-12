@@ -419,10 +419,13 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             # GPT-5 only supports temperature=1, other models can use 0.1
             temperature = 1.0 if "gpt-5" in self.model.lower() else 0.1
             
+            # Get messages that will be sent to the model
+            input_messages = self._get_filtered_conversation_history()
+            
             completion_params = {
                 "model": self.model,
-                "messages": self._get_filtered_conversation_history(),
-                "temperature": temperature,
+                "messages": input_messages,
+                # "temperature": temperature,
                 "stream": True,
                 "stream_options": {"include_usage": True}
             }
@@ -432,6 +435,10 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
                 completion_params["max_completion_tokens"] = 16000
             else:
                 completion_params["max_tokens"] = 16000
+
+            # Track input tokens before API call (for manual tracking when Azure usage unavailable)
+            print(f"📤 Sending {len(input_messages)} messages to model for token estimation...")
+            self._update_manual_token_usage(input_messages=input_messages)
 
             # Checkpoint: Parameters ready, making API call
             last_checkpoint = _timing_checkpoint("API_CALL_START", iteration_start_time, last_checkpoint)
@@ -1803,6 +1810,20 @@ File '{file_path}' has been deleted successfully.
                         full_user_msg += f"""
 <action_result type=\"start_backend\">
 Backend service started successfully on port {backend_result.get('backend_port')}. API available at {backend_result.get('backend_url')}.
+
+- This backend url will be available in the frontend as VITE_APP_BACKEND_URL when making api calls
+- Use the existing api.ts file which is already a axios instance with authorisation setup. So make sure to use that when making API calls always. Do not write custom axios code in each file to call apis. Always use the `api.ts`
+
+**Example:**
+```typescript
+import api from '@/lib/api'
+
+// Use api.get(), api.post(), api.put(), api.delete() instead of axios directly
+const response = await api.get('/api/users')
+const newUser = await api.post('/api/users', userData)
+```
+
+- Always check the .env file, and `ls` commands to view the existing files that can be utilized, rather than creating new files.
 </action_result>
 """
                         messages.append(assistant_msg)
@@ -1911,6 +1932,20 @@ Please fix the issues and try starting the frontend again.
                         full_user_msg += f"""
 <action_result type=\"restart_backend\">
 Backend service restarted successfully on port {backend_result.get('backend_port')}. API available at {backend_result.get('backend_url')}.
+
+- This backend url will be available in the frontend as VITE_APP_BACKEND_URL when making api calls
+- Use the existing api.ts file which is already a axios instance with authorisation setup. So make sure to use that when making API calls always. Do not write custom axios code in each file to call apis. Always use the `api.ts`
+
+**Example:**
+```typescript
+import api from '@/lib/api'
+
+// Use api.get(), api.post(), api.put(), api.delete() instead of axios directly
+const response = await api.get('/api/users')
+const newUser = await api.post('/api/users', userData)
+```
+
+- Always check the .env file, and `ls` commands to view the existing files that can be utilized, rather than creating new files.
 </action_result>
 """
 
@@ -2585,6 +2620,11 @@ Error with parallel execution: {error_msg}
 
                     # Add the completion message to conversation history
                     assistant_msg = {"role": "assistant", "content": accumulated_content}
+                    
+                    # Track output tokens for this assistant response
+                    print(f"📊 Tracking output tokens for assistant response ({len(accumulated_content)} chars)...")
+                    self._update_manual_token_usage(output_message=accumulated_content)
+                    
                     self.conversation_history.append(assistant_msg)
                     self._save_conversation_background()  # Save async
 
@@ -3001,6 +3041,12 @@ Note: No todos have been created yet. Please plan and create todos to then follo
 - As you work on each todo, update the todo status to in_progress
 - Once you have completed a todo, update the todo status to completed
 </todo_status>
+
+
+## Use this exact pattern to create todos
+- `<action type="todo_create" id="task_id" priority="high|medium|low">task description</action>` - Create todo
+- `<action type="todo_update" id="task_id" status="in_progress|completed"/>` - Update todo status
+
 """
         else:
             full_user_msg += f"""
@@ -3014,6 +3060,11 @@ Note: Continue with the highest priority todo.
 - Once you have completed a todo, update the todo status to completed.
 - If you are not sure what to do next, check the todo status and pick the highest priority todo.
 </todo_status>
+
+## Use this exact pattern to create todos
+- `<action type="todo_create" id="task_id" priority="high|medium|low">task description</action>` - Create todo
+- `<action type="todo_update" id="task_id" status="in_progress|completed"/>` - Update todo status
+
 """
     else:
         print("✅ CODER: No todo status found")

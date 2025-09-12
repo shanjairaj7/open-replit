@@ -25,17 +25,19 @@ from datetime import datetime
 from pathlib import Path
 from cloud_storage import AzureBlobStorage
 from vm_api import vm_api
+from tools.package_manager import PackageManager
 import sys
 
 # Removed enhance_user_message import - using raw user messages now
 from utils.token_tracking import OpenRouterTokenTracker, create_token_tracker
+from utils.tokenizer import get_tokenizer, count_messages_tokens
 
 # Add the parent directory to sys.path to enable imports
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
 # from groq import Groq  # Removed - not using Groq anymore
-from typing import Generator, Dict, Optional
+from typing import Generator, Dict, Optional, List
 from shared_models import GroqAgentState, StreamingXMLParser
 from openai import OpenAI, AzureOpenAI
 
@@ -78,7 +80,7 @@ openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.envir
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"
 
-from prompts import gemini_prompt, gpt_prompt, fundamental_prompt, simpler_prompt, gpt5_prompt
+from prompts import simpler_prompt
 
 # Custom exception for frontend command interrupts
 class FrontendCommandInterrupt(Exception):
@@ -146,6 +148,9 @@ class BoilerplatePersistentGroq:
         self.cloud_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cloud-ops")
         self.cloud_tasks_active = 0
         self._cloud_lock = threading.Lock()
+        
+        # Initialize dedicated executor for model operations to prevent server blocking
+        self.model_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="model-ops")
 
         # Configure client and model based on mode
         if USE_AZURE_MODE:
@@ -195,6 +200,13 @@ class BoilerplatePersistentGroq:
 
         # Keep backward compatibility with existing token_usage references
         self.token_usage = self._token_tracker.get_token_usage()
+        
+        # Initialize tokenizer for manual token estimation
+        model_for_tokenizer = self.model if hasattr(self, 'model') else "gpt-4"
+        self.tokenizer = get_tokenizer(model_for_tokenizer)
+        
+        # Initialize message count tracking for automatic token counting
+        self._last_tracked_message_count = 0
 
         # Paths (for local boilerplate reference)
         print("🐛 DEBUG: Setting up paths")
@@ -292,6 +304,7 @@ class BoilerplatePersistentGroq:
     def _load_system_prompt(self) -> str:
         """Load system prompt from file with project context"""
 
+        # base_prompt = grok_system_prompt.prompt
         base_prompt = simpler_prompt.prompt
 
         # any additions to system prompt based on project context, can be added here
@@ -338,9 +351,13 @@ class BoilerplatePersistentGroq:
         if conversation_loaded:
             print(f"✅ Conversation history loaded successfully: {len(self.conversation_history)} messages")
             print(f"📚 Read files tracker: {len(self.read_files_persistent)} files previously read")
+            
+            # Update message count tracking after loading conversation
+            self._last_tracked_message_count = len(self.conversation_history)
         else:
             print(f"⚠️ No conversation history found in cloud or local storage - starting fresh")
             self.conversation_history = []  # Ensure it's initialized
+            self._last_tracked_message_count = 0
 
     def _save_conversation_history(self):
         """Save current conversation history to JSON file"""
@@ -458,6 +475,79 @@ class BoilerplatePersistentGroq:
             self._reset_token_tracking_after_summary()
         else:
             print(f"❌ Failed to generate conversation summary")
+
+    def _update_manual_token_usage(self, input_messages: List = None, output_message: str = None):
+        """
+        Manually update token usage when Azure usage is not available
+        
+        Args:
+            input_messages: List of messages sent to model (for input tokens) 
+                          - These are the TOTAL messages sent (including history)
+            output_message: Assistant response message (for output tokens only)
+        """
+        if not hasattr(self, 'tokenizer'):
+            print("⚠️ Tokenizer not initialized, skipping manual token tracking")
+            return
+        
+        input_tokens = 0
+        output_tokens = 0
+        
+        # Calculate input tokens (all messages sent to model)
+        if input_messages:
+            input_tokens = count_messages_tokens(input_messages, self.tokenizer.model_name)
+            print(f"📊 Estimated input tokens (total conversation): {input_tokens:,}")
+        
+        # Calculate output tokens (only new assistant response)
+        if output_message:
+            output_tokens = self.tokenizer.count_text_tokens(output_message)
+            print(f"📊 Estimated output tokens (new response): {output_tokens:,}")
+        
+        # For cumulative tracking, we need to add only the NEW tokens
+        # Input tokens: Use the TOTAL input tokens for this API call
+        # Output tokens: Add only the new output tokens
+        
+        # Update token tracker manually
+        if hasattr(self, '_token_tracker') and (input_tokens > 0 or output_tokens > 0):
+            # For input tokens, we track the total conversation size each time
+            # For output tokens, we add only the new response
+            
+            # Get current token usage
+            current_usage = self._token_tracker.get_token_usage()
+            
+            # Calculate incremental tokens
+            # Input tokens represent the FULL conversation sent to model
+            # Output tokens are just the new assistant response
+            
+            # The token tracker expects a single API call usage
+            # But we want cumulative tracking, so we'll simulate it
+            
+            class MockUsage:
+                def __init__(self, prompt_tokens, completion_tokens):
+                    self.prompt_tokens = prompt_tokens
+                    self.completion_tokens = completion_tokens
+                    self.total_tokens = prompt_tokens + completion_tokens
+            
+            class MockResponse:
+                def __init__(self, usage):
+                    self.usage = usage
+            
+            # For proper cumulative tracking:
+            # - Input tokens: represent full conversation cost for this API call  
+            # - Output tokens: just the new response tokens
+            mock_usage = MockUsage(input_tokens if input_tokens > 0 else 0, 
+                                 output_tokens if output_tokens > 0 else 0)
+            mock_response = MockResponse(mock_usage)
+            
+            # Update using existing token tracker logic
+            self._token_tracker.process_usage_from_response(mock_response)
+            self.token_usage = self._token_tracker.get_token_usage()
+            
+            if input_tokens > 0 and output_tokens > 0:
+                print(f"💰 Updated token usage - Input: {input_tokens:,}, Output: {output_tokens:,}, Total: {self.token_usage['total_tokens']:,}")
+            elif input_tokens > 0:
+                print(f"💰 Updated token usage - Input: {input_tokens:,}, Total: {self.token_usage['total_tokens']:,}")  
+            elif output_tokens > 0:
+                print(f"💰 Updated token usage - Output: {output_tokens:,}, Total: {self.token_usage['total_tokens']:,}")
 
     def _get_tokens_since_last_summary(self) -> int:
         """Get token count since last VALID summary"""
@@ -693,9 +783,16 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             if message.get('metadata', {}).get('type') == 'session_boundary':
                 continue
 
+            # Handle content that might be a list
+            content = message["content"]
+            if isinstance(content, list):
+                content = '\n'.join(str(item) for item in content)
+            elif not isinstance(content, str):
+                content = str(content)
+                
             clean_message = {
                 "role": message["role"],
-                "content": message["content"]
+                "content": content
             }
             api_compatible_messages.append(clean_message)
 
@@ -711,6 +808,12 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         for i, message in enumerate(messages):
             content = message.get('content', '')
             role = message.get('role', '')
+
+            # Ensure content is a string (handle case where it might be a list)
+            if isinstance(content, list):
+                content = '\n'.join(str(item) for item in content)
+            elif not isinstance(content, str):
+                content = str(content)
 
             # Check if this is a file content response
             if (role == 'user' and
@@ -1674,8 +1777,8 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
             from agent import coder
             return coder(messages=messages, self=self, streaming_callback=streaming_callback)
 
-        # Execute in thread pool to maintain concurrency
-        response_content = await loop.run_in_executor(None, run_coder)
+        # Execute in dedicated model thread pool to prevent server blocking
+        response_content = await loop.run_in_executor(self.model_executor, run_coder)
         return response_content
 
     async def _process_update_request_with_interrupts(self, user_message: str, mode: str = "update", step_info: dict = None, streaming_callback=None):
@@ -2281,6 +2384,40 @@ IMPORTANT: Write this as if explaining the project to a new developer who needs 
         # Validate working_dir if specified
         if working_dir and working_dir not in ['frontend', 'backend']:
             return f"`working_dir` must be 'frontend', 'backend', or null for root. It cannot be {working_dir}."
+
+        # Use PackageManager to extract and handle packages
+        if command:
+            package_manager = PackageManager(self.cloud_storage, self.project_id)
+            package_info = package_manager.extract_packages_from_command(command)
+            
+            if package_info:
+                package_type = package_info['type']
+                packages = package_info['packages']
+                
+                # Log extracted packages with versions
+                package_strs = []
+                for pkg_name, version in packages:
+                    if version:
+                        package_strs.append(f"{pkg_name}{version}")
+                    else:
+                        package_strs.append(pkg_name)
+                
+                print(f"📦 Detected {package_type} packages: {package_strs}")
+                
+                # Asynchronously update dependency files
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        update_result = loop.run_until_complete(
+                            package_manager.update_dependency_files(command, working_dir)
+                        )
+                        if update_result:
+                            print(f"✅ {update_result}")
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    print(f"⚠️ Failed to update dependency files: {e}")
 
         # Unescape JSON in curl commands (LLM often escapes quotes)
         if command and 'curl' in command and '\\"' in command:
@@ -3169,7 +3306,7 @@ If you really want to create an empty file, please confirm by responding with th
             # Deploy backend to Modal.com - Call deployment function directly
             import subprocess
             import asyncio
-            app_name = f"{self.project_id}-backend"
+            app_name = f"{self.project_id}"
             # Import the secret name generator
             from streaming_api import generate_modal_secret_name
             secret_name = generate_modal_secret_name(app_name)
@@ -4311,9 +4448,28 @@ If you really want to create an empty file, please confirm by responding with th
         return future
 
     def _save_conversation_background(self):
-        """Save conversation history in background"""
+        """Save conversation history in background with automatic token tracking"""
         if not self.cloud_storage:
             return
+        
+        # Check if the last message is a new assistant message (for output token tracking)
+        if (self.conversation_history and 
+            len(self.conversation_history) > 0 and
+            self.conversation_history[-1].get('role') == 'assistant' and
+            hasattr(self, '_last_tracked_message_count')):
+            
+            # If we have more messages than before, the last one is new
+            current_message_count = len(self.conversation_history)
+            if current_message_count > getattr(self, '_last_tracked_message_count', 0):
+                last_message = self.conversation_history[-1]
+                assistant_content = last_message.get('content', '')
+                
+                if assistant_content:
+                    print(f"📊 Auto-tracking output tokens for new assistant message ({len(assistant_content)} chars)...")
+                    self._update_manual_token_usage(output_message=assistant_content)
+                
+                # Update the tracked message count
+                self._last_tracked_message_count = current_message_count
 
         return self._run_cloud_operation_background(
             "Save conversation history",
@@ -4340,6 +4496,11 @@ If you really want to create an empty file, please confirm by responding with th
             print(f"🧹 Waiting for {self.cloud_tasks_active} background cloud operations to complete...")
             self.cloud_executor.shutdown(wait=True, timeout=10.0)
             print("✅ Background cloud operations cleaned up")
+            
+        if hasattr(self, 'model_executor'):
+            print("🧹 Shutting down model operations thread pool...")
+            self.model_executor.shutdown(wait=True, timeout=30.0)
+            print("✅ Model operations thread pool cleaned up")
 
 def main():
     """Main function supporting both creation and update modes"""

@@ -773,7 +773,7 @@ Try creating some tasks, then ask the AI: "I'm feeling overwhelmed with my curre
 
 ## Battle tested common mistakes to avoid
 
-{''.join([f'- {error}\n' for error in common_errors])}
+{''.join([f'- {error}' + '\n' for error in common_errors])}
 
 ## Third-Party Integration Capabilities
 

@@ -350,7 +350,7 @@ This gives you a solid foundation to start managing your contacts right away. Wh
 
 ## Battle tested common mistakes to avoid
 
-{''.join([f'- {error}\n' for error in common_errors])}
+{''.join([f'- {error}' + '\n' for error in common_errors])}
 
 # WOW Factor Standards
 

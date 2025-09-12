@@ -149,10 +149,7 @@ def _deploy_to_cloudflare(frontend_path: str, payload: dict, cf_token: str, cf_a
                 with open(env_file_path, 'w') as f:
                     f.write('\n'.join(env_content))
             
-            # Skip local build - let Cloudflare Pages handle it
-            build_dir = deploy_dir
-            deployment_logs.append("📁 Skipping local build - Cloudflare Pages will handle build process")
-            
+            # Set up environment for build process
             deployment_env = os.environ.copy()
             deployment_env.update({
                 'PATH': f"/opt/homebrew/opt/node@20/bin:{os.environ.get('PATH', '')}:/usr/local/bin",
@@ -160,6 +157,46 @@ def _deploy_to_cloudflare(frontend_path: str, payload: dict, cf_token: str, cf_a
                 'CLOUDFLARE_ACCOUNT_ID': cf_account_id,
                 'NODE_ENV': 'production'
             })
+            
+            # Run build process locally
+            deployment_logs.append("🔨 Running npm install...")
+            
+            install_result = subprocess.run(
+                ['npm', 'install', '--include=dev'],
+                cwd=deploy_dir,
+                capture_output=True,
+                text=True,
+                env=deployment_env,
+                timeout=300
+            )
+            
+            if install_result.returncode != 0:
+                deployment_logs.append(f"❌ npm install failed: {install_result.stderr}")
+                raise Exception(f"npm install failed: {install_result.stderr}")
+            
+            deployment_logs.append("✅ npm install completed")
+            deployment_logs.append("🔨 Running npm run build...")
+            
+            build_result = subprocess.run(
+                ['npm', 'run', 'build'],
+                cwd=deploy_dir,
+                capture_output=True,
+                text=True,
+                env=deployment_env,
+                timeout=300
+            )
+            
+            if build_result.returncode != 0:
+                deployment_logs.append(f"❌ Build failed: {build_result.stderr}")
+                deployment_logs.append(f"❌ Build stdout: {build_result.stdout}")
+                raise Exception(f"Build failed: stdout={build_result.stdout}, stderr={build_result.stderr}")
+            
+            deployment_logs.append("✅ Build completed successfully")
+            
+            # Use dist directory for deployment
+            build_dir = os.path.join(deploy_dir, 'dist')
+            if not os.path.exists(build_dir):
+                raise Exception("Build directory 'dist' not found after build")
             
             # Create Cloudflare Pages project first
             deployment_logs.append(f"🏗️ Creating Cloudflare Pages project: {project_name}")

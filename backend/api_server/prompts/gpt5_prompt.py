@@ -617,7 +617,7 @@ What would you like to add next? Email automation, CSV imports, or custom report
 
 ## Battle tested common mistakes to avoid
 
-{''.join([f'- {error}\n' for error in common_errors])}
+{''.join([f'- {error}' + '\n' for error in common_errors])}
 
 ## Third-Party Integration Capabilities
 
