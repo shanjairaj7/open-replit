@@ -1,6 +1,6 @@
-# Core FastAPI (use older stable versions that don't need Rust)
+# Core FastAPI (minimal setup)
 fastapi==0.68.0
-uvicorn[standard]==0.15.0
+uvicorn==0.15.0
 pydantic==1.10.12
 
 # AI and LLM integrations
@@ -9,7 +9,6 @@ tiktoken
 
 # HTTP requests and APIs
 requests
-httpx
 aiohttp
 
 # File handling and utilities
@@ -18,9 +17,6 @@ python-dotenv
 
 # ASGI server for deployment
 gunicorn
-
-# Date and time handling
-python-dateutil
 
 # Cloud storage
 azure-storage-blob
