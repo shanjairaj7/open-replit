@@ -75,7 +75,12 @@ azure_client = AzureOpenAI(
     api_key=subscription_key,
 )
 
-openai_client = OpenAI(base_url='https://openrouter.ai/api/v1', api_key=os.environ.get('OPENAI_KEY', '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'), default_headers={"x-include-usage": 'true'})
+openai_client = OpenAI(
+    base_url='https://openrouter.ai/api/v1', 
+    api_key=os.environ.get('OPENAI_KEY', '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'), 
+    default_headers={"x-include-usage": 'true'},
+    timeout=30.0  # 30 second timeout
+)
 
 # Default to Azure mode in API server (can be overridden with USE_AZURE_MODE=false)
 USE_AZURE_MODE = os.environ.get("USE_AZURE_MODE", "true").lower() == "true"

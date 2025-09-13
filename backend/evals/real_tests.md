@@ -41,3 +41,7 @@ horizon-922-82c0f
 not using VITE_APP_BACKNED_URL
 not importing axios
 not building (can build before ending to make sure)
+
+horizon-082-1f600
+no api connection
+button not wokring only toggling for form

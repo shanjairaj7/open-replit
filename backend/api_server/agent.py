@@ -443,7 +443,29 @@ def coder(messages, self: GroqAgentState, streaming_callback=None):
             # Checkpoint: Parameters ready, making API call
             last_checkpoint = _timing_checkpoint("API_CALL_START", iteration_start_time, last_checkpoint)
             
-            completion = self.client.chat.completions.create(**completion_params)
+            try:
+                completion = self.client.chat.completions.create(**completion_params)
+            except Exception as e:
+                # Check if it's a timeout error
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    print(f"⚠️ CODER: Timeout error detected with model {self.model}: {e}")
+                    print(f"🔄 CODER: Switching to DeepSeek-R1-0528 as fallback")
+                    
+                    # Switch to DeepSeek-R1-0528
+                    self.model = "deepseek/deepseek-r1"
+                    completion_params["model"] = "deepseek/deepseek-r1"
+                    
+                    # Retry with the fallback model
+                    try:
+                        completion = self.client.chat.completions.create(**completion_params)
+                        print(f"✅ CODER: Successfully switched to {self.model}")
+                    except Exception as retry_error:
+                        print(f"❌ CODER: Failed even with fallback model: {retry_error}")
+                        raise retry_error
+                else:
+                    # Not a timeout error, re-raise
+                    print(f"❌ CODER: API call failed: {e}")
+                    raise e
             
             # Checkpoint: API call completed
             last_checkpoint = _timing_checkpoint("API_CALL_COMPLETE", iteration_start_time, last_checkpoint)
