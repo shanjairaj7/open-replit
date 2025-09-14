@@ -1,13 +1,12 @@
 # open-replit - LLM Agent Code Generation System
 
-An open-source AI-powered code generation platform that uses Large Language Models to create, edit, and deploy full-stack applications automatically.
+Open source replit altnernative using LLMs to generate backend and frontend code deploy full-stack applications automatically.
 
 <img width="1009" height="496" alt="image" src="https://github.com/user-attachments/assets/35fa029f-90d5-40b1-bfb8-ea692029baf4" />
 
-
 ## 🏗️ System Architecture
 
-This is a **meta-development platform** - a system that generates other systems. It consists of three main layers:
+It consists of three main layers:
 
 ### 1. **Template Layer** (Boilerplate)
 - Frontend and backend templates that serve as the foundation for generated applications
