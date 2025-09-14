@@ -1,4 +1,4 @@
-# Cloudcode aka Horizon - LLM Agent Code Generation System
+# open-replit - LLM Agent Code Generation System
 
 An open-source AI-powered code generation platform that uses Large Language Models to create, edit, and deploy full-stack applications automatically.
 
