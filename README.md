@@ -1,6 +1,9 @@
-# Bolt.DIY - LLM Agent Code Generation System
+# Cloudcode aka Horizon - LLM Agent Code Generation System
 
 An open-source AI-powered code generation platform that uses Large Language Models to create, edit, and deploy full-stack applications automatically.
+
+<img width="1009" height="496" alt="image" src="https://github.com/user-attachments/assets/35fa029f-90d5-40b1-bfb8-ea692029baf4" />
+
 
 ## 🏗️ System Architecture
 
