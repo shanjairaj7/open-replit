@@ -31,7 +31,11 @@ def deploy_frontend_to_netlify(project_id: str) -> dict:
     print(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Use your Netlify token
-    netlify_token = os.getenv('NETLIFY_AUTH_TOKEN', 'nfp_zSYp8Dy1iDW6b94tLkwajKtcw3vgv47t85be')
+    netlify_token = os.getenv('NETLIFY_AUTH_TOKEN')
+    if not netlify_token:
+        netlify_token = os.getenv('NETLIFY_TOKEN')  # Fallback
+    if not netlify_token:
+        raise Exception("NETLIFY_AUTH_TOKEN or NETLIFY_TOKEN environment variable is required")
     
     env = os.environ.copy()
     env['NETLIFY_AUTH_TOKEN'] = netlify_token

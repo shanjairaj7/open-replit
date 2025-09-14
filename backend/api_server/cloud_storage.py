@@ -25,11 +25,10 @@ class AzureBlobStorage:
     def __init__(self):
         """Initialize Azure Blob Storage client with environment variables"""
         
-        # Hardcoded Azure Storage credentials for testing
-        hardcoded_connection_string = "DefaultEndpointsProtocol=https;EndpointSuffix=core.windows.net;AccountName=functionalaistorage;AccountKey=35N7QOp+WIphG9CD9zdtmd9N15tZRJ7NID4i6CHLxP4a09FTBzU/9hHOrnCjJFWtIj+how8vArIZ+AStLA1RVA==;BlobEndpoint=https://functionalaistorage.blob.core.windows.net/;FileEndpoint=https://functionalaistorage.file.core.windows.net/;QueueEndpoint=https://functionalaistorage.queue.core.windows.net/;TableEndpoint=https://functionalaistorage.table.core.windows.net/"
-        
-        # Try environment variable first, fall back to hardcoded
-        connection_string = os.getenv('AZURE_STORAGE_CONNECTION_STRING', hardcoded_connection_string)
+        # Get Azure Storage connection from environment
+        connection_string = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+        if not connection_string:
+            raise ValueError("AZURE_STORAGE_CONNECTION_STRING environment variable is required")
         
         self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         self.container_name = os.getenv('AZURE_STORAGE_CONTAINER', 'codebase-projects')

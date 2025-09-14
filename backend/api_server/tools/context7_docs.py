@@ -13,7 +13,9 @@ endpoint = "https://rajsu-m9qoo96e-eastus2.services.ai.azure.com"
 model_name = "gpt-5-mini"
 deployment = "gpt-5-mini"
 api_version = "2024-12-01-preview"
-subscription_key = os.environ.get('AZURE_SUBSCRIPTION_KEY', 'FMj8fTNAOYsSv4jMIq7W0CbHATRiQAUa0MQIR6wuqlS8vvaT6ZoSJQQJ99BDACHYHv6XJ3w3AAAAACOGVJL1')
+subscription_key = os.environ.get('AZURE_SUBSCRIPTION_KEY')
+if not subscription_key:
+    raise ValueError("AZURE_SUBSCRIPTION_KEY environment variable is required")
 
 azure_client = AzureOpenAI(
     api_version=api_version,

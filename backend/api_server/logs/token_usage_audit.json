@@ -7148,5 +7148,192 @@
     "session_boundary": null,
     "generation_id": null,
     "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:06:47.270987",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 225561,
+    "total_output_tokens": 2893,
+    "total_tokens": 228454,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:06:54.725377",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 265652,
+    "total_output_tokens": 2893,
+    "total_tokens": 268545,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:07.912179",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 265652,
+    "total_output_tokens": 3470,
+    "total_tokens": 269122,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:17.095336",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 306944,
+    "total_output_tokens": 3470,
+    "total_tokens": 310414,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:34.939767",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 306944,
+    "total_output_tokens": 3566,
+    "total_tokens": 310510,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:42.534106",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 349124,
+    "total_output_tokens": 3566,
+    "total_tokens": 352690,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:51.106038",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 390420,
+    "total_output_tokens": 3719,
+    "total_tokens": 394139,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:07:52.131344",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 390420,
+    "total_output_tokens": 3872,
+    "total_tokens": 394292,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:00.337342",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 433662,
+    "total_output_tokens": 3872,
+    "total_tokens": 437534,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:11.565245",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 433662,
+    "total_output_tokens": 4663,
+    "total_tokens": 438325,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:20.129870",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 478353,
+    "total_output_tokens": 4663,
+    "total_tokens": 483016,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:31.300339",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 478353,
+    "total_output_tokens": 4733,
+    "total_tokens": 483086,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:38.739561",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 524020,
+    "total_output_tokens": 4733,
+    "total_tokens": 528753,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:08:55.557360",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 568678,
+    "total_output_tokens": 5249,
+    "total_tokens": 573927,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:09:43.954445",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 600349,
+    "total_output_tokens": 8299,
+    "total_tokens": 608648,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:09:43.970504",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 0,
+    "total_output_tokens": 12,
+    "total_tokens": 12,
+    "session_boundary": null,
+    "generation_id": null,
+    "done": false
+  },
+  {
+    "timestamp": "2025-09-13T18:09:44.629571",
+    "project_id": "horizon-644-0d957",
+    "session_id": "conv_42f257e02fa1_1757754384_20250913_180223",
+    "total_input_tokens": 0,
+    "total_output_tokens": 12,
+    "total_tokens": 12,
+    "session_boundary": "end",
+    "generation_id": null,
+    "done": true
   }
 ]

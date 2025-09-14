@@ -52,7 +52,9 @@ deepseek_endpoint = "https://rajsu-m9qoo96e-eastus2.services.ai.azure.com"
 deepseek_model_name = "DeepSeek-R1-0528"
 deepseek_api_version = "2024-05-01-preview"
 
-subscription_key = os.environ.get('AZURE_SUBSCRIPTION_KEY', 'FMj8fTNAOYsSv4jMIq7W0CbHATRiQAUa0MQIR6wuqlS8vvaT6ZoSJQQJ99BDACHYHv6XJ3w3AAAAACOGVJL1')
+subscription_key = os.environ.get('AZURE_SUBSCRIPTION_KEY')
+if not subscription_key:
+    raise ValueError("AZURE_SUBSCRIPTION_KEY environment variable is required")
 
 # Default model selection (can be overridden with MODEL_TYPE=deepseek)
 model_type = os.environ.get("MODEL_TYPE", "gpt").lower()
@@ -77,7 +79,7 @@ azure_client = AzureOpenAI(
 
 openai_client = OpenAI(
     base_url='https://openrouter.ai/api/v1', 
-    api_key=os.environ.get('OPENAI_KEY', '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'), 
+    api_key=os.environ.get('OPENAI_KEY'), 
     default_headers={"x-include-usage": 'true'},
     timeout=30.0  # 30 second timeout
 )
@@ -4524,7 +4526,9 @@ def main():
 
     # Check for API key
     print("🐛 DEBUG: Getting API key")
-    api_key = os.getenv("GROQ_API_KEY", "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")
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         print("❌ Error: GROQ_API_KEY environment variable is required")
         return
@@ -4546,7 +4550,7 @@ def main():
 
         # Initialize system for existing project
         system = BoilerplatePersistentGroq(
-            api_key='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',
+            api_key=api_key,
             project_id=args.project_id
         )
 

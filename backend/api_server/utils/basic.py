@@ -17,7 +17,11 @@ async def enhance_user_message(message: str):
         Enhanced message with clearer structure, features, and requirements
     """
     # Use same OpenRouter setup as agent_class.py
-    api_key = os.environ.get('OPENAI_KEY', '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')
+    api_key = os.environ.get('OPENAI_KEY')
+    if not api_key:
+        api_key = os.environ.get('OPENROUTER_API_KEY')
+    if not api_key:
+        raise ValueError("OPENAI_KEY or OPENROUTER_API_KEY environment variable is required")
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,

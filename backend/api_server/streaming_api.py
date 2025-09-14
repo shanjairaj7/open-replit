@@ -765,9 +765,11 @@ def create_app():
 
     def get_api_key() -> str:
         """Get API key from environment"""
-        api_key = os.getenv("GROQ_API_KEY", "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")
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise HTTPException(status_code=500, detail="GROQ_API_KEY environment variable is required")
+            api_key = os.getenv("OPENROUTER_API_KEY")  # Fallback to OpenRouter key
+        if not api_key:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY or OPENROUTER_API_KEY environment variable is required")
         return api_key
 
     def create_stream_chunk(chunk_type: str, data: dict, conversation_id: str, action_id: str = None) -> str:

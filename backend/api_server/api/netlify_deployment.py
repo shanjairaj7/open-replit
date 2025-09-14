@@ -99,7 +99,9 @@ async def update_backend_with_frontend_url(project_id: str, frontend_url: str, s
         raise e
 
 def deploy_frontend_to_netlify(project_id: str, project_name: str = None) -> dict:
-    netlify_token = os.getenv('NETLIFY_TOKEN', 'nfp_zSYp8Dy1iDW6b94tLkwajKtcw3vgv47t85be')
+    netlify_token = os.getenv('NETLIFY_TOKEN')
+    if not netlify_token:
+        raise Exception("NETLIFY_TOKEN environment variable is required")
     
     if not netlify_token:
         return {
